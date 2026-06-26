@@ -1,0 +1,2 @@
+-- Ashide does not restore removed pre-templatable MCP persistence tables.
+-- Keep this file empty to satisfy Diesel migration directory conventions.

@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+#
+# RR-G2: Produce a distributable zip bundle + SHA256SUMS for a built Ashide
+# artifact, landing them in target/release-artifacts.
+#
+# This is a thin post-bundle step: it does NOT build anything. Run
+# `script/bundle` first (which produces the .app/.dmg or CLI binary under
+# target/.../bundle/osx), then invoke this script to wrap the result into a
+# single zip and emit a checksum file consumable by the GitHub Release step
+# (and by users who want to verify integrity).
+#
+# Usage:
+#   script/make_release_artifacts [--source <dir>] [--name <base>]
+#                                 [--artifact app|cli]
+#                                 [--channel <channel>]
+#
+# Defaults:
+#   --source    target/<profile>/bundle/osx   (auto-detected from --channel)
+#   --name      AshideDev | Ashide | ashide-<channel>  (derived from --channel)
+#   --artifact  app
+#   --channel   dev
+#
+# Outputs (in target/release-artifacts/):
+#   <name>.zip           — the distributable bundle
+#   SHA256SUMS           — `<sha256>  <name>.zip` line, appended if exists
+#   SHA256SUMS.sig       — (left to the release signer; not produced here)
+#
+set -euo pipefail
+
+WORKSPACE_ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARTIFACTS_DIR="$WORKSPACE_ROOT_DIR/target/release-artifacts"
+
+ARTIFACT="app"
+CHANNEL="dev"
+SOURCE_DIR=""
+NAME_OVERRIDE=""
+
+while (( "$#" )); do
+  case "$1" in
+    --source)   SOURCE_DIR="$2"; shift 2 ;;
+    --name)     NAME_OVERRIDE="$2"; shift 2 ;;
+    --artifact) ARTIFACT="$2"; shift 2 ;;
+    --channel)  CHANNEL="$2"; shift 2 ;;
+    *) echo "unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+# ── derive defaults from channel/artifact ──────────────────────────────
+case "$CHANNEL" in
+  local)   APP_NAME="AshideLocal" ;;
+  dev)     APP_NAME="AshideDev" ;;
+  preview) APP_NAME="AshidePreview" ;;
+  stable|oss) APP_NAME="Ashide" ;;
+  *) APP_NAME="Ashide" ;;
+esac
+
+if [[ -z "$SOURCE_DIR" ]]; then
+  # Mirror the profile-dir logic in script/macos/bundle.
+  if [[ "$CHANNEL" == "local" || "$CHANNEL" == "dev" ]]; then
+    PROFILE_DIR="release-lto-debug_assertions"
+  else
+    PROFILE_DIR="release-lto"
+  fi
+  SOURCE_DIR="$WORKSPACE_ROOT_DIR/target/$PROFILE_DIR/bundle/osx"
+fi
+
+if [[ -z "$NAME_OVERRIDE" ]]; then
+  if [[ "$ARTIFACT" == "cli" ]]; then
+    NAME="ashide-$CHANNEL"
+  else
+    NAME="$APP_NAME"
+  fi
+else
+  NAME="$NAME_OVERRIDE"
+fi
+
+mkdir -p "$ARTIFACTS_DIR"
+ZIP_PATH="$ARTIFACTS_DIR/$NAME.zip"
+
+if [[ ! -d "$SOURCE_DIR" && ! -f "$SOURCE_DIR" ]]; then
+  echo "error: source '$SOURCE_DIR' does not exist. Run script/bundle first." >&2
+  exit 1
+fi
+
+# ── build the zip ──────────────────────────────────────────────────────
+# For app artifacts: zip the .app bundle (preserve symlinks/permissions).
+# For cli artifacts: zip the binary + resources dir.
+echo "Packaging $NAME.zip from $SOURCE_DIR into $ARTIFACTS_DIR"
+rm -f "$ZIP_PATH"
+
+if [[ "$ARTIFACT" == "app" ]]; then
+  APP_BUNDLE="$SOURCE_DIR/$APP_NAME.app"
+  DMG_FILE="$SOURCE_DIR/$APP_NAME.dmg"
+  if [[ -f "$DMG_FILE" ]]; then
+    # Prefer the DMG when present — it's the canonical macOS distributable.
+    ditto -c -k --keepParent "$DMG_FILE" "$ZIP_PATH"
+  elif [[ -d "$APP_BUNDLE" ]]; then
+    ditto -c -k --keepParent "$APP_BUNDLE" "$ZIP_PATH"
+  else
+    echo "error: no .app or .dmg found under $SOURCE_DIR" >&2
+    exit 1
+  fi
+elif [[ "$ARTIFACT" == "cli" ]]; then
+  BIN_PATH="$SOURCE_DIR/${NAME#ashide-}"
+  # CLI bundle layout: OUT_DIR/<bin> + OUT_DIR/resources
+  if [[ ! -f "$BIN_PATH" ]]; then
+    # Fall back to the plain `ashide` binary name.
+    BIN_PATH="$SOURCE_DIR/ashide"
+  fi
+  if [[ ! -f "$BIN_PATH" ]]; then
+    echo "error: CLI binary not found under $SOURCE_DIR" >&2
+    exit 1
+  fi
+  (cd "$SOURCE_DIR" && ditto -c -k --keepParent "$BIN_PATH" "$ZIP_PATH")
+else
+  echo "error: --artifact must be app or cli" >&2
+  exit 1
+fi
+
+# ── SHA256SUMS ─────────────────────────────────────────────────────────
+# Append a line so multiple platform/channel zips accumulate in one file.
+SUMS_PATH="$ARTIFACTS_DIR/SHA256SUMS"
+ZIP_BASENAME="$(basename "$ZIP_PATH")"
+(
+  cd "$ARTIFACTS_DIR"
+  if [[ -f "$SUMS_PATH" ]]; then
+    # Drop any stale line for this exact basename first (idempotent rebuild).
+    grep -v "  $ZIP_BASENAME\$" "$SUMS_PATH" > "$SUMS_PATH.tmp" || true
+    mv "$SUMS_PATH.tmp" "$SUMS_PATH"
+  fi
+  shasum -a 256 "$ZIP_BASENAME" >> "$SUMS_PATH"
+)
+
+echo "Wrote $ZIP_PATH"
+echo "Updated $SUMS_PATH"

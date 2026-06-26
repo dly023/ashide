@@ -1,0 +1,70 @@
+###############################################################################
+# Package Spec
+###############################################################################
+
+Summary:     Ashide CLI — terminal-native agent IDE companion
+Name:        @@PACKAGE_NAME@@
+Version:     @@VERSION@@
+Release:     @@RELEASE@@
+Vendor:      Ashide Maintainers
+Url:         https://github.com/OpenPawz/ashide
+Packager:    Ashide Maintainers <ashide-maintainers@localhost>
+License:     AGPL-3.0-only AND MIT
+
+
+# The prefix specifies where the majority of the application files are,
+# allowing the package to be relocatable.
+prefix:      /opt
+
+# We're not including debug info, so don't register the build ID with the
+# machine's registry of build IDs.
+%define _build_id_links none
+
+###############################################################################
+# Description
+###############################################################################
+
+%description
+Ashide CLI is the command-line companion for launching and managing
+terminal-native agent workflows.
+
+###############################################################################
+# Build rule - how does the package get built?
+###############################################################################
+%build
+
+# Nothing to do here - the application should have already been built before we
+# attempt to package it.
+
+###############################################################################
+# Install rule - where should the files live, post-install?
+###############################################################################
+%install
+
+# Populate the buildroot directory with the package contents, in the
+# appropriate locations.
+mkdir -p %{buildroot}
+OPT_DIR="@@OPT_DIR@@" @@WORKSPACEROOT@@/script/linux/bundle_install %{buildroot}
+
+# Set up a symlink from the system's bin dir to our installed executable.
+mkdir -p %{buildroot}%{_bindir}
+ln -s @@OPT_DIR@@/@@BINARY_NAME@@ %{buildroot}%{_bindir}/@@BINARY_NAME@@
+
+###############################################################################
+# Files listing - what files will end up in the package?
+###############################################################################
+%files
+
+# Most things go into this directory.
+@@OPT_DIR@@
+
+# We also install a symlink in the system bin directory.
+%{_bindir}/@@BINARY_NAME@@
+
+###############################################################################
+# Post-install rule - what do we need to do on the user's machine to complete
+#                     installation?
+###############################################################################
+%post
+
+exit 0
