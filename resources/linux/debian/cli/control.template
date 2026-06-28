@@ -1,0 +1,11 @@
+Package: @@PACKAGE_NAME@@
+Version: @@VERSION@@
+Section: devel
+Depends: zlib1g
+Priority: optional
+Architecture: @@ARCH@@
+Maintainer: Ashide Maintainers <ashide-maintainers@localhost>
+Homepage: https://github.com/OpenPawz/ashide
+Description: Ashide CLI — terminal-native agent IDE companion
+ Ashide CLI is the command-line companion for launching and managing
+ terminal-native agent workflows.

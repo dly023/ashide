@@ -1,0 +1,899 @@
+//! CLI agent detection and configuration.
+//!
+//! This module provides types for detecting and working with CLI-based AI agents
+//! like Claude Code, Gemini CLI, Codex, Amp, and Droid.
+
+use std::borrow::Cow;
+use std::collections::HashMap;
+#[cfg(unix)]
+use std::collections::HashSet;
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
+
+use ai::skills::SkillProvider;
+use enum_iterator::Sequence;
+use markdown_parser::parse_markdown;
+use pathfinder_color::ColorU;
+use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
+use warp_editor::content::{buffer::Buffer, markdown::MarkdownStyle};
+
+use warpui::{AppContext, Entity, ModelContext, SingletonEntity};
+
+use crate::ai::agent::{AgentReviewCommentBatch, DiffSetHunk};
+use crate::ai::blocklist::CLAUDE_ORANGE;
+use crate::code::editor::line::EditorLineLocation;
+use crate::code_review::comments::AttachedReviewCommentTarget;
+use crate::ui_components::icons::Icon;
+use crate::workspaces::user_workspaces::UserWorkspaces;
+use warp_completer::parsers::simple::top_level_command;
+use warp_util::path::EscapeChar;
+
+/// UID for the Uber team.
+/// See https://warp.metabaseapp.com/dashboard/1454?team_id=46347
+const UBER_TEAM_UID: &str = "BdVbYjy9LRZcZrYBemSfAF";
+
+/// Gemini brand blue color
+pub(crate) const GEMINI_BLUE: ColorU = ColorU {
+    r: 66,
+    g: 133,
+    b: 244,
+    a: 255,
+};
+
+/// OpenAI brand color (dark gray/black)
+const OPENAI_COLOR: ColorU = ColorU {
+    r: 0,
+    g: 0,
+    b: 0,
+    a: 255,
+};
+
+/// Amp brand color (#F34E3F)
+const AMP_COLOR: ColorU = ColorU {
+    r: 243,
+    g: 78,
+    b: 63,
+    a: 255,
+};
+
+/// Droid brand color (white)
+const DROID_COLOR: ColorU = ColorU {
+    r: 255,
+    g: 255,
+    b: 255,
+    a: 255,
+};
+
+/// OpenCode brand color (gray, used for contrast calculation only)
+const OPENCODE_COLOR: ColorU = ColorU {
+    r: 128,
+    g: 128,
+    b: 128,
+    a: 255,
+};
+
+/// Copilot brand color (Copilot purple selected from https://brand.github.com/brand-identity/copilot)
+const COPILOT_COLOR: ColorU = ColorU {
+    r: 133,
+    g: 52,
+    b: 243,
+    a: 255,
+};
+
+/// Pi brand color (white, monochrome logo)
+const PI_COLOR: ColorU = ColorU {
+    r: 255,
+    g: 255,
+    b: 255,
+    a: 255,
+};
+
+/// Auggie brand color (white, monochrome logo)
+const AUGGIE_COLOR: ColorU = ColorU {
+    r: 255,
+    g: 255,
+    b: 255,
+    a: 255,
+};
+
+/// Cursor brand color (#26251E, from official brand assets)
+const CURSOR_COLOR: ColorU = ColorU {
+    r: 38,
+    g: 37,
+    b: 30,
+    a: 255,
+};
+
+/// Antigravity brand color (#7C3AED, purple from official banner accent)
+const ANTIGRAVITY_PURPLE: ColorU = ColorU {
+    r: 0x7C,
+    g: 0x3A,
+    b: 0xED,
+    a: 255,
+};
+
+/// Goose brand color (#101010, from Block's official Goose logo)
+const DEEPSEEK_COLOR: ColorU = ColorU {
+    r: 53,
+    g: 120,
+    b: 229,
+    a: 255,
+};
+
+const GOOSE_COLOR: ColorU = ColorU {
+    r: 16,
+    g: 16,
+    b: 16,
+    a: 255,
+};
+
+/// Represents a CLI agent (e.g., Claude Code, Gemini CLI, Codex, Amp, Droid, OpenCode, Copilot, Pi, Auggie, Cursor, Goose)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Sequence, Serialize, Deserialize)]
+pub enum CLIAgent {
+    Claude,
+    Gemini,
+    Codex,
+    Amp,
+    Droid,
+    OpenCode,
+    Copilot,
+    Pi,
+    Auggie,
+    CursorCli,
+    Goose,
+    DeepSeek,
+    Antigravity,
+    /// Represents an unknown/custom CLI agent matched by user-configured regex patterns.
+    Unknown,
+}
+
+/// Product-level capabilities Ashide can target for a CLI-agent adapter.
+///
+/// These flags describe whether an adapter is meaningful for a given CLI agent,
+/// not whether the adapter has already been wired to a click handler. UI should
+/// still treat capability-backed actions as explicit and adapter-gated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CLIAgentAdapterCapabilities {
+    /// Ashide can discover this agent's existing sessions once an adapter is wired.
+    pub can_list_sessions: bool,
+    /// Ashide can resume a selected session once an adapter is wired.
+    pub can_resume: bool,
+    /// A command-detected terminal can be promoted into an Ashide-managed agent session.
+    pub can_promote_detected_terminal: bool,
+    /// Resume/list semantics can be scoped to an Environment Runtime target.
+    pub can_target_environment_runtime: bool,
+}
+
+impl CLIAgentAdapterCapabilities {
+    const NONE: Self = Self {
+        can_list_sessions: false,
+        can_resume: false,
+        can_promote_detected_terminal: false,
+        can_target_environment_runtime: false,
+    };
+
+    const FIRST_CLASS_AGENT: Self = Self {
+        can_list_sessions: true,
+        can_resume: true,
+        can_promote_detected_terminal: true,
+        can_target_environment_runtime: true,
+    };
+}
+
+fn non_empty_session_id(session_id: &str) -> Option<String> {
+    let session_id = session_id.trim();
+    (!session_id.is_empty()).then(|| session_id.to_owned())
+}
+
+fn is_uuid_like_session_id(session_id: &str) -> bool {
+    if session_id.len() != 36 {
+        return false;
+    }
+    session_id
+        .bytes()
+        .enumerate()
+        .all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
+}
+
+fn codex_resume_session_id(session_id: &str) -> String {
+    let session_id = session_id.trim();
+    if is_uuid_like_session_id(session_id) {
+        return session_id.to_owned();
+    }
+    if session_id.len() >= 36 {
+        let suffix_start = session_id.len() - 36;
+        if session_id.is_char_boundary(suffix_start) {
+            let suffix = &session_id[suffix_start..];
+            if is_uuid_like_session_id(suffix) {
+                return suffix.to_owned();
+            }
+        }
+    }
+    session_id.to_owned()
+}
+
+impl CLIAgent {
+    /// The command prefix used to invoke this CLI agent.
+    pub fn command_prefix(&self) -> &'static str {
+        match self {
+            CLIAgent::Claude => "claude",
+            CLIAgent::Gemini => "gemini",
+            CLIAgent::Codex => "codex",
+            CLIAgent::Amp => "amp",
+            CLIAgent::Droid => "droid",
+            CLIAgent::OpenCode => "opencode",
+            CLIAgent::Copilot => "copilot",
+            CLIAgent::Pi => "pi",
+            CLIAgent::Auggie => "auggie",
+            CLIAgent::CursorCli => "agent",
+            CLIAgent::Goose => "goose",
+            CLIAgent::DeepSeek => "deepseek",
+            CLIAgent::Antigravity => "agy",
+            CLIAgent::Unknown => "",
+        }
+    }
+
+    fn command_prefix_aliases(&self) -> &'static [&'static str] {
+        match self {
+            CLIAgent::DeepSeek => &["deepseek-tui"],
+            _ => &[],
+        }
+    }
+
+    fn matches_command_prefix(&self, command: &str) -> bool {
+        command == self.command_prefix() || self.command_prefix_aliases().contains(&command)
+    }
+
+    /// Resolves a simple persisted command prefix back to a known CLI agent.
+    ///
+    /// This intentionally does not inspect shell aliases or app context. It is for
+    /// metadata that was already captured from a live CLI-agent session snapshot.
+    pub fn from_command_prefix(command_prefix: &str) -> Option<CLIAgent> {
+        let command_prefix = command_prefix.trim();
+        enum_iterator::all::<CLIAgent>()
+            .filter(|agent| !matches!(agent, CLIAgent::Unknown))
+            .find(|agent| agent.matches_command_prefix(command_prefix))
+    }
+
+    /// Returns Ashide's adapter capability target for this agent.
+    ///
+    /// A `true` capability does not execute anything by itself. It only lets UI
+    /// expose an explicit pending action while the concrete adapter remains gated.
+    pub fn explicit_resume_command(
+        &self,
+        session_id: Option<&str>,
+        cwd: Option<&str>,
+    ) -> Option<String> {
+        match self {
+            CLIAgent::Claude => Some(match session_id.filter(|id| !id.trim().is_empty()) {
+                Some(session_id) => format!("claude --resume {}", shell_words::quote(session_id)),
+                None => "claude --continue".to_owned(),
+            }),
+            CLIAgent::Codex => session_id
+                .and_then(non_empty_session_id)
+                .map(|session_id| codex_resume_session_id(&session_id))
+                .map(|session_id| format!("codex resume {}", shell_words::quote(&session_id))),
+            CLIAgent::Antigravity => cwd
+                .filter(|cwd| !cwd.trim().is_empty())
+                .map(|cwd| format!("agy {}", shell_words::quote(cwd))),
+            _ => None,
+        }
+    }
+
+    /// Best-effort parser for explicit CLI resume commands that Ashide itself
+    /// emits or users type manually. This lets command-detected live terminal
+    /// sessions merge with indexed/restored session rows before a structured
+    /// plugin event reports the native session id.
+    pub fn resume_session_id_from_command(&self, command: &str) -> Option<String> {
+        let words = shell_words::split(command).ok()?;
+        let command_index = words
+            .iter()
+            .position(|word| self.matches_command_prefix(word))?;
+        let args = &words[command_index + 1..];
+
+        match self {
+            CLIAgent::Claude => args.iter().enumerate().find_map(|(index, arg)| {
+                if let Some(session_id) = arg.strip_prefix("--resume=") {
+                    return non_empty_session_id(session_id);
+                }
+                if arg == "--resume" {
+                    return args
+                        .get(index + 1)
+                        .and_then(|session_id| non_empty_session_id(session_id));
+                }
+                None
+            }),
+            CLIAgent::Codex => {
+                if args.first().is_some_and(|arg| arg == "resume") {
+                    args.get(1)
+                        .and_then(|session_id| non_empty_session_id(session_id))
+                        .map(|session_id| codex_resume_session_id(&session_id))
+                } else {
+                    None
+                }
+            }
+            CLIAgent::Gemini
+            | CLIAgent::Amp
+            | CLIAgent::Droid
+            | CLIAgent::OpenCode
+            | CLIAgent::Copilot
+            | CLIAgent::Pi
+            | CLIAgent::Auggie
+            | CLIAgent::CursorCli
+            | CLIAgent::Goose
+            | CLIAgent::DeepSeek
+            | CLIAgent::Antigravity
+            | CLIAgent::Unknown => None,
+        }
+    }
+
+    pub fn adapter_capabilities(&self) -> CLIAgentAdapterCapabilities {
+        match self {
+            // Initial Ashide first-class set: the CLIs the product is being shaped around.
+            CLIAgent::Claude | CLIAgent::Codex | CLIAgent::Antigravity => {
+                CLIAgentAdapterCapabilities::FIRST_CLASS_AGENT
+            }
+            // Existing Ashide-detected agents remain visible but should not get Ashide
+            // resume/promote affordances until their adapter contracts are designed.
+            CLIAgent::Gemini
+            | CLIAgent::Amp
+            | CLIAgent::Droid
+            | CLIAgent::OpenCode
+            | CLIAgent::Copilot
+            | CLIAgent::Pi
+            | CLIAgent::Auggie
+            | CLIAgent::CursorCli
+            | CLIAgent::Goose
+            | CLIAgent::DeepSeek
+            | CLIAgent::Unknown => CLIAgentAdapterCapabilities::NONE,
+        }
+    }
+
+    /// Serialized version of the CLIAgent name (e.g. "Claude", "Gemini"). Used for the
+    /// session-sharing protocol's opaque `cli_agent` string field.
+    pub fn to_serialized_name(&self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default()
+    }
+
+    /// Inverse of `to_serialized_name`. Falls back to `Unknown`.
+    pub fn from_serialized_name(name: &str) -> CLIAgent {
+        serde_json::from_value(name.into()).unwrap_or(CLIAgent::Unknown)
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            CLIAgent::Claude => "Claude Code",
+            CLIAgent::Gemini => "Gemini",
+            CLIAgent::Codex => "Codex",
+            CLIAgent::Amp => "Amp",
+            CLIAgent::Droid => "Droid",
+            CLIAgent::OpenCode => "OpenCode",
+            CLIAgent::Copilot => "Copilot",
+            CLIAgent::Pi => "Pi",
+            CLIAgent::Auggie => "Auggie",
+            CLIAgent::CursorCli => "Cursor",
+            CLIAgent::Goose => "Goose",
+            CLIAgent::DeepSeek => "DeepSeek",
+            CLIAgent::Antigravity => "Antigravity",
+            CLIAgent::Unknown => "CLI Agent",
+        }
+    }
+
+    /// Returns the Icon for this CLI agent, or `None` for unknown/custom agents.
+    pub fn icon(&self) -> Option<Icon> {
+        match self {
+            CLIAgent::Claude => Some(Icon::ClaudeLogo),
+            CLIAgent::Gemini => Some(Icon::GeminiLogo),
+            CLIAgent::Codex => Some(Icon::OpenAILogo),
+            CLIAgent::Amp => Some(Icon::AmpLogo),
+            CLIAgent::Droid => Some(Icon::DroidLogo),
+            CLIAgent::OpenCode => Some(Icon::OpenCodeLogo),
+            CLIAgent::Copilot => Some(Icon::CopilotLogo),
+            CLIAgent::Pi => Some(Icon::PiLogo),
+            CLIAgent::Auggie => Some(Icon::AuggieLogo),
+            CLIAgent::CursorCli => Some(Icon::CursorLogo),
+            CLIAgent::Goose => Some(Icon::GooseLogo),
+            CLIAgent::DeepSeek => Some(Icon::DeepSeekLogo),
+            CLIAgent::Antigravity => Some(Icon::AntigravityLogo),
+            CLIAgent::Unknown => None,
+        }
+    }
+
+    /// Returns the skill providers whose skills this CLI agent can natively interpret.
+    /// When the CLI agent rich input is open, only skills from these providers are shown
+    /// in the slash menu. Returns an empty slice for agents with no known skills support.
+    pub fn supported_skill_providers(&self) -> &'static [SkillProvider] {
+        match self {
+            CLIAgent::Claude => &[SkillProvider::Claude],
+            CLIAgent::Codex => &[
+                SkillProvider::Agents,
+                SkillProvider::Claude,
+                SkillProvider::Codex,
+            ],
+            CLIAgent::OpenCode => &[
+                SkillProvider::OpenCode,
+                SkillProvider::Agents,
+                SkillProvider::Claude,
+            ],
+            CLIAgent::Gemini => &[SkillProvider::Agents, SkillProvider::Gemini],
+            CLIAgent::Amp => &[SkillProvider::Agents],
+            CLIAgent::Copilot => &[SkillProvider::Agents, SkillProvider::Copilot],
+            CLIAgent::Droid => &[SkillProvider::Droid, SkillProvider::Agents],
+            CLIAgent::Pi => &[SkillProvider::Agents],
+            CLIAgent::Auggie => &[SkillProvider::Agents],
+            CLIAgent::CursorCli => &[SkillProvider::Agents],
+            CLIAgent::Goose => &[SkillProvider::Agents],
+            CLIAgent::DeepSeek => &[SkillProvider::Agents],
+            CLIAgent::Antigravity => &[SkillProvider::Agents],
+            CLIAgent::Unknown => &[],
+        }
+    }
+
+    /// Returns the prefix character used for skill invocations by this CLI agent.
+    /// Most agents use `/` (e.g. `/skill-name`), but Codex uses `$` (e.g. `$skill-name`).
+    pub fn skill_command_prefix(&self) -> &'static str {
+        match self {
+            CLIAgent::Codex => "$",
+            _ => "/",
+        }
+    }
+
+    /// Whether this CLI agent supports the `!` bash mode prefix in the rich input.
+    /// When `true`, typing `!` in the CLI agent rich input activates shell mode with
+    /// decorations, completions, and error underlining.
+    ///
+    /// TODO(advait): Check whether Gemini, Amp, Droid, and Copilot support `!` bash
+    /// mode and enable them here if so.
+    pub fn supports_bash_mode(&self) -> bool {
+        matches!(
+            self,
+            CLIAgent::Claude | CLIAgent::Codex | CLIAgent::OpenCode | CLIAgent::DeepSeek
+        )
+    }
+
+    /// Returns the brand color for this CLI agent, or `None` for unknown/custom agents.
+    pub fn brand_color(&self) -> Option<ColorU> {
+        match self {
+            CLIAgent::Claude => Some(CLAUDE_ORANGE),
+            CLIAgent::Gemini => Some(GEMINI_BLUE),
+            CLIAgent::Codex => Some(OPENAI_COLOR),
+            CLIAgent::Amp => Some(AMP_COLOR),
+            CLIAgent::Droid => Some(DROID_COLOR),
+            CLIAgent::OpenCode => Some(OPENCODE_COLOR),
+            CLIAgent::Copilot => Some(COPILOT_COLOR),
+            CLIAgent::Pi => Some(PI_COLOR),
+            CLIAgent::Auggie => Some(AUGGIE_COLOR),
+            CLIAgent::CursorCli => Some(CURSOR_COLOR),
+            CLIAgent::Goose => Some(GOOSE_COLOR),
+            CLIAgent::DeepSeek => Some(DEEPSEEK_COLOR),
+            CLIAgent::Antigravity => Some(ANTIGRAVITY_PURPLE),
+            CLIAgent::Unknown => None,
+        }
+    }
+
+    /// Returns the icon color to use when rendered on the brand-colored circle background.
+    /// Agents with light brand colors use a dark icon for contrast.
+    pub fn brand_icon_color(&self) -> ColorU {
+        match self {
+            CLIAgent::Pi | CLIAgent::Auggie | CLIAgent::Droid => ColorU::new(0, 0, 0, 255),
+            _ => ColorU::white(),
+        }
+    }
+
+    /// Extracts the first meaningful command token from a command string.
+    ///
+    /// When `escape_char` is provided, uses shell parsing to skip leading
+    /// env-var assignments (e.g. `FOO=1 claude` → `claude`).
+    /// Otherwise falls back to a simple whitespace split.
+    fn extract_first_command(command: &str, escape_char: Option<EscapeChar>) -> Option<String> {
+        match escape_char {
+            Some(esc) => top_level_command(command, esc),
+            None => command.split_whitespace().next().map(String::from),
+        }
+    }
+
+    /// Detects the CLI agent from a command string.
+    ///
+    /// When `escape_char` is provided, full shell parsing is used to skip leading
+    /// env-var assignments (e.g. `FOO=1 claude`). Otherwise falls back to a simple
+    /// whitespace split.
+    ///
+    /// If `aliases` is provided, the first word of the command will be looked up
+    /// in the alias map. If found, the alias value replaces the first word to
+    /// produce the resolved command used for detection.
+    ///
+    /// Returns `Some(CLIAgent)` if the command matches a known CLI agent, `None` otherwise.
+    pub fn detect(
+        command: &str,
+        escape_char: Option<EscapeChar>,
+        aliases: Option<&HashMap<SmolStr, String>>,
+        ctx: &AppContext,
+    ) -> Option<CLIAgent> {
+        let trimmed = command.trim_start();
+        let first_word = Self::extract_first_command(trimmed, escape_char)?;
+
+        // Resolve the full command through aliases. If the first word matches an
+        // alias, replace it with the alias value to produce the resolved command.
+        let resolved_command: Cow<'_, str> = aliases
+            .and_then(|a| a.get(first_word.as_str()))
+            .map(|alias_value| {
+                let rest = trimmed
+                    .find(first_word.as_str())
+                    .map(|pos| &trimmed[pos + first_word.len()..])
+                    .unwrap_or("");
+                Cow::Owned(format!("{}{}", alias_value.trim(), rest))
+            })
+            .unwrap_or(Cow::Borrowed(trimmed));
+
+        let resolved_first_word = Self::extract_first_command(&resolved_command, escape_char)?;
+
+        // Check if resolved command matches any known CLI agent.
+        // Also matches `aifx agent run claude` as Claude for Uber employees.
+        enum_iterator::all::<CLIAgent>()
+            .filter(|agent| !matches!(agent, CLIAgent::Unknown))
+            .find(|agent| {
+                agent.matches_command_prefix(&resolved_first_word)
+                    || (matches!(agent, CLIAgent::Claude)
+                        && Self::is_aifx_agent_run_claude(&resolved_command, ctx))
+            })
+    }
+
+    /// Returns true if the resolved command is `aifx agent run claude` (Uber's
+    /// internal wrapper around Claude) and the user is on the Uber team.
+    /// We special-case this so Uber employees get the toolbar without needing
+    /// to configure anything.
+    fn is_aifx_agent_run_claude(resolved_command: &str, ctx: &AppContext) -> bool {
+        resolved_command.starts_with("aifx agent run claude")
+            && Self::is_on_uber_team(UserWorkspaces::as_ref(ctx))
+    }
+
+    fn is_on_uber_team(user_workspaces: &UserWorkspaces) -> bool {
+        user_workspaces
+            .workspaces()
+            .iter()
+            .flat_map(|workspace| workspace.teams.iter())
+            .any(|team| team.uid.uid() == UBER_TEAM_UID)
+    }
+}
+
+/// Builds a prompt string from a batch of code review comments suitable for
+/// writing to a CLI agent's PTY.
+///
+/// # Location format
+/// Locations use `L<line>` notation (1-indexed).
+/// Line ranges are written `L<start>-L<end>` where both ends are **inclusive**.
+/// Instructs the agent to run `git diff` for deleted-line context rather than
+/// inlining the full diff.
+pub fn build_review_prompt(review: &AgentReviewCommentBatch) -> String {
+    let mut text = String::from(
+        "Please address the following code review comments. \
+         Run `git diff` (or `git diff HEAD`) to see the full context of any changes, \
+         especially for deleted lines.\n",
+    );
+
+    for comment in &review.comments {
+        if comment.outdated {
+            continue;
+        }
+        let body = export_review_comment_for_cli_prompt(&comment.content);
+        let location = match &comment.target {
+            AttachedReviewCommentTarget::Line {
+                absolute_file_path,
+                line,
+                ..
+            } => {
+                let path = absolute_file_path.display();
+                match line {
+                    EditorLineLocation::Current { line_number, .. } => {
+                        let n = line_number.as_usize() + 1;
+                        format!("{path} L{n}")
+                    }
+                    EditorLineLocation::Removed { line_number, .. } => {
+                        let n = line_number.as_usize() + 1;
+                        format!("{path} (deleted, was L{n} — see `git diff`)")
+                    }
+                    EditorLineLocation::Collapsed { line_range } => {
+                        // line_range is [start, end) 0-indexed; convert to L<start>-L<end>
+                        // where both start and end are 1-indexed inclusive.
+                        let start = line_range.start.as_usize() + 1;
+                        let end = line_range.end.as_usize();
+                        format!("{path} (collapsed hunk, L{start}-L{end} — see `git diff`)")
+                    }
+                }
+            }
+            AttachedReviewCommentTarget::File { absolute_file_path } => {
+                let path = absolute_file_path.display();
+                let abs_str = absolute_file_path.to_string_lossy();
+                let is_deleted = review.diff_set.iter().any(|(file_key, hunks)| {
+                    abs_str.ends_with(file_key.as_str())
+                        && !hunks.is_empty()
+                        && hunks
+                            .iter()
+                            .all(|h| h.lines_added == 0 && h.lines_removed > 0)
+                });
+                if is_deleted {
+                    format!("{path} (deleted file — see `git diff`)")
+                } else {
+                    format!("{path}")
+                }
+            }
+            AttachedReviewCommentTarget::General => "General".to_string(),
+        };
+        text.push_str(&format!("\n- {location}: {body}"));
+    }
+
+    text
+}
+
+fn export_review_comment_for_cli_prompt(comment: &str) -> String {
+    let mut result = parse_markdown(comment)
+        .map(|parsed| {
+            Buffer::export_to_markdown(
+                parsed,
+                None,
+                MarkdownStyle::Export {
+                    app_context: None,
+                    should_not_escape_markdown_punctuation: true,
+                },
+            )
+        })
+        .unwrap_or_else(|_| comment.to_string());
+    result.truncate(result.trim_end().len());
+    result
+}
+
+/// Builds a prompt string for a single diff hunk location suitable for writing
+/// to a CLI agent's PTY. Includes change stats (+N -N) and instructs the agent
+/// to run `git diff` for full context.
+///
+/// # Location format
+/// `<path> L<start>-L<end>` where `start` and `end` are 1-indexed and both
+/// ends are **inclusive**.
+pub fn build_diff_hunk_prompt(
+    file_path: &Path,
+    start_line: usize,
+    end_line: usize,
+    lines_added: u32,
+    lines_removed: u32,
+) -> String {
+    let path = file_path.display();
+    format!(
+        "{path} L{start_line}-L{end_line} (+{lines_added} -{lines_removed}) \
+         -- run `git diff` to see the full context."
+    )
+}
+
+/// Builds a prompt string for a set of diff file context hunks suitable for
+/// writing to a CLI agent's PTY.
+///
+/// # Location format
+/// Each line is `<path> L<start>-L<end> (+N -N)` where `start` and `end` are
+/// 1-indexed and both ends are **inclusive**.
+pub fn build_diff_context_prompt(file_diffs: &HashMap<String, Vec<DiffSetHunk>>) -> String {
+    let mut text = String::new();
+    let mut sorted_keys: Vec<&String> = file_diffs.keys().collect();
+    sorted_keys.sort();
+    for file_key in sorted_keys {
+        let hunks = &file_diffs[file_key];
+        for hunk in hunks {
+            // hunk.line_range is [start, end) 0-indexed; convert to L<start>-L<end>
+            // where both start and end are 1-indexed inclusive.
+            let start = hunk.line_range.start.as_usize() + 1;
+            let end = hunk.line_range.end.as_usize();
+            text.push_str(&format!(
+                "{file_key} L{start}-L{end} (+{} -{})",
+                hunk.lines_added, hunk.lines_removed,
+            ));
+            text.push('\n');
+        }
+    }
+    // Remove trailing newline.
+    text.truncate(text.trim_end().len());
+    text
+}
+
+/// Builds a prompt for a single-line text selection suitable for writing to a CLI agent's PTY.
+/// Prefixes the literal text with its file path and line number for context.
+///
+/// # Format
+/// `<path> L<line>: <text>` where `line` is 1-indexed.
+pub fn build_selection_substring_prompt(file_path: &str, line: usize, text: &str) -> String {
+    format!("{file_path} L{line}: {text}")
+}
+
+/// Builds a prompt for a multi-line selection suitable for writing to a CLI agent's PTY.
+/// For single-line selections, use [`build_selection_substring_prompt`] instead.
+///
+/// # Location format
+/// `<path> L<start>-L<end>` where line numbers are 1-indexed and both ends are inclusive.
+pub fn build_selection_line_range_prompt(
+    file_path: &str,
+    start_line: usize,
+    end_line: usize,
+) -> String {
+    format!("{file_path} L{start_line}-L{end_line}")
+}
+
+// ── CLI Agent 安装状态 singleton model ──
+// 对齐 AntivirusInfo 模式:ctx.spawn 异步扫描 → 回调 emit 事件 → 订阅者自动刷新 UI。
+// 取代旧的全局 static 缓存,既消除全局可变状态,又能在扫描完成后驱动菜单重绘。
+
+/// CLI agent 安装扫描完成事件。
+pub enum CLIAgentInstallEvent {
+    /// 后台扫描完成,安装状态缓存已就绪。
+    #[allow(dead_code)]
+    ScanComplete,
+}
+
+/// Singleton model,跟踪 CLI agent 的安装状态。
+///
+/// 构造时通过 `ctx.spawn` 启动后台 PATH 扫描,扫描完成后 emit
+/// [`CLIAgentInstallEvent::ScanComplete`]。需要查询安装状态的 UI 代码通过
+/// `CLIAgentInstallModel::as_ref(ctx)` 读取。
+pub struct CLIAgentInstallModel {
+    /// None = 扫描尚未完成; Some = 已有结果。
+    cache: Option<HashMap<CLIAgent, bool>>,
+}
+
+impl CLIAgentInstallModel {
+    pub fn new(ctx: &mut ModelContext<Self>) -> Self {
+        ctx.spawn(
+            async move { scan_cli_agent_installations() },
+            Self::on_scan_complete,
+        );
+        Self { cache: None }
+    }
+
+    fn on_scan_complete(&mut self, results: HashMap<CLIAgent, bool>, ctx: &mut ModelContext<Self>) {
+        self.cache = Some(results);
+        ctx.emit(CLIAgentInstallEvent::ScanComplete);
+    }
+
+    /// 查询某个 agent 是否已安装。扫描未完成时返回 false。
+    pub fn is_cli_agent_installed(&self, agent: CLIAgent) -> bool {
+        self.cache
+            .as_ref()
+            .map(|m| m.get(&agent).copied().unwrap_or(false))
+            .unwrap_or(false)
+    }
+}
+
+impl Entity for CLIAgentInstallModel {
+    type Event = CLIAgentInstallEvent;
+}
+
+impl SingletonEntity for CLIAgentInstallModel {}
+
+/// 后台扫描全部 agent 的安装状态。仅供 `ctx.spawn` 异步任务内部使用。
+///
+/// macOS GUI 启动时进程 PATH 往往很短(不含 shell rc 注入的目录),会漏检
+/// 经 homebrew/cargo/bun/nvm 安装的 CLI agent。这里在进程 PATH 之上补扫常见
+/// 安装目录,去重保序后逐一探测。
+#[cfg(unix)]
+fn scan_cli_agent_installations() -> HashMap<CLIAgent, bool> {
+    let search_dirs = cli_agent_search_dirs().collect::<Vec<_>>();
+    enum_iterator::all::<CLIAgent>()
+        .filter(|a| !matches!(a, CLIAgent::Unknown))
+        .map(|a| (a, cli_agent_is_on_path_with_dirs(a, &search_dirs)))
+        .collect()
+}
+
+/// 后台扫描全部 agent 的安装状态。仅供 `ctx.spawn` 异步任务内部使用。
+#[cfg(windows)]
+fn scan_cli_agent_installations() -> HashMap<CLIAgent, bool> {
+    enum_iterator::all::<CLIAgent>()
+        .filter(|a| !matches!(a, CLIAgent::Unknown))
+        .map(|a| (a, cli_agent_is_on_path(a)))
+        .collect()
+}
+
+#[cfg(unix)]
+fn cli_agent_is_on_path_with_dirs(agent: CLIAgent, search_dirs: &[PathBuf]) -> bool {
+    match agent {
+        CLIAgent::Unknown => false,
+        // `agent` 太泛化,Cursor CLI 用 cursor-agent 检测
+        CLIAgent::CursorCli => is_on_path_in_dirs("cursor-agent", search_dirs),
+        // DeepSeek 同时检查主命令和别名
+        CLIAgent::DeepSeek => {
+            is_on_path_in_dirs("deepseek", search_dirs)
+                || is_on_path_in_dirs("deepseek-tui", search_dirs)
+        }
+        other => is_on_path_in_dirs(other.command_prefix(), search_dirs),
+    }
+}
+
+#[cfg(windows)]
+fn cli_agent_is_on_path(agent: CLIAgent) -> bool {
+    match agent {
+        CLIAgent::Unknown => false,
+        // `agent` 太泛化,Cursor CLI 用 cursor-agent 检测
+        CLIAgent::CursorCli => is_on_path("cursor-agent"),
+        // DeepSeek 同时检查主命令和别名
+        CLIAgent::DeepSeek => is_on_path("deepseek") || is_on_path("deepseek-tui"),
+        other => is_on_path(other.command_prefix()),
+    }
+}
+
+/// 内联目录搜索,零进程、零闪窗。
+#[cfg(unix)]
+fn is_on_path_in_dirs(cmd: &str, search_dirs: &[PathBuf]) -> bool {
+    search_dirs.iter().any(|dir| dir.join(cmd).is_file())
+}
+
+/// 进程 PATH + 常见 CLI 安装目录,去重保序。
+#[cfg(unix)]
+fn cli_agent_search_dirs() -> impl Iterator<Item = PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Some(path_var) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path_var));
+    }
+
+    extend_common_cli_dirs(&mut dirs);
+    dedupe_paths(dirs).into_iter()
+}
+
+#[cfg(unix)]
+fn extend_common_cli_dirs(dirs: &mut Vec<PathBuf>) {
+    dirs.extend([
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/opt/homebrew/sbin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/usr/local/sbin"),
+    ]);
+
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+
+    dirs.extend([
+        home.join(".cargo/bin"),
+        home.join(".bun/bin"),
+        home.join(".local/bin"),
+    ]);
+
+    if let Ok(node_versions) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+        dirs.extend(
+            node_versions
+                .filter_map(Result::ok)
+                .map(|entry| entry.path().join("bin")),
+        );
+    }
+}
+
+#[cfg(unix)]
+fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::with_capacity(paths.len());
+    let mut deduped = Vec::with_capacity(paths.len());
+    for path in paths {
+        if seen.insert(path.clone()) {
+            deduped.push(path);
+        }
+    }
+    deduped
+}
+
+#[cfg(windows)]
+fn is_on_path(cmd: &str) -> bool {
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".EXE;.CMD;.BAT".into());
+    let Ok(path_var) = std::env::var("PATH") else {
+        return false;
+    };
+    let exts: Vec<&str> = pathext.split(';').collect();
+    std::env::split_paths(&path_var).any(|dir| {
+        exts.iter()
+            .any(|ext| dir.join(format!("{}{}", cmd, ext)).is_file())
+    })
+}
+
+#[cfg(test)]
+#[path = "cli_agent_tests.rs"]
+mod tests;

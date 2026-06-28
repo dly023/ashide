@@ -1,0 +1,399 @@
+#!/bin/bash
+#
+# macOS-specific implementation of `./script/run`. Runs a local version of
+# Ashide as a real 'app' instead of a bare executable, so macOS can treat it
+# like a real signed app (custom URL schemes, user notifications, etc.).
+#
+# This script is invoked by `./script/run`, which handles cross-platform
+# setup (install_channel_config, binary name detection, feature-to-env-var
+# mapping). The following env vars are expected to be set by the caller:
+#   ASHIDE_BIN_NAME  — "ashide"
+#   ASHIDE_CHANNEL   — "dev" or "oss" for the two supported app variants
+#   FEATURES         — comma-separated cargo features (already normalized)
+# Must be called from the root directory of the Ashide repo.
+
+set -e
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../.. && pwd)"
+cd "${REPO_ROOT}"
+
+# Keep local app-bundle runs aligned with `script/macos/bundle`: app/build.rs
+# needs this while building the DockTilePlugin during `cargo bundle`.
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.14}"
+
+: "${ASHIDE_BIN_NAME:?ASHIDE_BIN_NAME must be set (invoke via ./script/run)}"
+: "${ASHIDE_CHANNEL:?ASHIDE_CHANNEL must be set (invoke via ./script/run)}"
+: "${FEATURES:?FEATURES must be set (invoke via ./script/run)}"
+
+channel_app_name() {
+  case "$1" in
+    dev)
+      printf 'AshideDev\n'
+      ;;
+    local)
+      printf 'AshideLocal\n'
+      ;;
+    preview)
+      printf 'AshidePreview\n'
+      ;;
+    oss|ashide|stable)
+      printf 'Ashide\n'
+      ;;
+    integration)
+      printf 'AshideIntegration\n'
+      ;;
+    *)
+      echo "Unsupported ASHIDE_CHANNEL=$1" >&2
+      exit 1
+      ;;
+  esac
+}
+
+channel_url_scheme() {
+  case "$1" in
+    dev)
+      printf 'ashidedev\n'
+      ;;
+    local)
+      printf 'ashidelocal\n'
+      ;;
+    preview)
+      printf 'ashidepreview\n'
+      ;;
+    oss|ashide|stable)
+      printf 'ashide\n'
+      ;;
+    integration)
+      printf 'ashideintegration\n'
+      ;;
+    *)
+      echo "Unsupported ASHIDE_CHANNEL=$1" >&2
+      exit 1
+      ;;
+  esac
+}
+
+channel_logfile_name() {
+  case "$1" in
+    dev)
+      printf 'ashide_dev.log\n'
+      ;;
+    local)
+      printf 'ashide_local.log\n'
+      ;;
+    preview)
+      printf 'ashide_preview.log\n'
+      ;;
+    integration)
+      printf 'ashide_integration.log\n'
+      ;;
+    oss|ashide|stable)
+      printf 'ashide.log\n'
+      ;;
+    *)
+      echo "Unsupported ASHIDE_CHANNEL=$1" >&2
+      exit 1
+      ;;
+  esac
+}
+
+channel_icon_asset_channel() {
+  if [ -d "$REPO_ROOT/app/channels/$1" ]; then
+    printf '%s\n' "$1"
+  else
+    printf 'oss\n'
+  fi
+}
+
+ASHIDE_APP_NAME="$(channel_app_name "$ASHIDE_CHANNEL")"
+ASHIDE_BUNDLE_ID="dev.ashide.$ASHIDE_APP_NAME"
+ASHIDE_APP_PATH="target/debug/bundle/osx/$ASHIDE_APP_NAME.app"
+ASHIDE_SCHEME_NAME="$(channel_url_scheme "$ASHIDE_CHANNEL")"
+ASHIDE_LOGFILE_NAME="$(channel_logfile_name "$ASHIDE_CHANNEL")"
+ASHIDE_ICON_ASSET_CHANNEL="$(channel_icon_asset_channel "$ASHIDE_CHANNEL")"
+DONT_OPEN=false
+FORCE_BUILD=false
+# Launches the binary with "open", meaning the Ashide process is
+# launched by the MacOS application launcher instead of a shell session.
+# Note that since Ashide isn't launched as a child process, using ctrl+c
+# won't kill the app (but will kill the tail process displaying output).
+# tl;dr better simulates running Ashide
+OPEN_WITH_LAUNCHD=false
+
+# Arguments to pass directly Ashide (specified after --)
+# This is not supported when opening with launchd, as passing CLI arguments to
+# an application doesn't make sense.
+ASHIDE_ARGS=()
+
+# Export this variable so it can be referenced by app/build.rs later when
+# running `cargo bundle`.
+export FRAMEWORK_OVERRIDE="dev"
+
+DEV_BUNDLE_STAMP_VERSION="ashide-dev-bundle-v1"
+DEV_BUNDLE_INPUT_SCOPES=(
+  ".cargo"
+  "Cargo.toml"
+  "Cargo.lock"
+  "app/Cargo.toml"
+  "app/build.rs"
+  "app/src"
+  "app/i18n"
+  "app/assets"
+  "app/channels"
+  "app/DockTilePlugin"
+  "crates"
+  "resources"
+  "script/run"
+  "script/macos/run"
+  "script/update_plist"
+  "script/prepare_bundled_resources"
+  "script/copy_conditional_skills"
+  "script/compile_icon"
+  "script/prepare_bundled_pprof"
+)
+
+dev_bundle_stamp() {
+  {
+    printf '%s\n' "$DEV_BUNDLE_STAMP_VERSION"
+    printf 'bin=%s\n' "$ASHIDE_BIN_NAME"
+    printf 'channel=%s\n' "$ASHIDE_CHANNEL"
+    printf 'features=%s\n' "$FEATURES"
+    printf 'params=%s\n' "$PARAMS"
+    printf 'deployment_target=%s\n' "$MACOSX_DEPLOYMENT_TARGET"
+    printf 'app_path=%s\n' "$ASHIDE_APP_PATH"
+    printf 'bundle_id=%s\n' "$ASHIDE_BUNDLE_ID"
+    printf 'scheme=%s\n' "$ASHIDE_SCHEME_NAME"
+    printf 'logfile=%s\n' "$ASHIDE_LOGFILE_NAME"
+    printf 'icon_asset_channel=%s\n' "$ASHIDE_ICON_ASSET_CHANNEL"
+    printf 'generate_schema=%s\n' "${GENERATE_SCHEMA:-false}"
+    printf 'framework_override=%s\n' "$FRAMEWORK_OVERRIDE"
+    printf 'git_release_tag=%s\n' "${GIT_RELEASE_TAG:-}"
+
+    git -c core.quotepath=false ls-files -s -- "${DEV_BUNDLE_INPUT_SCOPES[@]}" \
+      | LC_ALL=C sort \
+      | sed 's/^/index=/'
+
+    git -c core.quotepath=false diff --name-only -- "${DEV_BUNDLE_INPUT_SCOPES[@]}" \
+      | LC_ALL=C sort \
+      | while IFS= read -r file; do
+          printf 'worktree=%s\n' "$file"
+          if [ -f "$file" ]; then
+            printf 'size=%s\n' "$(stat -f '%z' "$file")"
+            shasum -a 256 "$file" | awk '{print "sha256="$1}'
+          else
+            printf 'deleted=true\n'
+          fi
+        done
+
+    git -c core.quotepath=false ls-files -o --exclude-standard -- "${DEV_BUNDLE_INPUT_SCOPES[@]}" \
+      | LC_ALL=C sort \
+      | while IFS= read -r file; do
+          if [ -f "$file" ]; then
+            printf 'untracked=%s\n' "$file"
+            printf 'size=%s\n' "$(stat -f '%z' "$file")"
+            shasum -a 256 "$file" | awk '{print "sha256="$1}'
+          fi
+        done
+  } | shasum -a 256 | awk '{print $1}'
+}
+
+dev_bundle_profile_dir() {
+  case "$ASHIDE_APP_PATH" in
+    target/release/*)
+      printf 'release\n'
+      ;;
+    target/*/bundle/osx/*)
+      local without_target="${ASHIDE_APP_PATH#target/}"
+      printf '%s\n' "${without_target%%/*}"
+      ;;
+    *)
+      printf 'debug\n'
+      ;;
+  esac
+}
+
+write_dev_bundle_plist() {
+  local plist_path="$1"
+  local bundle_name="$2"
+
+  cat > "$plist_path" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>$bundle_name</string>
+  <key>CFBundleExecutable</key>
+  <string>$ASHIDE_BIN_NAME</string>
+  <key>CFBundleIdentifier</key>
+  <string>$ASHIDE_BUNDLE_ID</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>$bundle_name</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.0.0</string>
+  <key>CFBundleVersion</key>
+  <string>0.0.0</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>$MACOSX_DEPLOYMENT_TARGET</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>LSBackgroundOnly</key>
+  <false/>
+</dict>
+</plist>
+EOF
+}
+
+assemble_dev_app_bundle() {
+  local profile_dir
+  local built_binary
+  local bundle_name
+  local resources_dir
+  local dock_tile_plugin_dir
+
+  profile_dir="$(dev_bundle_profile_dir)"
+  built_binary="target/$profile_dir/$ASHIDE_BIN_NAME"
+  bundle_name="$(basename "$ASHIDE_APP_PATH" .app)"
+  resources_dir="$ASHIDE_APP_PATH/Contents/Resources"
+  dock_tile_plugin_dir="target/$profile_dir/AshideDockTilePlugin.docktileplugin"
+
+  echo "Building app binary (bin: $ASHIDE_BIN_NAME)..."
+  cargo build -p warp --bin "$ASHIDE_BIN_NAME" --features "$FEATURES" $PARAMS
+
+  if [ ! -x "$built_binary" ]; then
+    echo "Expected built binary at $built_binary" >&2
+    exit 1
+  fi
+
+  echo "Assembling dev app bundle at $ASHIDE_APP_PATH"
+  mkdir -p "$ASHIDE_APP_PATH/Contents/MacOS" "$resources_dir"
+  cp "$built_binary" "$ASHIDE_APP_BINARY"
+  chmod +x "$ASHIDE_APP_BINARY"
+
+  write_dev_bundle_plist "$ASHIDE_APP_PATH/Contents/Info.plist" "$bundle_name"
+
+  if ! otool -l "$ASHIDE_APP_BINARY" | grep -Fq "@executable_path/../Frameworks"; then
+    echo "Adding rpath to support mac frameworks"
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$ASHIDE_APP_BINARY"
+  fi
+
+  export ASHIDE_SCHEME_NAME
+  export ASHIDE_PLIST_PATH="$ASHIDE_APP_PATH/Contents/Info.plist"
+  ./script/update_plist
+
+  if [ -d "app/assets/onboarding" ]; then
+    mkdir -p "$resources_dir/assets"
+    rm -rf "$resources_dir/assets/onboarding"
+    cp -R "app/assets/onboarding" "$resources_dir/assets/onboarding"
+  fi
+
+  echo "Preparing bundled resources..."
+  if [ "${GENERATE_SCHEMA:-false}" != "true" ]; then
+    export SKIP_SETTINGS_SCHEMA=1
+  fi
+  NO_LICENSES=1 "${REPO_ROOT}/script/prepare_bundled_resources" "$resources_dir" "$ASHIDE_CHANNEL" "$profile_dir" "$FEATURES"
+
+  "${REPO_ROOT}/script/compile_icon" "$ASHIDE_ICON_ASSET_CHANNEL" "$ASHIDE_APP_PATH"
+
+  if [ -d "$dock_tile_plugin_dir" ]; then
+    echo "Copying DockTilePlugin..."
+    mkdir -p "$ASHIDE_APP_PATH/Contents/PlugIns"
+    rm -rf "$ASHIDE_APP_PATH/Contents/PlugIns/AshideDockTilePlugin.docktileplugin"
+    cp -R "$dock_tile_plugin_dir" "$ASHIDE_APP_PATH/Contents/PlugIns/"
+    plutil -insert NSDockTilePlugIn -string "AshideDockTilePlugin.docktileplugin" "$ASHIDE_APP_PATH/Contents/Info.plist" 2>/dev/null || \
+      plutil -replace NSDockTilePlugIn -string "AshideDockTilePlugin.docktileplugin" "$ASHIDE_APP_PATH/Contents/Info.plist"
+    plutil -insert MainAppBundleIdentifier -string "$(plutil -extract CFBundleIdentifier raw "$ASHIDE_APP_PATH/Contents/Info.plist")" "$ASHIDE_APP_PATH/Contents/PlugIns/AshideDockTilePlugin.docktileplugin/Contents/Info.plist" 2>/dev/null || \
+      plutil -replace MainAppBundleIdentifier -string "$(plutil -extract CFBundleIdentifier raw "$ASHIDE_APP_PATH/Contents/Info.plist")" "$ASHIDE_APP_PATH/Contents/PlugIns/AshideDockTilePlugin.docktileplugin/Contents/Info.plist"
+  fi
+
+  if [[ ",$FEATURES," =~ ",heap_usage_tracking," ]]; then
+    echo "Bundling pprof..."
+    "${REPO_ROOT}/script/prepare_bundled_pprof" "$ASHIDE_APP_PATH/Contents/Helpers"
+  fi
+}
+
+PARAMS=""
+while (( "$#" )); do
+  case "$1" in
+    --)
+      shift
+      ASHIDE_ARGS=("$@")
+      break
+      ;;
+    --dont-open)
+      DONT_OPEN=true
+      shift
+      ;;
+    --force-build)
+      FORCE_BUILD=true
+      shift
+      ;;
+    --release)
+      echo "Detected release build, pointing at release bundle under target/release/bundle"
+      ASHIDE_APP_PATH="target/release/bundle/osx/$ASHIDE_APP_NAME.app"
+      PARAMS="$PARAMS $1"
+      shift
+      ;;
+    --profile)
+      PROFILE="$2"
+      shift 2
+      ASHIDE_APP_PATH="target/${PROFILE}/bundle/osx/$ASHIDE_APP_NAME.app"
+      PARAMS="$PARAMS --profile $PROFILE"
+      ;;
+    --open_with_launchd)
+      OPEN_WITH_LAUNCHD=true
+      shift
+      ;;
+    --generate-schema)
+      GENERATE_SCHEMA=true
+      shift
+      ;;
+    *) # preserve positional arguments
+      PARAMS="$PARAMS $1"
+      shift
+      ;;
+  esac
+done
+
+ASHIDE_APP_BINARY="$ASHIDE_APP_PATH/Contents/MacOS/$ASHIDE_BIN_NAME"
+DEV_BUNDLE_STAMP_PATH="$ASHIDE_APP_PATH/Contents/Resources/.ashide-dev-bundle.stamp"
+CURRENT_DEV_BUNDLE_STAMP="$(dev_bundle_stamp)"
+SHOULD_BUNDLE=true
+
+if [ "$FORCE_BUILD" = false ] && [ -x "$ASHIDE_APP_BINARY" ] && [ -f "$DEV_BUNDLE_STAMP_PATH" ]; then
+  EXISTING_DEV_BUNDLE_STAMP="$(cat "$DEV_BUNDLE_STAMP_PATH")"
+  if [ "$EXISTING_DEV_BUNDLE_STAMP" = "$CURRENT_DEV_BUNDLE_STAMP" ]; then
+    SHOULD_BUNDLE=false
+  fi
+fi
+
+if [ "$SHOULD_BUNDLE" = true ]; then
+  rm -rf "$ASHIDE_APP_PATH"
+
+  assemble_dev_app_bundle
+
+  printf '%s\n' "$CURRENT_DEV_BUNDLE_STAMP" > "$DEV_BUNDLE_STAMP_PATH"
+
+  echo "Codesigning app..."
+  SIGNING_CERT="$(security find-identity -p codesigning -v | grep "Apple Development" | awk '{print $2}' | head -1)"
+  codesign --force --deep --options runtime --sign "${SIGNING_CERT:--}" "$ASHIDE_APP_PATH" --entitlements script/Debug-Entitlements.plist
+else
+  echo "Dev app bundle inputs unchanged; reusing $ASHIDE_APP_PATH"
+fi
+
+if [ "$DONT_OPEN" = false ] ; then
+    if  [ "$OPEN_WITH_LAUNCHD" = true ]; then
+        echo "Launching with MacOS application launcher"
+        PATH="" /usr/bin/open "./$ASHIDE_APP_PATH"
+        tail -f "$HOME/Library/Logs/$ASHIDE_LOGFILE_NAME"
+    else
+        echo "Opening app at ./$ASHIDE_APP_PATH/Contents/MacOS/$ASHIDE_BIN_NAME"
+        "./$ASHIDE_APP_PATH/Contents/MacOS/$ASHIDE_BIN_NAME" "${ASHIDE_ARGS[@]}"
+    fi
+fi

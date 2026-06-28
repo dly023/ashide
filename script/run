@@ -1,0 +1,144 @@
+#!/bin/bash
+#
+# Cross-platform entrypoint for running a local Ashide build.
+#
+# By default this runs the isolated development app variant:
+#
+#   AshideDev.app + ASHIDE_CHANNEL=dev + WARP_DATA_PROFILE=codex-dev
+#
+# Use `--daily-app` to build/run the daily-use Ashide.app variant instead.
+# On macOS this delegates to `./script/macos/run`, which builds and runs Ashide
+# as a real `.app` bundle (with code signing, plist updates, etc.). On Linux
+# and Windows it invokes `cargo run` directly for the appropriate binary.
+#
+# This script owns cross-platform setup and parsing `--features` into
+# environment variables, so platform-specific scripts can assume those values
+# are already provided via environment variables.
+
+set -e
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
+cd "${REPO_ROOT}"
+
+OS_TYPE="$(uname -s)"
+
+FEATURES="gui"
+APP_VARIANT="${ASHIDE_APP_VARIANT:-dev}"
+ASHIDE_BIN_NAME="ashide"
+
+# Shared argument parsing. macOS-specific flags (--dont-open,
+# --open_with_launchd, --generate-schema) are forwarded through MAC_ARGS and
+# silently ignored on other platforms.
+MAC_ARGS=()
+CARGO_PARAMS=()
+ASHIDE_ARGS=()
+
+while (( "$#" )); do
+  case "$1" in
+    --)
+      shift
+      ASHIDE_ARGS=("$@")
+      break
+      ;;
+    --features)
+      if [ -n "$2" ] && [ "${2:0:1}" != "-" ]; then
+        FEATURES="$FEATURES,$2"
+        shift 2
+      else
+        echo "Error: Argument for $1 is missing" >&2
+        exit 1
+      fi
+      ;;
+    --host-id)
+      if [ -n "$2" ] && [ "${2:0:1}" != "-" ]; then
+        export ASHIDE_CLOUD_MODE_DEFAULT_HOST="$2"
+        shift 2
+      else
+        echo "Error: Argument for $1 is missing" >&2
+        exit 1
+      fi
+      ;;
+    --dev-app)
+      APP_VARIANT="dev"
+      shift
+      ;;
+    --daily-app)
+      APP_VARIANT="daily"
+      shift
+      ;;
+    --release)
+      CARGO_PARAMS+=("$1")
+      MAC_ARGS+=("$1")
+      shift
+      ;;
+    --profile)
+      if [ -n "$2" ] && [ "${2:0:1}" != "-" ]; then
+        CARGO_PARAMS+=("$1" "$2")
+        MAC_ARGS+=("$1" "$2")
+        shift 2
+      else
+        echo "Error: Argument for $1 is missing" >&2
+        exit 1
+      fi
+      ;;
+    *)
+      # Unknown flags (including macOS-only flags like --dont-open) and any
+      # positional arguments are forwarded to the platform-specific script.
+      MAC_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+case "$APP_VARIANT" in
+  dev)
+    ASHIDE_CHANNEL="dev"
+    export WARP_DATA_PROFILE="${WARP_DATA_PROFILE:-codex-dev}"
+    ;;
+  daily)
+    ASHIDE_CHANNEL="oss"
+    unset WARP_DATA_PROFILE
+    ;;
+  *)
+    echo "Error: unsupported ASHIDE_APP_VARIANT=$APP_VARIANT (expected dev or daily)" >&2
+    exit 1
+    ;;
+esac
+
+# These cargo features were removed and replaced by environment variables read
+# by warp-channel-config. Intercept them here so that --features
+# invocations keep working.
+for mapping in \
+    "with_local_server:WITH_LOCAL_SERVER" \
+    "with_local_session_sharing_server:WITH_LOCAL_SESSION_SHARING_SERVER"; do
+    feature="${mapping%%:*}"
+    env_var="${mapping##*:}"
+    if [[ ",$FEATURES," =~ ,"$feature", ]]; then
+        export "$env_var"=1
+        FEATURES="$(echo "$FEATURES" | sed "s/,$feature,/,/; s/^$feature,//; s/,$feature$//; s/^$feature$//")"
+        FEATURES="$(echo "$FEATURES" | sed 's/,,*/,/g; s/^,//; s/,$//')"
+        echo "Note: '$feature' is no longer a cargo feature; setting $env_var=1 instead."
+    fi
+done
+
+export FEATURES
+export ASHIDE_BIN_NAME
+export ASHIDE_CHANNEL
+
+if [[ "$OS_TYPE" = "Darwin" ]]; then
+  if [[ ${#ASHIDE_ARGS[@]} -gt 0 ]]; then
+    exec ./script/macos/run "${MAC_ARGS[@]}" -- "${ASHIDE_ARGS[@]}"
+  else
+    exec ./script/macos/run "${MAC_ARGS[@]}"
+  fi
+elif [[ "$OS_TYPE" = "Linux" ]] || [[ "$OS_TYPE" =~ ^(MINGW64_NT|MSYS_NT) ]]; then
+  echo "Running cargo run --bin $ASHIDE_BIN_NAME --features \"$FEATURES\" ${CARGO_PARAMS[*]}"
+  if [[ ${#ASHIDE_ARGS[@]} -gt 0 ]]; then
+    cargo run --bin "$ASHIDE_BIN_NAME" --features "$FEATURES" "${CARGO_PARAMS[@]}" -- "${ASHIDE_ARGS[@]}"
+  else
+    cargo run --bin "$ASHIDE_BIN_NAME" --features "$FEATURES" "${CARGO_PARAMS[@]}"
+  fi
+else
+  echo "No run script defined for the current platform ($OS_TYPE)!" >&2
+  exit 1
+fi
