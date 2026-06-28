@@ -1063,6 +1063,7 @@ impl Workspace {
     pub(super) fn refresh_workspace_sessions(&mut self, ctx: &mut ViewContext<Self>) {
         let refresh_generation = self.begin_workspace_sessions_refresh(ctx);
         self.refresh_indexed_cli_agent_sessions();
+        self.prune_restored_workspace_sessions_with_missing_cli_sources();
         self.prune_stale_restoring_workspace_session_keys(ctx);
         self.open_vertical_tabs_panel_for_recoverable_sessions(ctx);
         self.sync_session_navigator_sessions(ctx);
@@ -1105,6 +1106,20 @@ impl Workspace {
 
     pub(super) fn refresh_indexed_cli_agent_sessions(&mut self) {
         self.indexed_cli_agent_sessions = Self::scan_terminal_cli_agent_sessions(80);
+    }
+
+    fn prune_restored_workspace_sessions_with_missing_cli_sources(&mut self) {
+        self.restored_workspace_sessions.retain(|session| {
+            if !matches!(
+                session.cli_agent_origin,
+                Some(crate::app_state::CliAgentSessionOrigin::PluginObserved)
+            ) {
+                return true;
+            }
+            crate::terminal::cli_agent_session_index::external_jsonl_session_source_exists(
+                &session.id,
+            )
+        });
     }
 
     pub(super) fn is_workspace_sessions_refreshing(&self) -> bool {

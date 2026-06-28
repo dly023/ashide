@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -127,10 +127,40 @@ pub(crate) fn delete_current_app_cli_agent_session(snapshot_id: &str) -> Result<
 
     let path = path_from_external_session_snapshot_id(snapshot_id)
         .ok_or_else(|| format!("not an indexed CLI agent session id: {snapshot_id}"))?;
-    let session_path = validate_mutable_session_path(&path)?;
-    fs::remove_file(&session_path)
-        .map_err(|error| format!("failed to delete {}: {error}", session_path.display()))?;
+    validate_mutable_session_path_location(&path)?;
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            log::info!(
+                "CLI agent session file already absent during delete: {}",
+                path.display()
+            );
+        }
+        Err(error) => {
+            return Err(format!("failed to delete {}: {error}", path.display()));
+        }
+    }
+    if let Some(meta_path) = claude_subagent_meta_path_for_jsonl(&path) {
+        if let Err(error) = fs::remove_file(&meta_path) {
+            if error.kind() != io::ErrorKind::NotFound {
+                log::warn!(
+                    "failed to delete companion Claude subagent meta {}: {error}",
+                    meta_path.display()
+                );
+            }
+        }
+    }
     set_session_pinned(snapshot_id, false)
+}
+
+/// Returns whether the on-disk JSONL backing an `external:{agent}:{hex}` snapshot
+/// still exists. Non file-backed ids are treated as present so callers do not
+/// over-prune unrelated restored rows.
+pub(crate) fn external_jsonl_session_source_exists(snapshot_id: &str) -> bool {
+    match path_from_external_session_snapshot_id(snapshot_id) {
+        Some(path) => path.is_file(),
+        None => true,
+    }
 }
 
 pub(crate) fn current_app_cli_agent_session_source_target_from_id(
@@ -550,10 +580,24 @@ fn remove_codex_session_index_entry(snapshot_id: &str) -> Result<String, String>
 }
 
 fn validate_mutable_session_path(path: &Path) -> Result<PathBuf, String> {
+    validate_mutable_session_path_location(path)?;
+    path.canonicalize()
+        .map_err(|error| format!("failed to resolve {}: {error}", path.display()))
+}
+
+fn validate_mutable_session_path_location(path: &Path) -> Result<(), String> {
     let home_dir = dirs::home_dir().ok_or_else(|| "home directory is unavailable".to_owned())?;
-    let canonical_path = path
-        .canonicalize()
-        .map_err(|error| format!("failed to resolve {}: {error}", path.display()))?;
+    if path
+        .extension()
+        .is_none_or(|extension| extension != "jsonl")
+    {
+        return Err(format!(
+            "refusing to mutate non-jsonl session file: {}",
+            path.display()
+        ));
+    }
+
+    let canonical_path = canonical_cli_agent_session_path(path)?;
     let allowed_roots = [
         home_dir.join(".claude/projects"),
         home_dir.join(".codex/sessions"),
@@ -561,7 +605,7 @@ fn validate_mutable_session_path(path: &Path) -> Result<PathBuf, String> {
     let is_under_allowed_root = allowed_roots.iter().any(|root| {
         root.canonicalize()
             .ok()
-            .is_some_and(|root| canonical_path.starts_with(root))
+            .is_some_and(|root| canonical_path.starts_with(&root))
     });
     if !is_under_allowed_root {
         return Err(format!(
@@ -569,17 +613,34 @@ fn validate_mutable_session_path(path: &Path) -> Result<PathBuf, String> {
             canonical_path.display()
         ));
     }
-    if canonical_path
-        .extension()
-        .is_none_or(|extension| extension != "jsonl")
-    {
-        return Err(format!(
-            "refusing to mutate non-jsonl session file: {}",
-            canonical_path.display()
-        ));
+
+    Ok(())
+}
+
+fn canonical_cli_agent_session_path(path: &Path) -> Result<PathBuf, String> {
+    if let Ok(canonical_path) = path.canonicalize() {
+        return Ok(canonical_path);
     }
 
-    Ok(canonical_path)
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("session path has no parent: {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format!("session path has no file name: {}", path.display()))?;
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve {}: {error}", path.display()))?;
+    Ok(canonical_parent.join(file_name))
+}
+
+fn claude_subagent_meta_path_for_jsonl(jsonl_path: &Path) -> Option<PathBuf> {
+    let parent = jsonl_path.parent()?;
+    if parent.file_name()? != "subagents" {
+        return None;
+    }
+    let stem = jsonl_path.file_stem()?.to_string_lossy();
+    Some(parent.join(format!("{stem}.meta.json")))
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -612,5 +673,82 @@ fn hex_value(byte: u8) -> Option<u8> {
         b'a'..=b'f' => Some(byte - b'a' + 10),
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn test_projects_dir(name: &str) -> PathBuf {
+        let home_dir = dirs::home_dir().expect("home directory");
+        let unique = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        home_dir.join(format!(".claude/projects/ashide-test-{name}-{unique}"))
+    }
+
+    fn cleanup_test_dir(path: &Path) {
+        let _ = fs::remove_dir_all(path);
+    }
+
+    fn ensure_session_user_state_dir() {
+        if let Some(config_dir) = warp_core::paths::warp_home_config_dir() {
+            let _ = fs::create_dir_all(config_dir);
+        }
+    }
+
+    #[test]
+    fn delete_current_app_cli_agent_session_treats_missing_jsonl_as_success() {
+        ensure_session_user_state_dir();
+        let projects_dir = test_projects_dir("missing-jsonl");
+        fs::create_dir_all(&projects_dir).expect("create projects dir");
+        let session_path = projects_dir.join("demo-session.jsonl");
+        let snapshot_id = external_session_snapshot_id_for_path(CLIAgent::Claude, &session_path);
+
+        delete_current_app_cli_agent_session(&snapshot_id).expect("missing jsonl delete succeeds");
+        assert!(
+            !session_path.exists(),
+            "delete should not create the missing jsonl file"
+        );
+
+        cleanup_test_dir(&projects_dir);
+    }
+
+    #[test]
+    fn delete_current_app_cli_agent_session_removes_orphan_subagent_meta() {
+        ensure_session_user_state_dir();
+        let projects_dir = test_projects_dir("subagent-meta");
+        let subagents_dir = projects_dir.join("demo/subagents");
+        fs::create_dir_all(&subagents_dir).expect("create subagents dir");
+        let jsonl_path = subagents_dir.join("agent-demo.jsonl");
+        let meta_path = subagents_dir.join("agent-demo.meta.json");
+        {
+            let mut jsonl = fs::File::create(&jsonl_path).expect("create jsonl");
+            writeln!(jsonl, r#"{{"sessionId":"agent-demo"}}"#).expect("write jsonl");
+        }
+        fs::write(&meta_path, br#"{"agentType":"general-purpose"}"#).expect("write meta");
+        let snapshot_id = external_session_snapshot_id_for_path(CLIAgent::Claude, &jsonl_path);
+
+        delete_current_app_cli_agent_session(&snapshot_id).expect("delete succeeds");
+
+        assert!(!jsonl_path.exists());
+        assert!(!meta_path.exists());
+
+        cleanup_test_dir(&projects_dir);
+    }
+
+    #[test]
+    fn external_jsonl_session_source_exists_reports_missing_backing_file() {
+        let projects_dir = test_projects_dir("source-exists");
+        fs::create_dir_all(&projects_dir).expect("create projects dir");
+        let session_path = projects_dir.join("demo-session.jsonl");
+        let snapshot_id = external_session_snapshot_id_for_path(CLIAgent::Claude, &session_path);
+
+        assert!(!external_jsonl_session_source_exists(&snapshot_id));
+
+        cleanup_test_dir(&projects_dir);
     }
 }
