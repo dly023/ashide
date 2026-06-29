@@ -1128,30 +1128,71 @@ fn local_command_available(program: &str) -> bool {
         .unwrap_or(false)
 }
 
+async fn curl_download_to_local_file(
+    url: &str,
+    dest: &Path,
+    timeout: Duration,
+    force_ipv4: bool,
+    resume: bool,
+) -> Result<()> {
+    let mut command = command::r#async::Command::new("curl");
+    command.arg("-fSL");
+    if force_ipv4 {
+        command.arg("-4");
+    }
+    if resume {
+        command.arg("-C").arg("-");
+    }
+    let output = command
+        .arg("--connect-timeout")
+        .arg("15")
+        .arg("-o")
+        .arg(dest)
+        .arg("--")
+        .arg(url)
+        .kill_on_drop(true)
+        .output()
+        .with_timeout(timeout)
+        .await
+        .map_err(|_| anyhow!("下载 release helper 超时 {timeout:?}: {url}"))?
+        .map_err(|error| anyhow!("curl 启动失败: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mode = if force_ipv4 { "curl -4" } else { "curl" };
+    Err(anyhow!(
+        "{mode} 下载 release helper 失败({}): {stderr}",
+        output.status
+    ))
+}
+
 /// 本地把 URL 下载到文件。优先 curl,回退 wget(macOS 自带 curl)。
 async fn download_to_local_file(url: &str, dest: &Path, timeout: Duration) -> Result<()> {
     if local_command_available("curl") {
-        let output = command::r#async::Command::new("curl")
-            .arg("-fSL")
-            .arg("--connect-timeout")
-            .arg("15")
-            .arg("-o")
-            .arg(dest)
-            .arg("--")
-            .arg(url)
-            .kill_on_drop(true)
-            .output()
-            .with_timeout(timeout)
-            .await
-            .map_err(|_| anyhow!("下载 release helper 超时 {timeout:?}: {url}"))?
-            .map_err(|error| anyhow!("curl 启动失败: {error}"))?;
-        if output.status.success() {
-            return Ok(());
+        let error = match curl_download_to_local_file(url, dest, timeout, false, false).await {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        log::warn!("curl 下载 release helper 失败,改用 curl -4 断点续传重试: {error:#}");
+        let mut last_error = error;
+        for attempt in 1..=5 {
+            let resume = dest.is_file();
+            match curl_download_to_local_file(url, dest, timeout, true, resume).await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    last_error = error;
+                    log::warn!(
+                        "curl -4 下载 release helper 第 {attempt}/5 次失败: {last_error:#}"
+                    );
+                    if attempt < 5 {
+                        Timer::after(Duration::from_secs(2)).await;
+                    }
+                }
+            }
         }
-        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!(
-            "curl 下载 release helper 失败({}): {stderr}",
-            output.status
+            "curl IPv4 fallback 重试 5 次仍失败;最后错误: {last_error:#}"
         ));
     }
     if local_command_available("wget") {

@@ -64,9 +64,9 @@ package_helper() {
   local archive_name="ashide-${os}-${arch}.tar.gz"
   local staging
   staging="$(mktemp -d "${TMPDIR:-/tmp}/ashide-helper-staging.XXXXXX")"
-  trap 'rm -rf "$staging"' RETURN
 
   if [[ ! -f "$binary_path" ]]; then
+    rm -rf "$staging"
     echo "error: helper binary not found: $binary_path" >&2
     exit 1
   fi
@@ -74,6 +74,7 @@ package_helper() {
   cp "$binary_path" "$staging/ashide"
   chmod 755 "$staging/ashide"
   tar -czf "$ARTIFACTS_DIR/$archive_name" -C "$staging" ashide
+  rm -rf "$staging"
 
   (
     cd "$ARTIFACTS_DIR"
@@ -121,18 +122,30 @@ build_macos_helper() {
       ;;
   esac
 
-  local profile_dir="$CARGO_PROFILE"
-  local binary_path="$WORKSPACE_ROOT_DIR/target/$profile_dir/ashide"
-  if [[ ! -f "$binary_path" ]]; then
-    echo "error: macOS helper binary not found at $binary_path; run:" >&2
-    echo "  ./script/bundle --artifact cli --nosign --nouniversal -c $RELEASE_CHANNEL --release-tag $RELEASE_TAG" >&2
+  local binary_path=""
+  for candidate in \
+    "$WORKSPACE_ROOT_DIR/target/$CARGO_PROFILE/ashide" \
+    "$WORKSPACE_ROOT_DIR/target/aarch64-apple-darwin/$CARGO_PROFILE/ashide" \
+    "$WORKSPACE_ROOT_DIR/target/release-lto/bundle/osx/Ashide.app/Contents/MacOS/ashide" \
+    "/Applications/Ashide.app/Contents/MacOS/ashide"; do
+    if [[ -f "$candidate" ]]; then
+      binary_path="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$binary_path" ]]; then
+    echo "error: macOS helper binary not found; run app or cli bundle first" >&2
     exit 1
   fi
 
   package_helper macos "$arch" "$binary_path"
 }
 
-build_linux_helper x86_64-unknown-linux-musl x86_64
+if [[ ! -f "$ARTIFACTS_DIR/ashide-linux-x86_64.tar.gz" ]]; then
+  build_linux_helper x86_64-unknown-linux-musl x86_64
+else
+  echo "Skipping x86_64 Linux helper build; archive already exists"
+fi
 build_linux_helper aarch64-unknown-linux-musl aarch64
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
