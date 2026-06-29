@@ -16143,6 +16143,33 @@ impl Workspace {
         self.apply_active_tab_environment(environment, ctx);
     }
 
+    fn move_pane_to_new_workspace_tab(
+        &mut self,
+        pane_group: &ViewHandle<PaneGroup>,
+        pane_id: PaneId,
+        new_idx: usize,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let Some(pane) = pane_group.update(ctx, |pane_group, ctx| {
+            pane_group.remove_pane_for_move(&pane_id, ctx)
+        }) {
+            self.add_tab_from_existing_pane(pane, new_idx, ctx);
+
+            if *TabSettings::as_ref(ctx).preserve_active_tab_color.value() {
+                if let Some(source_tab) = self
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.pane_group.id() == pane_group.id())
+                {
+                    let selected = source_tab.selected_color;
+                    let default = source_tab.default_directory_color;
+                    self.tabs[self.active_tab_index].selected_color = selected;
+                    self.tabs[self.active_tab_index].default_directory_color = default;
+                }
+            }
+        }
+    }
+
     pub fn add_tab_for_local_notebook(
         &mut self,
         notebook_id: ObjectStoreId,
@@ -19741,9 +19768,13 @@ impl Workspace {
                                 })
                             } else {
                                 // Otherwise, move the existing pane's contents into the workspace tab group.
-                                pane_group.update(ctx, |pane_group, ctx| {
-                                    pane_group.remove_pane_for_move(pane_id, ctx)
-                                })
+                                self.move_pane_to_new_workspace_tab(
+                                    &pane_group,
+                                    *pane_id,
+                                    workspace_tab_index,
+                                    ctx,
+                                );
+                                return;
                             };
 
                             if let Some(pane) = pane {
@@ -19912,6 +19943,13 @@ impl Workspace {
                         }
                     }
                 }
+            }
+            pane_group::Event::MovePaneToNewTab { pane_id } => {
+                let new_idx = match TabSettings::as_ref(ctx).new_tab_placement {
+                    NewTabPlacement::AfterAllTabs => self.tab_count(),
+                    NewTabPlacement::AfterCurrentTab => self.active_tab_index + 1,
+                };
+                self.move_pane_to_new_workspace_tab(&pane_group, *pane_id, new_idx, ctx);
             }
             pane_group::Event::SwitchTabFocusAndMovePane {
                 tab_idx,

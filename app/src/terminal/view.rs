@@ -22273,6 +22273,7 @@ impl TypedActionView for TerminalView {
             | SplitLeft(_)
             | SplitDown(_)
             | SplitUp(_)
+            | MovePaneToNewTab
             | OpenGridLink(_)
             | OpenRichContentLink(_)
             | ToggleGridSecret { .. }
@@ -22624,6 +22625,7 @@ impl TypedActionView for TerminalView {
                 ctx.emit(Event::Pane(PaneEvent::SplitUp(chosen_shell.to_owned())))
             }
             ToggleMaximizePane => ctx.emit(Event::Pane(PaneEvent::ToggleMaximized)),
+            MovePaneToNewTab => ctx.emit(Event::Pane(PaneEvent::MoveToNewTab)),
             PromptContextMenu {
                 position_offset_from_prompt,
             } => self.show_prompt_context_menu(*position_offset_from_prompt, ctx),

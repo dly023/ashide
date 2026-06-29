@@ -212,6 +212,7 @@ pub enum TerminalAction {
     SplitLeft(Option<AvailableShell>),
     SplitDown(Option<AvailableShell>),
     SplitUp(Option<AvailableShell>),
+    MovePaneToNewTab,
     /// The context menu that's used for the prompt directly above input editor
     PromptContextMenu {
         position_offset_from_prompt: Vector2F,
@@ -488,6 +489,7 @@ impl fmt::Debug for TerminalAction {
             SplitDown(_) => f.write_str("SplitDown"),
             SplitUp(_) => f.write_str("SplitUp"),
             ToggleMaximizePane => f.write_str("ToggleMaximizeActivePane"),
+            MovePaneToNewTab => f.write_str("MovePaneToNewTab"),
             PromptContextMenu {
                 position_offset_from_prompt,
             } => write!(

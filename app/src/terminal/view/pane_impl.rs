@@ -443,6 +443,11 @@ impl BackingView for TerminalView {
                     .with_on_select_action(TerminalAction::ToggleMaximizePane)
                     .into_item(),
             );
+            items.push(
+                MenuItemFields::new("Move pane to new tab")
+                    .with_on_select_action(TerminalAction::MovePaneToNewTab)
+                    .into_item(),
+            );
         }
 
         items
