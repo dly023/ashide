@@ -1,0 +1,27 @@
+[Desktop Entry]
+# The version of the desktop entry spec this conforms to.
+Version=1.0
+
+Type=Application
+
+Name=Ashide
+GenericName=TerminalEmulator
+
+# `ashide` 在 deb/rpm 包里是 /opt/ashide/ashide 的 symlink,
+# 在 arch 包里是 /usr/bin/ashide wrapper script —— 三者都在 PATH 上能直接调用。
+# AppImage 打包时 bundle_appimage 会用 sed 把这一行替换为 `Exec=ashide %U`,
+# 直接指向 AppImage 内部的二进制。
+Exec=ashide %U
+StartupWMClass=dev.ashide.Ashide
+
+Keywords=shell;prompt;command;commandline;cmd;
+
+Icon=dev.ashide.Ashide
+
+Categories=System;TerminalEmulator;
+
+# Don't run this application within a terminal.
+Terminal=false
+
+# Register ourselves as the handler for ashide:// URLs.
+MimeType=x-scheme-handler/ashide;

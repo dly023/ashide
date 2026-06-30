@@ -1,0 +1,13 @@
+use settings::{macros::define_settings_group, SupportedPlatforms};
+
+define_settings_group!(AutoupdateSettings, settings: [
+    automatic_updates_enabled: AutomaticUpdatesEnabled {
+        type: bool,
+        default: true,
+        supported_platforms: SupportedPlatforms::DESKTOP,
+        private: false,
+        storage_key: "AutomaticUpdatesEnabled",
+        toml_path: "updates.automatic_updates_enabled",
+        description: "Whether Ashide automatically checks for and downloads updates in the background.",
+    },
+]);

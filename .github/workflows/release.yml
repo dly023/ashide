@@ -1,0 +1,339 @@
+name: Build release artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create/update, e.g. v0.1.2"
+        required: true
+        type: string
+      channel:
+        description: "Ashide release channel"
+        required: true
+        default: oss
+        type: choice
+        options:
+          - oss
+          - stable
+          - preview
+          - dev
+          - local
+      upload_to_release:
+        description: "Upload artifacts to the GitHub Release"
+        required: true
+        default: true
+        type: boolean
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_type == 'tag' && github.ref_name || github.event.inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || github.event.inputs.tag }}
+  RELEASE_CHANNEL: ${{ github.event.inputs.channel || 'oss' }}
+
+jobs:
+  build-macos:
+    name: macOS app
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select stable Rust
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - name: Cache Cargo registry and tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-about
+            ~/.cargo/bin/cargo-bundle
+          key: macos-cargo-tools-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            macos-cargo-tools-
+
+      - name: Install macOS packaging tools
+        run: |
+          brew install create-dmg protobuf
+          if ! command -v cargo-about >/dev/null 2>&1; then
+            cargo install --locked cargo-about@0.8.4
+          fi
+          if ! command -v cargo-bundle >/dev/null 2>&1; then
+            cargo install cargo-bundle --git=https://github.com/burtonageo/cargo-bundle --rev ae4c76e92c08774bf54ff077b1c52e3d1cd6c16d
+          fi
+
+      - name: Build macOS app bundle
+        env:
+          ASHIDE_DEVELOPER_ID_CERT: ${{ secrets.ASHIDE_DEVELOPER_ID_CERT }}
+          ASHIDE_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.ASHIDE_DEVELOPER_ID_CERT_PASSWORD }}
+          ASHIDE_CODESIGN_KEYCHAIN_PASSWORD: ${{ secrets.ASHIDE_CODESIGN_KEYCHAIN_PASSWORD }}
+          ASHIDE_NOTARIZATION_APPLE_ID: ${{ secrets.ASHIDE_NOTARIZATION_APPLE_ID }}
+          ASHIDE_NOTARIZATION_PASSWORD: ${{ secrets.ASHIDE_NOTARIZATION_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          bundle_args=(
+            --channel "$RELEASE_CHANNEL"
+            --release-tag "$RELEASE_TAG"
+            --nouniversal
+          )
+
+          macos_signing_secret_count=0
+          for secret_name in \
+            ASHIDE_DEVELOPER_ID_CERT \
+            ASHIDE_DEVELOPER_ID_CERT_PASSWORD \
+            ASHIDE_CODESIGN_KEYCHAIN_PASSWORD \
+            ASHIDE_NOTARIZATION_APPLE_ID \
+            ASHIDE_NOTARIZATION_PASSWORD; do
+            if [[ -n "${!secret_name:-}" ]]; then
+              macos_signing_secret_count=$((macos_signing_secret_count + 1))
+            fi
+          done
+
+          if [[ "$macos_signing_secret_count" -eq 5 ]]; then
+            echo "macOS signing secrets are present; building signed and notarized app."
+            bundle_args+=(--read-passwords-from-env)
+          elif [[ "$macos_signing_secret_count" -eq 0 ]]; then
+            echo "macOS signing secrets are not configured; building unsigned app."
+            bundle_args+=(--nosign)
+          else
+            echo "::error::macOS signing secrets are partially configured. Set all required ASHIDE_* secrets, or remove all of them for unsigned builds."
+            exit 1
+          fi
+
+          ./script/bundle "${bundle_args[@]}"
+
+      - name: Package macOS artifact
+        run: |
+          ./script/make_release_artifacts \
+            --channel "$RELEASE_CHANNEL" \
+            --artifact app \
+            --name Ashide-macos
+          cd target/release-artifacts
+          shasum -a 256 Ashide-macos.zip > Ashide-macos.zip.sha256
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          if-no-files-found: error
+          path: |
+            target/release-artifacts/Ashide-macos.zip
+            target/release-artifacts/Ashide-macos.zip.sha256
+
+  build-linux-cli:
+    name: Linux CLI
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select stable Rust
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - name: Cache Cargo registry and tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-about
+          key: linux-cargo-tools-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            linux-cargo-tools-
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          ./script/linux/install_build_deps
+          if ! command -v cargo-about >/dev/null 2>&1; then
+            cargo install --locked cargo-about@0.8.4
+          fi
+
+      - name: Build Linux CLI bundle
+        run: |
+          ./script/bundle \
+            --channel "$RELEASE_CHANNEL" \
+            --release-tag "$RELEASE_TAG" \
+            --artifact cli \
+            --packages none
+
+      - name: Package Linux CLI artifact
+        run: |
+          if [ "$RELEASE_CHANNEL" = "local" ] || [ "$RELEASE_CHANNEL" = "dev" ]; then
+            cargo_profile=release-cli-debug_assertions
+          else
+            cargo_profile=release-cli
+          fi
+          mkdir -p target/release-artifacts target/release-staging/ashide-linux-x64
+          cp "target/$cargo_profile/ashide" target/release-staging/ashide-linux-x64/ashide
+          if [ -d "target/$cargo_profile/bundle/linux/resources" ]; then
+            cp -R "target/$cargo_profile/bundle/linux/resources" target/release-staging/ashide-linux-x64/resources
+          fi
+          chmod 755 target/release-staging/ashide-linux-x64/ashide
+          tar -czf target/release-artifacts/ashide-linux-x64.tar.gz -C target/release-staging ashide-linux-x64
+          cd target/release-artifacts
+          sha256sum ashide-linux-x64.tar.gz > ashide-linux-x64.tar.gz.sha256
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-cli
+          if-no-files-found: error
+          path: |
+            target/release-artifacts/ashide-linux-x64.tar.gz
+            target/release-artifacts/ashide-linux-x64.tar.gz.sha256
+
+  build-windows:
+    name: Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select stable Rust
+        shell: pwsh
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc
+
+      - name: Cache Cargo registry and tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-about.exe
+          key: windows-cargo-tools-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            windows-cargo-tools-
+
+      - name: Install Windows packaging tools
+        shell: pwsh
+        run: |
+          choco install innosetup protoc --no-progress -y
+          if (-not (Get-Command cargo-about -ErrorAction SilentlyContinue)) {
+            cargo install --locked cargo-about@0.8.4
+          }
+
+      - name: Build Windows installer
+        shell: pwsh
+        env:
+          WINDOWS_SIGN_TOOL_CMD: ${{ secrets.WINDOWS_SIGN_TOOL_CMD }}
+          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
+          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
+        run: |
+          if ($env:WINDOWS_SIGN_TOOL_CMD) {
+            $env:SIGN_TOOL_CMD = $env:WINDOWS_SIGN_TOOL_CMD
+            Write-Host "Using WINDOWS_SIGN_TOOL_CMD for Windows installer signing."
+          } elseif ($env:WINDOWS_CODESIGN_PFX_BASE64 -or $env:WINDOWS_CODESIGN_PFX_PASSWORD) {
+            if (-not ($env:WINDOWS_CODESIGN_PFX_BASE64 -and $env:WINDOWS_CODESIGN_PFX_PASSWORD)) {
+              throw 'Windows signing secrets are partially configured. Set both WINDOWS_CODESIGN_PFX_BASE64 and WINDOWS_CODESIGN_PFX_PASSWORD, or remove both for unsigned builds.'
+            }
+
+            $pfxPath = Join-Path $env:RUNNER_TEMP 'ashide-codesign.pfx'
+            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CODESIGN_PFX_BASE64))
+
+            $securePassword = ConvertTo-SecureString $env:WINDOWS_CODESIGN_PFX_PASSWORD -AsPlainText -Force
+            $importedCerts = @(Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePassword)
+            Remove-Item $pfxPath -Force
+
+            $cert = $importedCerts | Where-Object { $_.HasPrivateKey } | Select-Object -First 1
+            if (-not $cert) {
+              throw 'Failed to import a Windows codesigning certificate with a private key'
+            }
+
+            $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
+            if (-not $signtool) {
+              $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue `
+                | Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } `
+                | Sort-Object FullName -Descending `
+                | Select-Object -First 1 -ExpandProperty FullName
+            }
+            if (-not $signtool) {
+              throw 'signtool.exe not found'
+            }
+
+            $env:SIGN_TOOL_CMD = "`"$signtool`" sign /fd SHA256 /sha1 $($cert.Thumbprint) /tr http://timestamp.digicert.com /td SHA256 `$f"
+            Write-Host "Imported Windows codesigning certificate and enabled installer signing."
+          } else {
+            Write-Host "Windows signing secrets are not configured; building unsigned installer."
+          }
+
+          .\script\windows\bundle.ps1 `
+            -CHANNEL "$env:RELEASE_CHANNEL" `
+            -RELEASE_TAG "$env:RELEASE_TAG" `
+            -ARCH x64
+
+      - name: Package Windows artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path target\release-artifacts | Out-Null
+          $installer = Get-ChildItem script\windows\Output -Filter '*.exe' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $installer) { throw 'Windows installer was not produced' }
+          Copy-Item $installer.FullName target\release-artifacts\Ashide-windows-x64-setup.exe -Force
+          $hash = (Get-FileHash target\release-artifacts\Ashide-windows-x64-setup.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  Ashide-windows-x64-setup.exe" | Out-File -Encoding ascii target\release-artifacts\Ashide-windows-x64-setup.exe.sha256
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          if-no-files-found: error
+          path: |
+            target/release-artifacts/Ashide-windows-x64-setup.exe
+            target/release-artifacts/Ashide-windows-x64-setup.exe.sha256
+
+  upload-release:
+    name: Upload GitHub Release assets
+    runs-on: ubuntu-latest
+    needs:
+      - build-macos
+      - build-linux-cli
+      - build-windows
+    if: ${{ github.event_name == 'push' || github.event.inputs.upload_to_release == 'true' }}
+    steps:
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Show artifacts
+        run: find dist -maxdepth 2 -type f -print | sort
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists"
+          else
+            gh release create "$RELEASE_TAG" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TAG" \
+              --notes "Automated Ashide release build for $RELEASE_TAG."
+          fi
+          gh release upload "$RELEASE_TAG" dist/* --clobber

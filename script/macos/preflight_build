@@ -1,0 +1,139 @@
+#!/bin/bash
+#
+# Lightweight macOS build preflight for Ashide.
+#
+# This does not install anything. It reports the local toolchain state needed
+# before running app-level checks such as:
+#   cargo check -p warp --lib --no-default-features
+#   ./script/run --dont-open
+
+set -u
+
+failures=0
+warnings=0
+
+print_header() {
+  echo "== Ashide macOS build preflight =="
+  echo "repo: $(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  echo ""
+}
+
+pass() {
+  echo "[OK] $*"
+}
+
+warn() {
+  echo "[WARN] $*"
+  warnings=$((warnings + 1))
+}
+
+fail() {
+  echo "[FAIL] $*"
+  failures=$((failures + 1))
+}
+
+check_command() {
+  local name="$1"
+  local install_hint="${2:-}"
+  if command -v "$name" >/dev/null 2>&1; then
+    pass "$name: $(command -v "$name")"
+  else
+    if [ -n "$install_hint" ]; then
+      fail "$name not found ($install_hint)"
+    else
+      fail "$name not found"
+    fi
+  fi
+}
+
+check_version_command() {
+  local name="$1"
+  local version_args="$2"
+  local install_hint="${3:-}"
+  if command -v "$name" >/dev/null 2>&1; then
+    local version
+    version="$($name $version_args 2>/dev/null | head -n 1 || true)"
+    if [ -n "$version" ]; then
+      pass "$name: $version"
+    else
+      pass "$name: $(command -v "$name")"
+    fi
+  else
+    if [ -n "$install_hint" ]; then
+      fail "$name not found ($install_hint)"
+    else
+      fail "$name not found"
+    fi
+  fi
+}
+
+check_xcode() {
+  local selected=""
+  selected="$(xcode-select -p 2>/dev/null || true)"
+  if [ -z "$selected" ]; then
+    fail "xcode-select has no active developer directory"
+  else
+    pass "xcode-select: $selected"
+  fi
+
+  if [ -d "/Applications/Xcode.app/Contents/Developer" ]; then
+    pass "Xcode.app: /Applications/Xcode.app"
+  else
+    fail "Xcode.app not found at /Applications/Xcode.app (install Xcode from the App Store, then run: sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer)"
+  fi
+
+  if command -v xcodebuild >/dev/null 2>&1; then
+    local xcodebuild_version
+    xcodebuild_version="$(xcodebuild -version 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)"
+    if [ -n "$xcodebuild_version" ]; then
+      pass "xcodebuild: $xcodebuild_version"
+    else
+      warn "xcodebuild exists but did not return a version; first launch/license may be incomplete"
+    fi
+  else
+    fail "xcodebuild not found"
+  fi
+
+  local metal_output=""
+  local metal_status=0
+  metal_output="$(xcrun --find metal 2>&1)"
+  metal_status=$?
+  if [ "$metal_status" -eq 0 ] && [ -n "$metal_output" ]; then
+    pass "metal: $metal_output"
+  elif printf '%s\n' "$metal_output" | grep -qi "license"; then
+    fail "xcrun is blocked by Xcode license; run: sudo xcodebuild -license accept"
+  else
+    fail "metal not found via xcrun (after Xcode install: xcodebuild -runFirstLaunch && xcodebuild -downloadComponent MetalToolchain)"
+  fi
+}
+
+print_next_steps() {
+  echo ""
+  if [ "$failures" -eq 0 ]; then
+    echo "Preflight result: PASS ($warnings warning(s))."
+    echo "Suggested next check: cargo check -p warp --lib --no-default-features"
+  else
+    echo "Preflight result: FAIL ($failures failure(s), $warnings warning(s))."
+    echo "Minimum remediation for current macOS app-level checks:"
+    echo "  1. Install Xcode from the App Store if /Applications/Xcode.app is missing."
+    echo "  2. Run: sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer"
+    echo "  3. Run: sudo xcodebuild -license accept"
+    echo "  4. Run: xcodebuild -runFirstLaunch"
+    echo "  5. Run: xcodebuild -downloadComponent MetalToolchain"
+    echo "  6. Re-run: ./script/macos/preflight_build"
+  fi
+}
+
+print_header
+check_version_command rustc "--version" "install Rust/Cargo"
+check_version_command cargo "--version" "install Rust/Cargo"
+check_version_command protoc "--version" "brew install protobuf"
+check_command brew "install Homebrew"
+check_xcode
+print_next_steps
+
+if [ "$failures" -eq 0 ]; then
+  exit 0
+else
+  exit 1
+fi

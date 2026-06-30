@@ -1,0 +1,597 @@
+#!/usr/bin/env bash
+#
+# Cross-compiles the Ashide remote helper for Linux x86_64/aarch64 (musl) on macOS
+# and uploads it to a remote host via rsync for local remote-server development.
+#
+# Uses rsync for delta transfers — after the first deploy, only changed bytes
+# are sent, which is dramatically faster for iterative development.
+#
+# Prerequisites:
+#   cargo install cargo-zigbuild
+#   brew install zig
+#   rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+#
+# Usage:
+#   script/deploy_remote_server --host user@hostname [--target aarch64-unknown-linux-musl]
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Defaults
+PROFILE_MODE="dev-remote"
+HOST=""
+TARGET=""
+FORCE_BUILD=0
+CHECK_FRESHNESS=0
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") --host <user@hostname> [OPTIONS]
+
+Cross-compile the Ashide remote helper for Linux x86_64/aarch64 and upload it to a remote host.
+
+Required:
+  --host <user@hostname>    Remote host to upload to
+
+Options:
+  --target <target>         Rust target triple. Supported: x86_64-unknown-linux-musl,
+                            aarch64-unknown-linux-musl. Defaults to detecting remote uname.
+  --profile <profile>       Build profile: dev-remote (default, strips symbols), dev, release, or optimized
+                            Use --profile dev if you need symbols for remote debugging
+  --force-build             Ignore the local freshness stamp and run cargo build
+  --check-freshness         Only check freshness decisions; never build or upload
+  --help                    Show this help message
+EOF
+  exit 0
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --host)
+      HOST="$2"
+      shift 2
+      ;;
+    --profile)
+      PROFILE_MODE="$2"
+      shift 2
+      ;;
+    --target)
+      TARGET="$2"
+      shift 2
+      ;;
+    --force-build)
+      FORCE_BUILD=1
+      shift
+      ;;
+    --check-freshness)
+      CHECK_FRESHNESS=1
+      shift
+      ;;
+    --help)
+      usage
+      ;;
+    *)
+      echo "Error: Unknown argument: $1" >&2
+      echo "Run with --help for usage." >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Validate required arguments
+if [[ -z "$HOST" ]]; then
+  echo "Error: --host is required." >&2
+  echo "Run with --help for usage." >&2
+  exit 1
+fi
+
+# Validate profile
+case "$PROFILE_MODE" in
+  dev-remote|dev|release|optimized) ;;
+  *)
+    echo "Error: Unsupported profile '$PROFILE_MODE'. Use 'dev-remote', 'dev', 'release', or 'optimized'." >&2
+    exit 1
+    ;;
+esac
+
+SSH_COMMAND=(ssh -o ClearAllForwardings=yes)
+RSYNC_RSH="ssh -o ClearAllForwardings=yes"
+
+if [[ -z "$TARGET" ]]; then
+  REMOTE_PLATFORM="$("${SSH_COMMAND[@]}" "$HOST" 'printf "%s %s" "$(uname -s)" "$(uname -m)"')"
+  case "$REMOTE_PLATFORM" in
+    "Linux x86_64"|"Linux amd64")
+      TARGET="x86_64-unknown-linux-musl"
+      ;;
+    "Linux aarch64"|"Linux arm64")
+      TARGET="aarch64-unknown-linux-musl"
+      ;;
+    *)
+      echo "Error: unsupported remote platform '$REMOTE_PLATFORM'." >&2
+      echo "Pass --target explicitly if this host is supported by a custom toolchain." >&2
+      exit 1
+      ;;
+  esac
+fi
+
+case "$TARGET" in
+  x86_64-unknown-linux-musl|aarch64-unknown-linux-musl) ;;
+  *)
+    echo "Error: unsupported target '$TARGET'." >&2
+    echo "Supported: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl" >&2
+    exit 1
+    ;;
+esac
+
+if ! rustup target list --installed 2>/dev/null | grep -qx "$TARGET"; then
+  echo "Error: $TARGET target not installed." >&2
+  echo "Install it with: rustup target add $TARGET" >&2
+  exit 1
+fi
+
+BUILD_BACKEND=""
+if cargo zigbuild --help &>/dev/null && command -v zig &>/dev/null; then
+  BUILD_BACKEND="cargo-zigbuild"
+elif [[ "$TARGET" == "x86_64-unknown-linux-musl" ]] && command -v x86_64-linux-musl-gcc &>/dev/null; then
+  BUILD_BACKEND="cargo-build/x86_64-linux-musl-gcc"
+else
+  echo "Error: no cross-build backend for $TARGET." >&2
+  echo "Install cargo-zigbuild + zig, or for x86_64 install x86_64-linux-musl-gcc." >&2
+  exit 1
+fi
+
+case "$PROFILE_MODE" in
+  dev-remote)
+    CARGO_PROFILE="dev-remote"
+    ;;
+  dev)
+    CARGO_PROFILE="dev"
+    ;;
+  release)
+    CARGO_PROFILE="release"
+    ;;
+  optimized)
+    CARGO_PROFILE="release-lto-debug_assertions"
+    ;;
+esac
+
+FEATURES="release_bundle,crash_reporting,standalone,agent_mode_debug"
+ASHIDE_BIN="${ASHIDE_REMOTE_HELPER_BIN:-ashide}"
+BINARY_NAME="${ASHIDE_REMOTE_HELPER_REMOTE_NAME:-ashide-dev-pty-v1}"
+REMOTE_DIR="${ASHIDE_REMOTE_HELPER_REMOTE_DIR:-.ashide-dev/remote-server}"
+STAMP_FILE=".ashide-remote-helper-build.stamp"
+
+# Determine the output directory. By default remote-server helper builds use an
+# isolated target tree so x86_64 Linux helper caches do not inflate the normal
+# macOS/app debug target. Set ASHIDE_DEV_REMOTE_TARGET_DIR to override.
+CARGO_TARGET_DIR="${ASHIDE_DEV_REMOTE_TARGET_DIR:-${CARGO_TARGET_DIR:-$WORKSPACE_ROOT/target/dev-remote}}"
+case "$CARGO_PROFILE" in
+  dev)
+    OUTPUT_DIR="$CARGO_TARGET_DIR/$TARGET/debug"
+    ;;
+  *)
+    OUTPUT_DIR="$CARGO_TARGET_DIR/$TARGET/$CARGO_PROFILE"
+    ;;
+esac
+BUILT_BINARY="$OUTPUT_DIR/$ASHIDE_BIN"
+STAMP_PATH="$CARGO_TARGET_DIR/$TARGET/$STAMP_FILE"
+EXPECTED_STAMP_TMP=""
+REMOTE_STAMP_TMP=""
+
+cleanup_stamp_tmp() {
+  if [[ -n "$EXPECTED_STAMP_TMP" && -f "$EXPECTED_STAMP_TMP" ]]; then
+    rm -f "$EXPECTED_STAMP_TMP"
+  fi
+  if [[ -n "$REMOTE_STAMP_TMP" && -f "$REMOTE_STAMP_TMP" ]]; then
+    rm -f "$REMOTE_STAMP_TMP"
+  fi
+}
+trap cleanup_stamp_tmp EXIT
+
+remote_helper_stamp_tool() {
+  python3 - "$WORKSPACE_ROOT" "$TARGET" "$CARGO_PROFILE" "$FEATURES" "$ASHIDE_BIN" "$@" <<'PY'
+import hashlib
+import os
+import subprocess
+import sys
+
+root, target, profile, features, bin_name, command, *args = sys.argv[1:]
+scopes = [
+    # Keep this in sync with DEV_REMOTE_BUILD_INPUT_SCOPES in
+    # app/src/remote_server/ssh_transport.rs. The helper binary is the
+    # remote-runtime capable Ashide binary, but freshness only depends on
+    # runtime/helper inputs. Do not add whole crates/subdirectories here.
+    "Cargo.toml",
+    "Cargo.lock",
+    "app/Cargo.toml",
+    "app/src/bin/ashide.rs",
+    "app/src/remote_server/mod.rs",
+    "app/src/remote_server/server_buffer_tracker.rs",
+    "app/src/remote_server/server_model.rs",
+    "app/src/remote_server/unix/mod.rs",
+    "app/src/remote_server/unix/proxy.rs",
+    "app/src/code/global_buffer_model.rs",
+    "app/src/terminal/model/session/command_executor.rs",
+    "app/src/terminal/model/session/command_executor/local_command_executor.rs",
+    "app/src/terminal/local_tty/shell.rs",
+    "app/src/ai/blocklist/action_model/execute.rs",
+    "crates/ai/src/agent/action_result/mod.rs",
+    "crates/ai/src/agent/file_locations.rs",
+    "crates/command/Cargo.toml",
+    "crates/command/src/async.rs",
+    "crates/command/src/blocking.rs",
+    "crates/command/src/lib.rs",
+    "crates/command/src/unix.rs",
+    "crates/command/src/windows.rs",
+    "crates/remote_server/Cargo.toml",
+    "crates/remote_server/proto/remote_server.proto",
+    "crates/remote_server/src/lib.rs",
+    "crates/remote_server/src/protocol.rs",
+    "crates/remote_server/src/repo_metadata_proto.rs",
+    "crates/remote_server/src/runtime_paths.rs",
+    "crates/repo_metadata/Cargo.toml",
+    "crates/repo_metadata/src/current_app_model.rs",
+    "crates/repo_metadata/src/entry.rs",
+    "crates/repo_metadata/src/file_tree_store.rs",
+    "crates/repo_metadata/src/file_tree_store/file_tree_state.rs",
+    "crates/repo_metadata/src/file_tree_update.rs",
+    "crates/repo_metadata/src/lib.rs",
+    "crates/repo_metadata/src/remote_model.rs",
+    "crates/repo_metadata/src/repositories.rs",
+    "crates/repo_metadata/src/repository.rs",
+    "crates/repo_metadata/src/repository_identifier.rs",
+    "crates/repo_metadata/src/watcher.rs",
+    "crates/repo_metadata/src/wrapper_model.rs",
+    "crates/warp_cli/Cargo.toml",
+    "crates/warp_cli/src/lib.rs",
+    "crates/warp_core/Cargo.toml",
+    "crates/warp_core/src/app_id.rs",
+    "crates/warp_core/src/channel/config.rs",
+    "crates/warp_core/src/channel/mod.rs",
+    "crates/warp_core/src/channel/state.rs",
+    "crates/warp_core/src/errors.rs",
+    "crates/warp_core/src/execution_mode.rs",
+    "crates/warp_core/src/features.rs",
+    "crates/warp_core/src/host_id.rs",
+    "crates/warp_core/src/lib.rs",
+    "crates/warp_core/src/paths.rs",
+    "crates/warp_core/src/platform.rs",
+    "crates/warp_core/src/safe_log.rs",
+    "crates/warp_core/src/session_id.rs",
+    "crates/warp_core/src/sync_queue.rs",
+    "crates/warp_core/src/user_preferences.rs",
+    "crates/warp_files/Cargo.toml",
+    "crates/warp_files/src/lib.rs",
+    "crates/warp_files/src/text_file_reader.rs",
+    "crates/warp_terminal/Cargo.toml",
+    "crates/warp_terminal/src/shell/mod.rs",
+    "crates/warp_terminal/src/shell/unescape.rs",
+    "crates/warp_util/Cargo.toml",
+    "crates/warp_util/src/assets.rs",
+    "crates/warp_util/src/content_version.rs",
+    "crates/warp_util/src/file.rs",
+    "crates/warp_util/src/file_type.rs",
+    "crates/warp_util/src/lib.rs",
+    "crates/warp_util/src/on_cancel.rs",
+    "crates/warp_util/src/path.rs",
+    "crates/warp_util/src/standardized_path.rs",
+    "crates/warp_util/src/user_input.rs",
+    "crates/warp_util/src/windows.rs",
+    "crates/warp_util/src/worktree_names.rs",
+]
+
+
+def git_paths(extra_args):
+    completed = subprocess.run(
+        ["git", "ls-files", *extra_args, "-z", "--", *scopes],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr.decode("utf-8", "replace"))
+    return [
+        entry.decode("utf-8", "replace")
+        for entry in completed.stdout.split(b"\0")
+        if entry
+    ]
+
+
+def scoped_paths():
+    return sorted(
+        set(git_paths([]) + git_paths(["--others", "--exclude-standard"]))
+    )
+
+
+def input_digest():
+    digest = hashlib.sha256()
+    for rel in scoped_paths():
+        digest.update(b"path\0")
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        path = os.path.join(root, rel)
+        try:
+            with open(path, "rb") as handle:
+                digest.update(b"file\0")
+                while True:
+                    chunk = handle.read(64 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                digest.update(b"\0")
+        except FileNotFoundError:
+            digest.update(b"missing\0")
+    return digest.hexdigest()
+
+
+if command == "stamp":
+    sys.stdout.write(
+        "\n".join(
+            [
+                "version=1",
+                f"target={target}",
+                f"profile={profile}",
+                f"features={features}",
+                f"bin={bin_name}",
+                f"input_digest={input_digest()}",
+                "",
+            ]
+        )
+    )
+elif command == "binary-covers":
+    if len(args) != 1:
+        print("binary-covers requires a binary path", file=sys.stderr)
+        sys.exit(2)
+    binary_path = args[0]
+    if not os.path.isfile(binary_path):
+        sys.exit(1)
+    binary_mtime = os.path.getmtime(binary_path)
+    for rel in scoped_paths():
+        path = os.path.join(root, rel)
+        if not os.path.exists(path):
+            sys.exit(1)
+        if os.path.getmtime(path) > binary_mtime:
+            sys.exit(1)
+    sys.exit(0)
+else:
+    print(f"unknown command: {command}", file=sys.stderr)
+    sys.exit(2)
+PY
+}
+
+write_expected_stamp() {
+  local output_path="$1"
+  remote_helper_stamp_tool stamp > "$output_path"
+}
+
+local_file_sha256() {
+  local path="$1"
+  (sha256sum "$path" 2>/dev/null || shasum -a 256 "$path" 2>/dev/null) | awk '{print $1}'
+}
+
+echo "==> Checking Ashide remote helper for $TARGET (profile=$CARGO_PROFILE)"
+echo "    Binary: $ASHIDE_BIN -> $BINARY_NAME"
+echo "    Backend: $BUILD_BACKEND"
+echo "    Features: $FEATURES"
+echo ""
+
+if command -v python3 &>/dev/null; then
+  EXPECTED_STAMP_TMP="$(mktemp "${TMPDIR:-/tmp}/ashide-remote-helper-stamp.XXXXXX")"
+  if ! write_expected_stamp "$EXPECTED_STAMP_TMP"; then
+    echo "Warning: could not compute remote-helper freshness stamp; cargo build will run." >&2
+    rm -f "$EXPECTED_STAMP_TMP"
+    EXPECTED_STAMP_TMP=""
+  fi
+else
+  echo "Warning: python3 not found; cannot compute remote-helper freshness stamp." >&2
+fi
+
+REMOTE_HOME=$("${SSH_COMMAND[@]}" "$HOST" 'printf %s "$HOME"')
+if [[ -z "$REMOTE_HOME" ]]; then
+  echo "Error: could not resolve remote \$HOME on $HOST" >&2
+  exit 1
+fi
+
+REMOTE_ABS_DIR="$REMOTE_HOME/$REMOTE_DIR"
+REMOTE_BINARY="$REMOTE_ABS_DIR/$BINARY_NAME"
+REMOTE_STAMP="$REMOTE_BINARY.stamp"
+REMOTE_FRESH=0
+
+if [[ "$FORCE_BUILD" -eq 0 && -n "$EXPECTED_STAMP_TMP" ]]; then
+  REMOTE_STAMP_TMP="$(mktemp "${TMPDIR:-/tmp}/ashide-remote-helper-remote-stamp.XXXXXX")"
+  if "${SSH_COMMAND[@]}" "$HOST" "test -x '$REMOTE_BINARY' && cat '$REMOTE_STAMP' 2>/dev/null" > "$REMOTE_STAMP_TMP"; then
+    if cmp -s "$EXPECTED_STAMP_TMP" "$REMOTE_STAMP_TMP"; then
+      REMOTE_FRESH=1
+    fi
+  fi
+fi
+
+if [[ "$REMOTE_FRESH" -eq 1 ]]; then
+  if [[ -n "$EXPECTED_STAMP_TMP" ]]; then
+    mkdir -p "$(dirname "$STAMP_PATH")"
+    cp "$EXPECTED_STAMP_TMP" "$STAMP_PATH"
+  fi
+  echo "==> Remote helper already matches expected freshness stamp; skipping local build and upload"
+  echo "    $HOST:$REMOTE_BINARY"
+  echo ""
+  echo "==> Done! Binary available at $HOST:$REMOTE_BINARY"
+  echo "    (resolved from ~/$REMOTE_DIR/$BINARY_NAME on remote)"
+  exit 0
+fi
+
+REUSE_LOCAL_BINARY=0
+if [[ "$FORCE_BUILD" -eq 0 && -n "$EXPECTED_STAMP_TMP" && -f "$BUILT_BINARY" && -f "$STAMP_PATH" ]] && cmp -s "$EXPECTED_STAMP_TMP" "$STAMP_PATH"; then
+  REUSE_LOCAL_BINARY=1
+  echo "==> Inputs unchanged; reusing existing helper binary"
+  echo "    $BUILT_BINARY"
+elif [[ "$FORCE_BUILD" -eq 0 && -n "$EXPECTED_STAMP_TMP" && -f "$BUILT_BINARY" ]] && remote_helper_stamp_tool binary-covers "$BUILT_BINARY"; then
+  REUSE_LOCAL_BINARY=1
+  mkdir -p "$(dirname "$STAMP_PATH")"
+  cp "$EXPECTED_STAMP_TMP" "$STAMP_PATH"
+  echo "==> Existing helper binary is newer than freshness inputs; refreshed stamp and reusing"
+  echo "    $BUILT_BINARY"
+fi
+
+if [[ "$CHECK_FRESHNESS" -eq 1 ]]; then
+  echo "==> Remote helper freshness check only; not building or uploading"
+  if [[ -z "$EXPECTED_STAMP_TMP" ]]; then
+    echo "    Expected stamp unavailable; cargo build would run in normal deploy mode"
+    exit 4
+  fi
+
+  echo "    Expected stamp:"
+  sed 's/^/      /' "$EXPECTED_STAMP_TMP"
+  if [[ "$REUSE_LOCAL_BINARY" -eq 1 ]]; then
+    echo "    Local helper binary can be reused; normal deploy would upload/refresh remote stamp"
+    exit 2
+  fi
+
+  echo "    Local helper binary is stale or missing; normal deploy would run cargo build"
+  exit 3
+fi
+
+if [[ "$REUSE_LOCAL_BINARY" -eq 0 ]]; then
+  # Build with linker and rustflags overrides to avoid macOS-specific flags
+  # from .cargo/config.toml. CARGO_TARGET_DIR is exported only for this command
+  # so helper builds stay isolated from the normal app/debug target tree.
+  if [[ "$BUILD_BACKEND" == "cargo-zigbuild" ]]; then
+    CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+      cargo zigbuild \
+        -p warp \
+        --bin "$ASHIDE_BIN" \
+        --target "$TARGET" \
+        --profile "$CARGO_PROFILE" \
+        --features "$FEATURES"
+  else
+    CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc \
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C symbol-mangling-version=v0" \
+      cargo build \
+        -p warp \
+        --bin "$ASHIDE_BIN" \
+        --target "$TARGET" \
+        --profile "$CARGO_PROFILE" \
+        --features "$FEATURES"
+  fi
+
+  if [[ -n "$EXPECTED_STAMP_TMP" ]]; then
+    mkdir -p "$(dirname "$STAMP_PATH")"
+    mv "$EXPECTED_STAMP_TMP" "$STAMP_PATH"
+    EXPECTED_STAMP_TMP=""
+  fi
+fi
+
+if [[ ! -f "$BUILT_BINARY" ]]; then
+  echo "Error: Expected binary not found at $BUILT_BINARY" >&2
+  exit 1
+fi
+
+BINARY_SIZE=$(du -h "$BUILT_BINARY" | cut -f1)
+echo ""
+echo "==> Build complete ($BINARY_SIZE)"
+
+# Resolve $HOME on the remote so our upload lands in the same directory the
+# Ashide client checks. The client runs `test -x ~/.ashide-local/...` and lets
+# the remote login shell expand `~` to $HOME, while rsync's remote path
+# expansion can differ (e.g. on Namespace devboxes, the initial directory
+# is /workspaces but $HOME is elsewhere). Using an absolute path derived
+# from the remote $HOME keeps both sides consistent.
+
+# Ensure the remote directory exists
+"${SSH_COMMAND[@]}" "$HOST" "mkdir -p $REMOTE_ABS_DIR"
+
+REMOTE_FRESH=0
+if [[ -f "$STAMP_PATH" ]]; then
+  REMOTE_STAMP_TMP="$(mktemp "${TMPDIR:-/tmp}/ashide-remote-helper-remote-stamp.XXXXXX")"
+  if "${SSH_COMMAND[@]}" "$HOST" "test -x '$REMOTE_BINARY' && cat '$REMOTE_STAMP' 2>/dev/null" > "$REMOTE_STAMP_TMP"; then
+    if cmp -s "$STAMP_PATH" "$REMOTE_STAMP_TMP"; then
+      REMOTE_FRESH=1
+    fi
+  fi
+fi
+
+if [[ "$REMOTE_FRESH" -eq 1 ]]; then
+  echo "==> Remote helper already matches local freshness stamp; skipping upload"
+  echo "    $HOST:$REMOTE_BINARY"
+else
+  REMOTE_BINARY_MATCHES_LOCAL=0
+  if [[ -f "$STAMP_PATH" ]]; then
+    LOCAL_BINARY_HASH="$(local_file_sha256 "$BUILT_BINARY" || true)"
+    REMOTE_BINARY_HASH=""
+    if [[ -n "$LOCAL_BINARY_HASH" ]]; then
+      if REMOTE_BINARY_HASH=$("${SSH_COMMAND[@]}" "$HOST" "if [ -f '$REMOTE_BINARY' ]; then (sha256sum '$REMOTE_BINARY' 2>/dev/null || shasum -a 256 '$REMOTE_BINARY' 2>/dev/null) | awk '{print \$1}'; fi"); then
+        REMOTE_BINARY_HASH="$(printf '%s\n' "$REMOTE_BINARY_HASH" | awk 'NF {print; exit}')"
+      else
+        REMOTE_BINARY_HASH=""
+      fi
+    fi
+    if [[ -n "$LOCAL_BINARY_HASH" && "$LOCAL_BINARY_HASH" == "$REMOTE_BINARY_HASH" ]]; then
+      REMOTE_BINARY_MATCHES_LOCAL=1
+      echo "==> Remote helper binary already matches local helper; refreshing stamp and skipping upload"
+      echo "    $HOST:$REMOTE_BINARY"
+      "${SSH_COMMAND[@]}" "$HOST" "chmod 755 '$REMOTE_BINARY' && cat > '$REMOTE_STAMP'" < "$STAMP_PATH"
+    fi
+  fi
+
+  if [[ "$REMOTE_BINARY_MATCHES_LOCAL" -eq 0 ]]; then
+    # Ensure rsync is available on the remote host only when a binary upload is required.
+    if ! "${SSH_COMMAND[@]}" "$HOST" "command -v rsync" &>/dev/null; then
+      echo "==> rsync not found on remote host, installing..."
+      "${SSH_COMMAND[@]}" "$HOST" '
+        set -eu
+        if command -v sudo >/dev/null 2>&1; then
+          SUDO=sudo
+        else
+          SUDO=
+        fi
+        if command -v apt-get >/dev/null 2>&1; then
+          $SUDO apt-get update && $SUDO apt-get install -y rsync
+        elif command -v yum >/dev/null 2>&1; then
+          $SUDO yum install -y rsync
+        elif command -v dnf >/dev/null 2>&1; then
+          $SUDO dnf install -y rsync
+        elif command -v apk >/dev/null 2>&1; then
+          $SUDO apk add rsync
+        else
+          echo "no supported package manager found for rsync install" >&2
+          exit 1
+        fi
+      '
+      if ! "${SSH_COMMAND[@]}" "$HOST" "command -v rsync" &>/dev/null; then
+        echo "Error: failed to install rsync on $HOST. Please install it manually and re-run." >&2
+        exit 1
+      fi
+    fi
+
+    echo "==> Uploading to $HOST:$REMOTE_BINARY"
+
+    # Upload via rsync with delta transfer and compression.
+    # After the first deploy, only changed bytes are transferred.
+    rsync -z -t --partial --progress \
+      -e "$RSYNC_RSH" \
+      "$BUILT_BINARY" \
+      "$HOST:$REMOTE_BINARY"
+
+    # Set executable permissions after transfer so macOS openrsync mode handling is irrelevant.
+    "${SSH_COMMAND[@]}" "$HOST" "chmod 755 '$REMOTE_BINARY'"
+
+    if [[ -f "$STAMP_PATH" ]]; then
+      rsync -z -t --partial \
+        -e "$RSYNC_RSH" \
+        "$STAMP_PATH" \
+        "$HOST:$REMOTE_STAMP"
+    else
+      echo "Warning: local freshness stamp missing; future deploys cannot skip upload." >&2
+    fi
+  else
+    echo ""
+  fi
+fi
+
+echo ""
+echo "==> Done! Binary available at $HOST:$REMOTE_BINARY"
+echo "    (resolved from ~/$REMOTE_DIR/$BINARY_NAME on remote)"

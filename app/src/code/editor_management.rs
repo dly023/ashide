@@ -1,0 +1,307 @@
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    path::PathBuf,
+};
+
+use crate::ai::skills::SkillOpenOrigin;
+use ai::skills::SkillReference;
+use serde::{Deserialize, Serialize};
+use warp_util::path::LineAndColumnArg;
+use warpui::{AppContext, Entity, EntityId, ModelContext, SingletonEntity, ViewHandle, WindowId};
+
+use crate::{
+    ai::agent::AIAgentActionId,
+    code_review::code_review_view::CodeReviewView,
+    pane_group::{PaneGroup, PaneId},
+    workspace::PaneViewLocator,
+};
+
+use super::buffer_location::BufferLocation;
+use super::view::CodeView;
+
+pub struct CodeEditorSummary<'a> {
+    pub unsaved_changes: Vec<&'a CodeEditorStatus>,
+}
+
+impl<'a> CodeEditorSummary<'a> {
+    /// Create a summary from the currently open Code Editors.
+    pub fn new(editors: &'a [CodeEditorStatus]) -> Self {
+        let unsaved_changes = editors
+            .iter()
+            .filter(|editor| editor.unsaved_changes)
+            .collect();
+
+        Self { unsaved_changes }
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct CodeEditorStatus {
+    unsaved_changes: bool,
+}
+
+impl CodeEditorStatus {
+    pub fn new(unsaved_changes: bool) -> Self {
+        Self { unsaved_changes }
+    }
+
+    /// Fetches all code editors open in the App.
+    pub fn all_editors(app: &AppContext) -> impl Iterator<Item = Self> + '_ {
+        app.window_ids()
+            .flat_map(move |window_id| Self::editors_in_window(window_id, app))
+    }
+
+    /// Fetches all code editors in a given window.
+    pub fn editors_in_window(
+        window_id: WindowId,
+        app: &AppContext,
+    ) -> impl Iterator<Item = Self> + '_ {
+        app.views_of_type::<CodeView>(window_id)
+            .into_iter()
+            .flat_map(move |editors| {
+                editors
+                    .into_iter()
+                    .map(move |editor| Self::editor_status(&editor, app))
+            })
+    }
+
+    /// Fetches all code editors in a given tab.
+    pub fn editors_in_tab<'a>(
+        tab: &ViewHandle<PaneGroup>,
+        app: &'a AppContext,
+    ) -> impl Iterator<Item = Self> + 'a {
+        tab.as_ref(app)
+            .code_panes(app)
+            .map(move |(_, editor)| Self::editor_status(&editor, app))
+    }
+
+    pub fn editor_status(editor: &ViewHandle<CodeView>, app: &AppContext) -> Self {
+        editor.read(app, |editor_view, ctx| Self {
+            unsaved_changes: editor_view.contains_unsaved_changes(ctx),
+        })
+    }
+
+    pub fn status_for_code_review(review: &ViewHandle<CodeReviewView>, app: &AppContext) -> Self {
+        review.read(app, |review_view, ctx| Self {
+            unsaved_changes: review_view.has_unsaved_changes(ctx),
+        })
+    }
+
+    /// Fetches all code review views in a given window (including panel views).
+    pub fn code_review_views_in_window(
+        window_id: WindowId,
+        app: &AppContext,
+    ) -> impl Iterator<Item = Self> + '_ {
+        app.views_of_type::<CodeReviewView>(window_id)
+            .into_iter()
+            .flat_map(move |editors| {
+                editors
+                    .into_iter()
+                    .map(move |editor| Self::status_for_code_review(&editor, app))
+            })
+    }
+}
+
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Serialize, Deserialize)]
+pub enum CodeSource {
+    /// A new code pane not attached to an existing file.
+    New {
+        /// When the new file is saved, open the file picker to this directory.
+        default_directory: Option<PathBuf>,
+    },
+    /// Opened from file links.
+    Link {
+        path: PathBuf,
+        range_start: Option<LineAndColumnArg>,
+        range_end: Option<LineAndColumnArg>,
+    },
+    /// Opened from an active AI agent conversation.
+    AIAction { id: AIAgentActionId },
+    /// Opened from project rules (WARP.md) file.
+    ProjectRules { path: PathBuf },
+    /// Opened from file tree.
+    FileTree { path: PathBuf },
+    /// 从环境文件树点击打开的环境文件(Ashide 独有)。通过 buffer-sync 协议
+    /// 与 Environment Runtime 同步内容,current-app 文件系统没有对应路径,因此 tab 身份用 [`EnvironmentFilePath`]
+    /// 标识。pane 不持久化 —— Environment Runtime buffer 依赖活跃 provider 连接。
+    EnvironmentFileTree {
+        environment_file_path: super::buffer_location::EnvironmentFilePath,
+    },
+    /// Opened from macOS Finder via "Open With".
+    Finder { path: PathBuf },
+    /// Opened from a skill.
+    Skill {
+        reference: SkillReference,
+        path: PathBuf,
+        origin: SkillOpenOrigin,
+    },
+}
+
+impl CodeSource {
+    pub fn default_directory(&self) -> Option<&PathBuf> {
+        match self {
+            Self::New {
+                default_directory, ..
+            } => default_directory.as_ref(),
+            Self::Link { .. }
+            | Self::AIAction { .. }
+            | Self::ProjectRules { .. }
+            | Self::FileTree { .. }
+            | Self::EnvironmentFileTree { .. }
+            | Self::Finder { .. }
+            | Self::Skill { .. } => None,
+        }
+    }
+
+    /// current-app 文件路径。**不包含环境文件** —— 环境文件没有 current-app 路径,用
+    /// [`Self::location`] 取统一身份。
+    pub fn path(&self) -> Option<PathBuf> {
+        match self {
+            Self::New { .. } | Self::AIAction { .. } | Self::EnvironmentFileTree { .. } => None,
+            Self::Link { path, .. }
+            | Self::ProjectRules { path }
+            | Self::FileTree { path }
+            | Self::Finder { path }
+            | Self::Skill { path, .. } => Some(path.clone()),
+        }
+    }
+
+    /// 该 source 对应文件的统一身份(current-app 路径或环境 `EnvironmentFilePath`)。
+    ///
+    /// current-app 文件与环境文件统一走 `CodeView` 的多文件分组逻辑,tab 去重 / 聚焦
+    /// 都用 [`BufferLocation`] 作为 key。
+    pub fn location(&self) -> Option<BufferLocation> {
+        match self {
+            Self::New { .. } | Self::AIAction { .. } => None,
+            Self::EnvironmentFileTree {
+                environment_file_path,
+            } => Some(BufferLocation::EnvironmentRuntime(
+                environment_file_path.clone(),
+            )),
+            Self::Link { path, .. }
+            | Self::ProjectRules { path }
+            | Self::FileTree { path }
+            | Self::Finder { path }
+            | Self::Skill { path, .. } => Some(BufferLocation::CurrentAppFileSystem(path.clone())),
+        }
+    }
+
+    /// Returns true if this is a bundled skill that should be read-only.
+    pub fn is_bundled_skill(&self) -> bool {
+        matches!(
+            self,
+            Self::Skill {
+                reference: SkillReference::BundledSkillId(_),
+                ..
+            }
+        )
+    }
+
+    pub fn omit_line_col(&self) -> CodeSource {
+        if let CodeSource::Link { path, .. } = self {
+            CodeSource::Link {
+                path: path.clone(),
+                range_start: None,
+                range_end: None,
+            }
+        } else {
+            self.clone()
+        }
+    }
+
+    /// Returns `true` if this source should be restored across app restarts.
+    ///
+    /// `AIAction` is ephemeral (tied to a live conversation) and should not
+    /// be restored. `EnvironmentFileTree` 依赖活跃 Environment Runtime 连接,同样不恢复。
+    pub fn is_restorable(&self) -> bool {
+        !matches!(
+            self,
+            Self::AIAction { .. } | Self::EnvironmentFileTree { .. }
+        )
+    }
+}
+
+struct CodePaneData {
+    #[allow(unused)]
+    window_id: WindowId,
+    #[allow(unused)]
+    locator: PaneViewLocator,
+}
+
+// Allow dead_code here for wasm compilation
+#[allow(dead_code)]
+pub enum CodeManagerEvent {
+    EditCompleted { action_id: AIAgentActionId },
+}
+
+/// Singleton model for managing the state of open code panes. It is responsible for
+/// 1) Allow caller to find an open code pane if exists.
+/// 2) Allow other sources to listen for events emitted when code pane is closed.
+#[derive(Default)]
+pub struct CodeManager {
+    source_to_pane_data: HashMap<CodeSource, CodePaneData>,
+}
+
+impl CodeManager {
+    /// Register a new pane in the code manager.
+    pub fn register_pane(
+        &mut self,
+        pane_group_id: EntityId,
+        window_id: WindowId,
+        pane_id: PaneId,
+        source: CodeSource,
+    ) {
+        let entry = self.source_to_pane_data.entry(source.omit_line_col());
+        if let Entry::Vacant(entry) = entry {
+            entry.insert(CodePaneData {
+                window_id,
+                locator: PaneViewLocator {
+                    pane_group_id,
+                    pane_id,
+                },
+            });
+        } else {
+            log::warn!("Ignoring duplicate code pane registration");
+        }
+    }
+
+    /// De-register an open code pane when it's removed from a pane group.
+    pub fn deregister_pane(&mut self, source: &CodeSource) {
+        self.source_to_pane_data.remove(&source.omit_line_col());
+    }
+    /// Returns the locator for a code pane that already has `location` open in
+    /// the given pane group. `location` 统一覆盖 current-app 与环境文件。
+    pub fn get_locator_for_location_in_tab(
+        &self,
+        pane_group_id: EntityId,
+        location: &BufferLocation,
+    ) -> Option<PaneViewLocator> {
+        self.source_to_pane_data
+            .iter()
+            .find(|(source, data)| {
+                data.locator.pane_group_id == pane_group_id
+                    && source.location().as_ref() == Some(location)
+            })
+            .map(|(_, data)| data.locator)
+    }
+
+    // Allow dead_code here for wasm compilation
+    #[allow(dead_code)]
+    pub fn complete_pending_diffs(&mut self, source: CodeSource, ctx: &mut ModelContext<Self>) {
+        if !self.source_to_pane_data.contains_key(&source) {
+            log::warn!("Trying to complete an edit on a source that doesn't exist");
+        }
+
+        let CodeSource::AIAction { id } = source else {
+            return;
+        };
+
+        ctx.emit(CodeManagerEvent::EditCompleted { action_id: id })
+    }
+}
+
+impl Entity for CodeManager {
+    type Event = CodeManagerEvent;
+}
+
+impl SingletonEntity for CodeManager {}
