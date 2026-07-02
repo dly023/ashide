@@ -4,8 +4,8 @@ use std::{fmt, str::FromStr};
 /// A skill specifier that can reference a skill in a specific repo or search the current directory.
 ///
 /// The skill identifier (after the optional `repo:` or `org/repo:` prefix) can be either:
-/// - A **simple skill name** - searched across skill directories with precedence (`.agents/skills/`, `.warp/skills/`, `.claude/skills/`, `.codex/skills/`)
-/// - A **full path to SKILL.md** - resolved directly without precedence
+/// - 一个**简单技能名**：按优先级搜索技能目录（`.agents/skills/`、`.ashide/skills/`、`.claude/skills/`、`.codex/skills/`）
+/// - 一个**SKILL.md 的完整路径**：直接解析，不走优先级
 ///
 /// # Formats
 /// - `skill_name` - Simple name, search current directory
@@ -17,11 +17,11 @@ use std::{fmt, str::FromStr};
 ///
 /// # Examples
 ///
-/// Simple skill names (searched with directory precedence):
+/// 简单技能名（按目录优先级搜索）：
 /// ```ignore
-/// code-review                              // searches .agents/skills/, .warp/skills/, .claude/skills/, .codex/skills/
-/// warp-internal:code-review                // searches in "warp-internal" repo
-/// warpdotdev/warp-internal:code-review     // searches in specific org/repo
+/// code-review                              // 搜索 .agents/skills/、.ashide/skills/、.claude/skills/、.codex/skills/
+/// warp-internal:code-review                // 在 "warp-internal" 仓库中搜索
+/// warpdotdev/warp-internal:code-review     // 在指定 org/repo 中搜索
 /// ```
 ///
 /// Full paths (resolved directly, no precedence):
@@ -38,11 +38,11 @@ pub struct SkillSpec {
     pub repo: Option<String>,
     /// The skill identifier - either a simple name or a full path to SKILL.md.
     ///
-    /// - **Simple name** (e.g., `"code-review"`): Searched across `.agents/skills/`, `.warp/skills/`, `.claude/skills/`, `.codex/skills/`
-    ///   in precedence order. The name is used to construct paths like `.claude/skills/code-review/SKILL.md`.
+    /// - **简单名称**（例如：`"code-review"`）：按优先级搜索 `.agents/skills/`、`.ashide/skills/`、`.claude/skills/`、`.codex/skills/`
+    ///   目录。名称会被用于构造类似 `.claude/skills/code-review/SKILL.md` 的路径。
     ///
-    /// - **Full path** (e.g., `".claude/skills/code-review/SKILL.md"`): Resolved directly without precedence.
-    ///   Detected by presence of path separators (e.g., `/` or `\`).
+    /// - **完整路径**（例如：`.claude/skills/code-review/SKILL.md`）：直接解析，不走优先级。
+    ///   通过是否包含路径分隔符（例如 `/` 或 `\`）来识别。
     ///
     /// Use [`is_full_path()`](Self::is_full_path) to distinguish between the two formats.
     pub skill_identifier: String,
@@ -87,7 +87,7 @@ impl SkillSpec {
     /// - `deploy`
     ///
     /// Full paths are resolved directly, while simple names are searched across
-    /// skill directories in precedence order (`.agents/skills/`, `.warp/skills/`, `.claude/skills/`, `.codex/skills/`).
+    /// 按路径优先级搜索时，优先级顺序为（`.agents/skills/`、`.ashide/skills/`、`.claude/skills/`、`.codex/skills/`）。
     ///
     /// Uses cross-platform path semantics via [`std::path::Path`].
     pub fn is_full_path(&self) -> bool {

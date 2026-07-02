@@ -221,13 +221,12 @@ pub struct RunAgentArgs {
     ///
     /// Format: `skill_name`, `repo:skill_name`, or `org/repo:skill_name`
     ///
-    /// Skills are searched in `.agents/skills/`, `.warp/skills/`, `.claude/skills/`, and `.codex/skills/` directories.
-    /// If a repo is specified, searches only that repo. If org is also specified,
-    /// validates the repo's git remote matches the expected org.
+    /// 技能与 `SkillSpec` 的搜索优先级一致。
+    /// 如果指定了 repo，则只在该仓库内搜索；如果也指定了 org，则会校验仓库的 git remote 是否匹配期望的 org。
     ///
-    /// When used with --prompt, the skill provides the base context and the prompt is the task.
+    /// 与 --prompt 一起使用时，skill 提供基础上下文，prompt 作为具体任务。
     ///
-    /// To automate a skill on a schedule, use `ashide agent run --skill <SPEC>`.
+    /// 要把一个 skill 按计划自动化运行，可以使用 `ashide agent run --skill <SPEC>`。
     #[arg(long = "skill", value_name = "SPEC")]
     pub skill: Option<SkillSpec>,
 

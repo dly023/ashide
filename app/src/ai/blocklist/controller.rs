@@ -8,10 +8,12 @@ mod pending_response_streams;
 pub mod response_stream;
 pub(super) mod shared_session;
 mod slash_command;
+mod tool_lifecycle;
 use input_context::{input_context_for_request, parse_context_attachments};
 pub use slash_command::*;
 
 use self::response_stream::{PendingTitleGeneration, ResponseStream, ResponseStreamEvent};
+use self::tool_lifecycle::ByopToolResultRepair;
 use super::agent_view::AgentViewEntryOrigin;
 use super::ResponseStreamId;
 use super::{
@@ -2154,14 +2156,14 @@ impl BlocklistAIController {
                         "[byop-readiness] controller committed cancellation result(s) \
                          progress={progress} iteration={iteration}"
                     );
-                    self.rebuild_request_after_byop_preflight(
+                    self.complete_byop_preflight_progress(
                         request_input,
                         conversation_data,
                         request_params,
                         query_metadata.clone(),
+                        &readiness_attempt_id,
                         ctx,
                     )?;
-                    request_params.byop_readiness_attempt_id = Some(readiness_attempt_id.clone());
                 }
                 crate::ai::byop_readiness::ReadinessState::PendingToolResults { tool_calls } => {
                     let diagnostic_context = ReadinessDiagnosticContext::new(
@@ -2179,6 +2181,58 @@ impl BlocklistAIController {
                     );
                     diagnostics.finish(&diagnostic_context, ReadinessDiagnosticLevel::Debug);
                     return Err(PendingByopToolResultsError::new(tool_calls.len()).into());
+                }
+                crate::ai::byop_readiness::ReadinessState::MissingResultWithoutRepairSource {
+                    tool_calls,
+                    reason: crate::ai::byop_readiness::MissingResultReason::NoResult,
+                } => {
+                    let diagnostic_context = ReadinessDiagnosticContext::new(
+                        &conversation_id_for_log,
+                        &readiness_attempt_id,
+                        ReadinessTriggerLayer::ControllerPreflight,
+                    )
+                    .with_iteration(iteration);
+                    diagnostics.log_state(
+                        &crate::ai::byop_readiness::ReadinessState::MissingResultWithoutRepairSource {
+                            tool_calls: tool_calls.clone(),
+                            reason: crate::ai::byop_readiness::MissingResultReason::NoResult,
+                        },
+                        &diagnostic_context,
+                        ReadinessDiagnosticLevel::Debug,
+                    );
+                    let progress = self.synthesize_byop_missing_cancellation_results(
+                        conversation_data.id,
+                        &tool_calls,
+                        ctx,
+                    )?;
+                    if progress == 0 {
+                        diagnostics.finish(&diagnostic_context, ReadinessDiagnosticLevel::Error);
+                        log::error!(
+                            "[byop-readiness] controller preflight could not synthesize \
+                             cancellation result for missing tool call(s) iteration={iteration} \
+                             tool_calls={} conversation_id={} request_attempt_id={}",
+                            tool_calls.len(),
+                            conversation_id_for_log,
+                            readiness_attempt_id
+                        );
+                        return Err(BlockedByopReadinessError::new(
+                            ReadinessCategory::MissingResultWithoutRepairSource,
+                        )
+                        .into());
+                    }
+                    log::info!(
+                        "[byop-readiness] controller synthesized cancellation result(s) for \
+                         missing tool call(s) progress={progress} iteration={iteration} \
+                         conversation_id={conversation_id_for_log}"
+                    );
+                    self.complete_byop_preflight_progress(
+                        request_input,
+                        conversation_data,
+                        request_params,
+                        query_metadata.clone(),
+                        &readiness_attempt_id,
+                        ctx,
+                    )?;
                 }
                 state @ (crate::ai::byop_readiness::ReadinessState::DuplicateToolResults {
                     ..
@@ -2232,6 +2286,26 @@ impl BlocklistAIController {
             readiness_attempt_id
         );
         Err(BlockedByopReadinessError::new(ReadinessCategory::ReadinessLoopDidNotConverge).into())
+    }
+
+    fn complete_byop_preflight_progress(
+        &self,
+        request_input: &RequestInput,
+        conversation_data: &mut api::ConversationData,
+        request_params: &mut api::RequestParams,
+        query_metadata: Option<RequestMetadata>,
+        readiness_attempt_id: &str,
+        ctx: &mut ModelContext<Self>,
+    ) -> anyhow::Result<()> {
+        self.rebuild_request_after_byop_preflight(
+            request_input,
+            conversation_data,
+            request_params,
+            query_metadata,
+            ctx,
+        )?;
+        request_params.byop_readiness_attempt_id = Some(readiness_attempt_id.to_owned());
+        Ok(())
     }
 
     fn rebuild_request_after_byop_preflight(
@@ -2506,6 +2580,22 @@ impl BlocklistAIController {
                 .push(Self::byop_action_result_message(&request_id, result));
         }
 
+        let appended = self.append_grouped_byop_preflight_messages(
+            conversation_id,
+            grouped_messages,
+            ctx,
+        )?;
+
+        let removed = request_input.remove_action_results_by_tool_call_id(&keys_to_remove);
+        Ok(appended + removed + already_persisted)
+    }
+
+    fn append_grouped_byop_preflight_messages(
+        &self,
+        conversation_id: AIConversationId,
+        grouped_messages: HashMap<TaskId, Vec<warp_multi_agent_api::Message>>,
+        ctx: &mut ModelContext<Self>,
+    ) -> anyhow::Result<usize> {
         let mut appended = 0;
         for (task_id, messages) in grouped_messages {
             appended +=
@@ -2518,9 +2608,42 @@ impl BlocklistAIController {
                     )
                 })?;
         }
+        Ok(appended)
+    }
 
-        let removed = request_input.remove_action_results_by_tool_call_id(&keys_to_remove);
-        Ok(appended + removed + already_persisted)
+    fn synthesize_byop_missing_cancellation_results(
+        &self,
+        conversation_id: AIConversationId,
+        tool_calls: &[crate::ai::byop_readiness::ToolCallRef],
+        ctx: &mut ModelContext<Self>,
+    ) -> anyhow::Result<usize> {
+        let request_id = format!("byop-preflight:{}", uuid::Uuid::new_v4());
+        let mut grouped_messages: HashMap<TaskId, Vec<warp_multi_agent_api::Message>> =
+            HashMap::new();
+        let mut already_persisted = 0usize;
+
+        for tool_call in tool_calls {
+            let task_id = &tool_call.key.task_id;
+            let tool_call_id = &tool_call.key.tool_call_id;
+            if self.has_persisted_tool_result(conversation_id, task_id, tool_call_id, ctx) {
+                already_persisted += 1;
+                continue;
+            }
+            grouped_messages
+                .entry(TaskId::new(task_id.clone()))
+                .or_default()
+                .push(ByopToolResultRepair::missing_result_cancellation_message(
+                    &request_id,
+                    tool_call,
+                ));
+        }
+
+        let appended = self.append_grouped_byop_preflight_messages(
+            conversation_id,
+            grouped_messages,
+            ctx,
+        )?;
+        Ok(appended + already_persisted)
     }
 
     fn has_persisted_tool_result(

@@ -437,7 +437,7 @@ fn find_skill_directories_in_tree_finds_root_skills() {
             ignored: false,
             loaded: true,
         });
-        let warp_skills = Entry::Directory(DirectoryEntry {
+        let agents_skills = Entry::Directory(DirectoryEntry {
             path: warp_util::standardized_path::StandardizedPath::try_from_local(
                 &repo.join(".agents/skills"),
             )
@@ -446,12 +446,12 @@ fn find_skill_directories_in_tree_finds_root_skills() {
             ignored: false,
             loaded: true,
         });
-        let warp_dir = Entry::Directory(DirectoryEntry {
+        let agents_dir = Entry::Directory(DirectoryEntry {
             path: warp_util::standardized_path::StandardizedPath::try_from_local(
                 &repo.join(".agents"),
             )
             .unwrap(),
-            children: vec![warp_skills],
+            children: vec![agents_skills],
             ignored: false,
             loaded: true,
         });
@@ -490,7 +490,7 @@ fn find_skill_directories_in_tree_finds_root_skills() {
 
         let root = Entry::Directory(DirectoryEntry {
             path: warp_util::standardized_path::StandardizedPath::try_from_local(&repo).unwrap(),
-            children: vec![warp_dir, claude_dir],
+            children: vec![agents_dir, claude_dir],
             ignored: false,
             loaded: true,
         });
@@ -563,7 +563,7 @@ fn find_skill_directories_in_tree_finds_subdirectory_skills() {
             ignored: false,
             loaded: true,
         });
-        let root_warp_skills = Entry::Directory(DirectoryEntry {
+        let root_agents_skills = Entry::Directory(DirectoryEntry {
             path: warp_util::standardized_path::StandardizedPath::try_from_local(
                 &repo.join(".agents/skills"),
             )
@@ -572,12 +572,12 @@ fn find_skill_directories_in_tree_finds_subdirectory_skills() {
             ignored: false,
             loaded: true,
         });
-        let root_warp = Entry::Directory(DirectoryEntry {
+        let root_agents = Entry::Directory(DirectoryEntry {
             path: warp_util::standardized_path::StandardizedPath::try_from_local(
                 &repo.join(".agents"),
             )
             .unwrap(),
-            children: vec![root_warp_skills],
+            children: vec![root_agents_skills],
             ignored: false,
             loaded: true,
         });
@@ -595,7 +595,7 @@ fn find_skill_directories_in_tree_finds_subdirectory_skills() {
             ignored: false,
             loaded: true,
         });
-        let frontend_warp_skills = Entry::Directory(DirectoryEntry {
+        let frontend_agents_skills = Entry::Directory(DirectoryEntry {
             path: warp_util::standardized_path::StandardizedPath::try_from_local(
                 &repo.join("packages/frontend/.agents/skills"),
             )
@@ -604,12 +604,12 @@ fn find_skill_directories_in_tree_finds_subdirectory_skills() {
             ignored: false,
             loaded: true,
         });
-        let frontend_warp = Entry::Directory(DirectoryEntry {
+        let frontend_agents = Entry::Directory(DirectoryEntry {
             path: warp_util::standardized_path::StandardizedPath::try_from_local(
                 &repo.join("packages/frontend/.agents"),
             )
             .unwrap(),
-            children: vec![frontend_warp_skills],
+            children: vec![frontend_agents_skills],
             ignored: false,
             loaded: true,
         });
@@ -618,7 +618,7 @@ fn find_skill_directories_in_tree_finds_subdirectory_skills() {
                 &repo.join("packages/frontend"),
             )
             .unwrap(),
-            children: vec![frontend_warp],
+            children: vec![frontend_agents],
             ignored: false,
             loaded: true,
         });
@@ -634,7 +634,7 @@ fn find_skill_directories_in_tree_finds_subdirectory_skills() {
 
         let root = Entry::Directory(DirectoryEntry {
             path: warp_util::standardized_path::StandardizedPath::try_from_local(&repo).unwrap(),
-            children: vec![root_warp, packages],
+            children: vec![root_agents, packages],
             ignored: false,
             loaded: true,
         });
