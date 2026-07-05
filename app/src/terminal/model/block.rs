@@ -294,6 +294,7 @@ pub struct Block {
     rprompt: Option<String>,
 
     /// Executor used for spawning futures in the background
+    #[cfg(not(test))]
     background_executor: Arc<Background>,
 
     event_proxy: ChannelEventListener,
@@ -938,6 +939,9 @@ impl Block {
             perform_reset_grid_checks,
         );
 
+        #[cfg(test)]
+        let _ = background_executor;
+
         Block {
             id,
             size: sizes.size,
@@ -958,6 +962,7 @@ impl Block {
             conda_env: None,
             node_version: None,
             rprompt: None,
+            #[cfg(not(test))]
             background_executor,
             event_proxy,
             bootstrap_stage,

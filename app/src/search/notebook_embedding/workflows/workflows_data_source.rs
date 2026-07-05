@@ -13,16 +13,13 @@ use crate::search::mixer::{DataSourceRunErrorWrapper, SyncDataSource};
 use super::workflow_search_item::WorkflowSearchItem;
 
 pub struct EmbeddedWorkflowsDataSource {
-    /// The space containing the object we are embedding into.
-    embedding_space: Space,
     workflows: Vec<WorkflowObject>,
 }
 
 impl EmbeddedWorkflowsDataSource {
-    pub fn new(notebook_space: Space, app: &mut AppContext) -> Self {
+    pub fn new(_notebook_space: Space, app: &mut AppContext) -> Self {
         let object_store_model = ObjectStoreModel::as_ref(app);
         Self {
-            embedding_space: notebook_space,
             workflows: object_store_model
                 .get_all_active_workflows()
                 .filter(|workflow| workflow.id.into_stable().is_some())

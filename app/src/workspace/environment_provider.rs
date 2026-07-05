@@ -149,7 +149,6 @@ pub(crate) struct EnvironmentProviderCandidate {
     pub(crate) authority_key: String,
     pub(crate) title: String,
     pub(crate) detail: String,
-    pub(crate) uses_key_auth: bool,
 }
 
 #[derive(Debug, Clone)]

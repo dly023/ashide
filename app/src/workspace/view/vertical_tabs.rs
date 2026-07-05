@@ -91,7 +91,6 @@ const GROUP_HEADER_VERTICAL_PADDING: f32 = 4.;
 const GROUP_HORIZONTAL_PADDING: f32 = 8.;
 const GROUP_BODY_BOTTOM_PADDING: f32 = 8.;
 const GROUP_ITEM_SPACING: f32 = 4.;
-const TABS_MODE_ITEM_SPACING: f32 = 4.;
 const GROUP_ACTION_BUTTON_ICON_SIZE: f32 = 12.;
 const GROUP_ACTION_BUTTON_PADDING: f32 = 2.;
 const GROUP_ACTION_BUTTON_GAP: f32 = 2.;
@@ -731,7 +730,6 @@ fn render_pane_row_element(
         subtitle: _,
         custom_vertical_tabs_title: _,
         display_title_override: _,
-        is_focused: _,
         typed: _,
         is_being_dragged,
         pane_color,
@@ -1089,7 +1087,6 @@ struct PaneProps<'a> {
     subtitle: String,
     custom_vertical_tabs_title: Option<String>,
     display_title_override: Option<String>,
-    is_focused: bool,
     typed: TypedPane<'a>,
     is_being_dragged: bool,
     pane_color: Option<ThemeFill>,
@@ -1468,40 +1465,6 @@ pub(super) fn vtab_action_buttons_position_id(tab_index: usize) -> String {
 }
 const GROUP_INSERTION_TARGET_HEIGHT: f32 = 6.;
 const GROUP_INSERTION_INDICATOR_HEIGHT: f32 = 3.;
-
-fn any_workspace_pane_being_dragged(workspace: &Workspace, app: &AppContext) -> bool {
-    workspace
-        .tabs
-        .iter()
-        .any(|tab| tab.pane_group.as_ref(app).any_pane_being_dragged(app))
-}
-
-/// Renders an empty insertion slot for a cross-window ghost drag in the
-/// vertical tabs panel. Shows a plain `fg_overlay_1` rectangle the same
-/// height as a real tab row — the floating chip at the cursor carries all
-/// visual content.
-fn render_ghost_vertical_tab_slot(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
-    let appearance = Appearance::as_ref(app);
-    let theme = appearance.theme();
-    // Match the height of a real tab group row from the last rendered frame.
-    // Falls back to 40px if no frame data is available yet.
-    let height = workspace
-        .tabs
-        .first()
-        .and_then(|_| {
-            app.element_position_by_id_at_last_frame(workspace.window_id, tab_position_id(0))
-        })
-        .map(|rect| rect.height())
-        .unwrap_or(40.);
-    ConstrainedBox::new(
-        Container::new(Empty::new().finish())
-            .with_background(internal_colors::fg_overlay_1(theme))
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)))
-            .finish(),
-    )
-    .with_height(height)
-    .finish()
-}
 
 fn vertical_tabs_tab_bar_location(insert_index: usize, tab_count: usize) -> TabBarLocation {
     if insert_index == tab_count {
@@ -1922,27 +1885,6 @@ fn render_groups(
     )
     .with_padding(Padding::uniform(12.))
     .finish()
-}
-
-fn render_tab_group(
-    state: &VerticalTabsPanelState,
-    workspace: &Workspace,
-    tab_index: usize,
-    tab: &TabData,
-    filtered_pane_ids: Option<&[PaneId]>,
-    drag_state: TabGroupDragState,
-    app: &AppContext,
-) -> Box<dyn Element> {
-    render_tab_group_internal(
-        state,
-        workspace,
-        tab_index,
-        tab,
-        filtered_pane_ids,
-        drag_state,
-        false,
-        app,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3075,7 +3017,6 @@ impl<'a> PaneProps<'a> {
                 })
                 .flatten(),
             display_title_override,
-            is_focused: pane_group.focused_pane_id(app) == pane_id,
             typed,
             is_being_dragged: pane.is_pane_being_dragged(app),
             pane_color: pane_row_state.pane_color,

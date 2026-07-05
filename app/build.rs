@@ -53,14 +53,7 @@ fn main() -> Result<()> {
 
         let min_macos_version = match env::var("MACOSX_DEPLOYMENT_TARGET") {
             Ok(v) => v,
-            Err(_) => {
-                println!(
-                    "cargo:warning=MACOSX_DEPLOYMENT_TARGET not set; defaulting to 10.14. \
-                     Set it explicitly (e.g. `MACOSX_DEPLOYMENT_TARGET=10.14 cargo build`) for \
-                     reproducible minimum-deployment builds."
-                );
-                "10.14".to_string()
-            }
+            Err(_) => "10.14".to_string(),
         };
         let status = Command::new("make")
             .current_dir("DockTilePlugin")

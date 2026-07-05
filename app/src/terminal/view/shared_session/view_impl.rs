@@ -179,14 +179,7 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) {
         let started_at = Local::now();
-        let adapter = Adapter::new_for_sharer(
-            sharer_id,
-            user_uid,
-            session_id,
-            started_at,
-            source_type,
-            ctx,
-        );
+        let adapter = Adapter::new_for_sharer(sharer_id, user_uid, session_id, source_type, ctx);
         let presence_manager = adapter.presence_manager().clone();
 
         self.shared_session = Some(adapter);
@@ -235,7 +228,6 @@ impl TerminalView {
             user_uid,
             participant_list,
             session_id,
-            started_at,
             source_type.clone(),
             ctx,
         );
@@ -1094,7 +1086,7 @@ impl TerminalView {
 
     /// Resizes the sharer's terminal to match the viewer's reported size,
     /// going through the normal view/model/PTY resize pipeline.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn resize_from_viewer_report(
         &mut self,
         viewer_size: WindowSize,

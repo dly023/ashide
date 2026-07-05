@@ -30,7 +30,6 @@ impl ReadinessTriggerLayer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadinessDiagnosticLevel {
     Debug,
-    Info,
     Error,
 }
 
@@ -38,7 +37,6 @@ impl ReadinessDiagnosticLevel {
     fn as_log_level(self) -> log::Level {
         match self {
             ReadinessDiagnosticLevel::Debug => log::Level::Debug,
-            ReadinessDiagnosticLevel::Info => log::Level::Info,
             ReadinessDiagnosticLevel::Error => log::Level::Error,
         }
     }
@@ -260,6 +258,7 @@ impl ProjectedToolResult {
         }
     }
 
+    #[cfg(test)]
     pub fn current_input(
         index: usize,
         task_id: impl Into<String>,
@@ -299,8 +298,6 @@ impl ProjectedToolResult {
 pub enum ProjectionItemKind {
     UserBoundary,
     AssistantBoundary,
-    SystemBoundary,
-    OtherBoundary,
     AssistantToolCalls(Vec<ProjectedToolCall>),
     ToolResult(ProjectedToolResult),
 }
@@ -326,22 +323,6 @@ impl ProjectionItem {
             task_id: task_id.into(),
             message_id: message_id.into(),
             kind: ProjectionItemKind::AssistantBoundary,
-        }
-    }
-
-    pub fn system_boundary(task_id: impl Into<String>, message_id: impl Into<String>) -> Self {
-        Self {
-            task_id: task_id.into(),
-            message_id: message_id.into(),
-            kind: ProjectionItemKind::SystemBoundary,
-        }
-    }
-
-    pub fn other_boundary(task_id: impl Into<String>, message_id: impl Into<String>) -> Self {
-        Self {
-            task_id: task_id.into(),
-            message_id: message_id.into(),
-            kind: ProjectionItemKind::OtherBoundary,
         }
     }
 
@@ -890,10 +871,7 @@ pub fn normalize_projection(mut items: Vec<ProjectionItem>) -> Vec<ProjectionIte
                     }
                 }
             }
-            ProjectionItemKind::UserBoundary
-            | ProjectionItemKind::AssistantBoundary
-            | ProjectionItemKind::SystemBoundary
-            | ProjectionItemKind::OtherBoundary => {
+            ProjectionItemKind::UserBoundary | ProjectionItemKind::AssistantBoundary => {
                 active_group = None;
             }
         }
@@ -919,10 +897,9 @@ pub fn classify_projection(
                 finished
             }
             ProjectionItemKind::ToolResult(result) => classifier.handle_tool_result(result),
-            ProjectionItemKind::UserBoundary
-            | ProjectionItemKind::AssistantBoundary
-            | ProjectionItemKind::SystemBoundary
-            | ProjectionItemKind::OtherBoundary => classifier.finish_active_group(true),
+            ProjectionItemKind::UserBoundary | ProjectionItemKind::AssistantBoundary => {
+                classifier.finish_active_group(true)
+            }
         };
 
         if let Some(state) = state {

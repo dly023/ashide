@@ -10,7 +10,7 @@ use crate::ai::agent::AIAgentActionId;
 use crate::ai::blocklist::agent_view::AgentViewEntryOrigin;
 use crate::ai::blocklist::history_model::BlocklistAIHistoryModel;
 use crate::terminal::shared_session::ParticipantId;
-use warpui::{AppContext, ModelContext, SingletonEntity};
+use warpui::{ModelContext, SingletonEntity};
 
 #[derive(Default)]
 pub(super) struct SharedSessionState {
@@ -23,20 +23,6 @@ pub(super) struct SharedSessionState {
 }
 
 impl BlocklistAIController {
-    /// Returns the current conversation ID for the active shared session stream.
-    /// Returns None if there's no active shared session conversation.
-    pub(crate) fn get_current_shared_session_conversation_id(
-        &self,
-        app: &AppContext,
-    ) -> Option<AIConversationId> {
-        self.shared_session_state
-            .current_response_id
-            .as_ref()
-            .and_then(|response_id| {
-                BlocklistAIHistoryModel::as_ref(app).conversation_for_response_stream(response_id)
-            })
-    }
-
     /// Apply agent session events to the current conversation state.
     pub fn handle_shared_session_response_event(
         &mut self,

@@ -8,14 +8,23 @@ use warpui::{Entity, ModelContext, SingletonEntity};
 
 /// Singleton model that reports the currently running antivirus software.
 #[derive(Debug, Clone)]
+#[cfg(windows)]
 pub struct AntivirusInfo(Option<String>);
+
+#[derive(Debug, Clone)]
+#[cfg(not(windows))]
+pub struct AntivirusInfo;
 
 impl AntivirusInfo {
     pub fn new(_ctx: &mut ModelContext<Self>) -> Self {
-        #[cfg(windows)]
-        _ctx.spawn(async move { Self::scan().await }, Self::on_scan_complete);
-
-        Self(None)
+        cfg_if::cfg_if! {
+            if #[cfg(windows)] {
+                _ctx.spawn(async move { Self::scan().await }, Self::on_scan_complete);
+                Self(None)
+            } else {
+                Self
+            }
+        }
     }
 
     /// Returns the currently running antivirus software if any.
@@ -24,6 +33,7 @@ impl AntivirusInfo {
     ///
     /// ## Platform-specific
     /// This function always returns `None` on non-Windows platforms.
+    #[cfg(windows)]
     pub fn get(&self) -> Option<&str> {
         self.0.as_deref()
     }

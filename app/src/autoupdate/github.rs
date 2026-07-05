@@ -30,7 +30,6 @@ pub struct GithubRelease {
 pub struct GithubAsset {
     pub name: String,
     pub browser_download_url: String,
-    pub size: u64,
     /// GitHub Releases API(2024.12+)在 asset 元数据里返回的资产摘要,
     /// 形如 `"sha256:<hex>"`。老 release 没有这个字段时为 None。
     #[serde(default)]

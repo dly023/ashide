@@ -80,7 +80,7 @@ use crate::ai::blocklist::block::cli_controller::{
 };
 use crate::ai::blocklist::block::status_bar::BlocklistAIStatusBarEvent;
 use crate::ai::blocklist::usage::conversation_usage_view::{
-    ConversationUsageInfo, ConversationUsageView, DisplayMode, TimingInfo,
+    ConversationUsageInfo, ConversationUsageView, TimingInfo,
 };
 use crate::ai::blocklist::{block_context_from_terminal_model, SlashCommandRequest};
 use crate::ai::document::ai_document_model::{AIDocumentId, AIDocumentModel, AIDocumentVersion};
@@ -181,28 +181,25 @@ use crate::ai::blocklist::{model::AIBlockModelImpl, ClientIdentifiers};
 use crate::ai::{
     agent::{
         AIAgentActionId, AIAgentCitation, AIAgentContext, AIAgentExchangeId, AIAgentInput,
-        FileLocations, PassiveCodeDiffEntry, PassiveSuggestionResultType,
+        FileLocations, PassiveSuggestionResultType,
     },
     blocklist::{
         ai_brand_color, get_ai_block_overflow_menu_element_position_id,
-        get_attached_blocks_chip_element_position_id,
-        inline_action::code_diff_view::{CodeDiffView, FileDiff},
-        summarization_cancel_dialog::SummarizationCancelDialog,
-        AIBlock, AIBlockEvent, BlocklistAIActionEvent, BlocklistAIActionModel,
-        BlocklistAIContextEvent, BlocklistAIContextModel, BlocklistAIController,
-        BlocklistAIControllerEvent, BlocklistAIHistoryEvent, BlocklistAIHistoryModel,
-        BlocklistAIInputEvent, BlocklistAIInputModel, InputConfig, InputType,
-        LegacyPassiveSuggestionsEvent, LegacyPassiveSuggestionsModel, MaaPassiveSuggestionsEvent,
-        MaaPassiveSuggestionsModel, PassiveSuggestionsModels, PendingQueryState,
-        PromptSuggestionExecutor, PromptSuggestionExecutorEvent, ShellCommandExecutor,
-        ShellCommandExecutorEvent, ATTACH_AS_AGENT_MODE_CONTEXT_TEXT, PRE_REWIND_PREFIX,
+        get_attached_blocks_chip_element_position_id, inline_action::code_diff_view::CodeDiffView,
+        summarization_cancel_dialog::SummarizationCancelDialog, AIBlock, AIBlockEvent,
+        BlocklistAIActionEvent, BlocklistAIActionModel, BlocklistAIContextEvent,
+        BlocklistAIContextModel, BlocklistAIController, BlocklistAIControllerEvent,
+        BlocklistAIHistoryEvent, BlocklistAIHistoryModel, BlocklistAIInputEvent,
+        BlocklistAIInputModel, InputConfig, InputType, LegacyPassiveSuggestionsEvent,
+        LegacyPassiveSuggestionsModel, MaaPassiveSuggestionsModel, PassiveSuggestionsModels,
+        PendingQueryState, PromptSuggestionExecutor, PromptSuggestionExecutorEvent,
+        ShellCommandExecutor, ShellCommandExecutorEvent, ATTACH_AS_AGENT_MODE_CONTEXT_TEXT,
+        PRE_REWIND_PREFIX,
     },
     execution_profiles::profiles::{AIExecutionProfilesModel, ClientProfileId},
 };
-use crate::auth::AuthManager;
 use crate::auth::AuthState;
 use crate::auth::AuthStateProvider;
-use crate::auth::AuthViewVariant;
 use crate::autoupdate::{self, get_update_state, AutoupdateStage};
 #[cfg(feature = "local_fs")]
 use crate::code::editor_management::CodeSource;
@@ -1132,7 +1129,7 @@ impl SizeUpdateBuilder {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     fn for_viewer_size_report(last_size: SizeInfo, num_rows: usize, num_cols: usize) -> Self {
         // Viewer size reports don't change the sharer's actual pane size.
         Self {
@@ -1919,11 +1916,6 @@ impl ContextMenuType {
     }
 }
 
-#[derive(Copy, Clone)]
-pub struct ContextMenuInfo {
-    menu_type: ContextMenuType,
-}
-
 #[derive(Debug, Copy, Clone)]
 struct ContextMenuState {
     menu_type: ContextMenuType,
@@ -2108,7 +2100,6 @@ struct TerminalViewMouseStates {
 
     // Mouse state for the pane header ambient agent indicator tooltip.
     ambient_agent_indicator_mouse_handle: MouseStateHandle,
-    parent_conversation_header_link: MouseStateHandle,
 }
 
 /// Where content was routed when sent to a CLI agent.
@@ -2574,9 +2565,6 @@ pub struct TerminalView {
     is_using_conversation_for_pane_header_title: bool,
 
     ambient_agent_view_model: ModelHandle<ambient_agent::AmbientAgentViewModel>,
-
-    /// Mouse state handle for the ambient agent cancel button in the pane header.
-    ambient_agent_cancel_mouse_state: warpui::elements::MouseStateHandle,
 
     /// Weak handle to the [`PaneStack`] this view is part of, allowing push/pop operations.
     pane_stack: Option<WeakModelHandle<crate::pane_group::pane::PaneStack<Self>>>,
@@ -3110,19 +3098,12 @@ impl TerminalView {
         });
         let maa_passive_suggestions_model = ctx.add_model(|ctx| {
             MaaPassiveSuggestionsModel::new(
-                active_session.clone(),
-                model.clone(),
                 ai_controller.clone(),
                 &model_events_handle,
                 ambient_agent_view_model.clone(),
-                terminal_view_id,
                 ctx,
             )
         });
-        ctx.subscribe_to_model(
-            &maa_passive_suggestions_model,
-            Self::handle_maa_passive_suggestions_event,
-        );
         let legacy_passive_suggestions_model = ctx.add_model(|ctx| {
             LegacyPassiveSuggestionsModel::new(
                 active_session.clone(),
@@ -3846,7 +3827,6 @@ impl TerminalView {
             agent_view_back_button,
             is_using_conversation_for_pane_header_title: false,
             ambient_agent_view_model,
-            ambient_agent_cancel_mouse_state: Default::default(),
 
             is_pending_aws_login: false,
             pane_stack: None,
@@ -4290,7 +4270,7 @@ impl TerminalView {
                     ctx,
                 );
             }
-            LegacyPassiveSuggestionsEvent::PassiveCodeDiffFailed { .. } => {
+            LegacyPassiveSuggestionsEvent::PassiveCodeDiffFailed => {
                 self.try_clear_prompt_suggestions_banner_code_state(ctx);
             }
         }
@@ -4616,7 +4596,6 @@ impl TerminalView {
                         self.ai_context_model.clone(),
                         self.find_model.clone(),
                         self.active_session.clone(),
-                        self.ambient_agent_view_model.clone(),
                         &self.cli_subagent_controller,
                         &self.model_events_handle,
                         self.agent_view_controller.clone(),
@@ -5145,7 +5124,6 @@ impl TerminalView {
         let usage_view = ctx.add_view(|_| {
             ConversationUsageView::new(
                 conversation_usage_info,
-                DisplayMode::Footer,
                 Some(timing_info),
                 MouseStateHandle::default(),
             )
@@ -8414,35 +8392,6 @@ impl TerminalView {
     }
 
     #[cfg(feature = "local_fs")]
-    fn insert_agent_mode_setup_speedbump_banner(
-        &mut self,
-        repo_path: PathBuf,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        // Create new inline banner
-        let banner_id = self.inline_banners_state.next_banner_id();
-        let banner_state = AgentModeSetupSpeedbumpBannerState::new(banner_id, repo_path.clone());
-
-        // Insert the banner into the block list
-        self.model
-            .lock()
-            .block_list_mut()
-            .append_inline_banner_with_custom_height(
-                InlineBannerItem::new(banner_id, InlineBannerType::AgentModeSetup),
-                4.0,
-            );
-
-        // Store the banner state
-        self.inline_banners_state.agent_setup_speedbump_banner = Some(banner_state);
-
-        // Track that this banner has been shown for this repo
-        // so it won't be shown again
-        self.mark_agent_init_callout_as_shown_for_directory(&repo_path, ctx);
-
-        ctx.notify();
-    }
-
-    #[cfg(feature = "local_fs")]
     fn remove_agent_setup_speedbump_banner(&mut self, ctx: &mut ViewContext<Self>) {
         if let Some(banner_state) = self
             .inline_banners_state
@@ -9090,15 +9039,12 @@ impl TerminalView {
                 // indicator in terminal tabs.
                 ctx.request_user_attention();
             }
-            ModelEvent::Exit { reason } => {
+            ModelEvent::Exit { .. } => {
                 // If the pty spawn has failed, we've already inserted a banner.
                 if !self.pty_spawn_failed {
                     let shell_detail = self.shell_detail.take().unwrap_or("shell".to_owned());
                     self.insert_shell_process_terminated_banner(
-                        shell_terminated_banner::TerminationType::Premature {
-                            shell_detail,
-                            reason: *reason,
-                        },
+                        shell_terminated_banner::TerminationType::Premature { shell_detail },
                         ctx,
                     );
                 }
@@ -12109,7 +12055,7 @@ impl TerminalView {
                     ctx,
                 );
                 // 立即 complete oneshot 关 channel,但**必须用 Cancelled** —— 否则
-                // controller (`controller.rs:472` `should_trigger_request_upon_completion`)
+                // controller (`controller.rs` `continuation_decision`)
                 // 检测 Accepted/非 Cancelled result 会强制触发新一轮 BYOP LLM call,
                 // 模型看到"用户接受了 chip"+ 没有新 user message,返回空响应,
                 // UX 卡在 "Warping..." 又一次。Cancelled 让 controller 不触发 follow-up
@@ -12132,47 +12078,6 @@ impl TerminalView {
         }
     }
 
-    fn handle_maa_passive_suggestions_event(
-        &mut self,
-        _: ModelHandle<MaaPassiveSuggestionsModel>,
-        event: &MaaPassiveSuggestionsEvent,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        match event {
-            MaaPassiveSuggestionsEvent::NewPromptSuggestion {
-                prompt,
-                label,
-                trigger,
-                conversation_id,
-            } => {
-                self.on_maa_prompt_suggestion_generated(
-                    prompt,
-                    &label.clone(),
-                    trigger.clone(),
-                    *conversation_id,
-                    ctx,
-                );
-            }
-            MaaPassiveSuggestionsEvent::NewCodeDiffSuggestion {
-                diffs,
-                title,
-                original_edits,
-                conversation_id,
-                trigger,
-            } => {
-                self.on_maa_code_diff_generated(
-                    diffs.clone(),
-                    title.clone(),
-                    original_edits.clone(),
-                    *conversation_id,
-                    trigger.clone(),
-                    ctx,
-                );
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
     fn on_maa_prompt_suggestion_generated(
         &mut self,
         prompt: &str,
@@ -12213,179 +12118,6 @@ impl TerminalView {
         });
 
         ctx.notify();
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn on_maa_code_diff_generated(
-        &mut self,
-        diffs: Vec<FileDiff>,
-        title: Option<String>,
-        original_edits: Vec<PassiveCodeDiffEntry>,
-        conversation_id: Option<AIConversationId>,
-        trigger: PassiveSuggestionTrigger,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        let action_id = AIAgentActionId::from(uuid::Uuid::new_v4().to_string());
-        use crate::ai::blocklist::inline_action::code_diff_view::CodeDiffViewEvent;
-        let title_for_result = title.clone();
-
-        let session_platform = self
-            .active_session
-            .as_ref(ctx)
-            .shell_launch_data(ctx)
-            .map(Into::into);
-
-        let diff_view = ctx.add_typed_action_view(|ctx| {
-            CodeDiffView::new_passive(&action_id, title, false, session_platform, ctx)
-        });
-
-        diff_view.update(ctx, |view, ctx| {
-            view.set_candidate_diffs(diffs, ctx);
-        });
-
-        let wrapper_view = {
-            let diff_view_for_wrapper = diff_view.clone();
-            ctx.add_view(move |_ctx| inline_banner::PassiveCodeDiff {
-                diff_view: diff_view_for_wrapper,
-            })
-        };
-
-        let trigger_block_id = match &trigger {
-            PassiveSuggestionTrigger::ShellCommandCompleted(trigger) => {
-                Some(trigger.executed_shell_command.id.clone())
-            }
-            _ => None,
-        };
-        let wrapper_view_id = wrapper_view.id();
-        ctx.subscribe_to_view(&diff_view, move |me, view, event, ctx| {
-            match event {
-                CodeDiffViewEvent::TryAccept => {
-                    view.update(ctx, |diff_view, ctx| {
-                        diff_view.accept_and_save(ctx);
-                    });
-                }
-                CodeDiffViewEvent::SavedAcceptedDiffs { .. } => {
-                    ctx.notify();
-                }
-                CodeDiffViewEvent::CancelPassive => {
-                    me.model
-                        .lock()
-                        .block_list_mut()
-                        .remove_rich_content(wrapper_view_id);
-                    me.rich_content_views
-                        .retain(|rc| rc.view_id() != wrapper_view_id);
-                    ctx.notify();
-                }
-                CodeDiffViewEvent::ContinuePassiveCodeDiffWithAgent { accepted } => {
-                    let conversation_id = if let Some(conversation_id) = conversation_id {
-                        conversation_id
-                    } else {
-                        // No existing conversation (ephemeral shell-command trigger): start a
-                        // new one and open the agent view.
-                        match me.try_enter_agent_view(
-                            None,
-                            AgentViewEntryOrigin::AcceptedPassiveCodeDiff,
-                            None,
-                            ctx,
-                        ) {
-                            Ok(conversation_id) => {
-                                if let Some(block_id) = trigger_block_id.as_ref() {
-                                    me.associate_and_promote_block_for_conversation(
-                                        block_id.clone(),
-                                        conversation_id,
-                                        ctx,
-                                    );
-                                }
-                                me.set_rich_content_agent_view_conversation_id(
-                                    wrapper_view_id,
-                                    conversation_id,
-                                );
-                                conversation_id
-                            }
-                            Err(e) => {
-                                log::error!(
-                                    "Failed to enter agent view for passive code diff: {e:?}"
-                                );
-                                return;
-                            }
-                        }
-                    };
-
-                    // Use the passive diff summary as the conversation title.
-                    if let Some(title) = title_for_result.as_ref() {
-                        BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, _ctx| {
-                            if let Some(conversation) = history.conversation_mut(&conversation_id) {
-                                conversation.set_fallback_display_title(title.clone());
-                            }
-                        });
-                    }
-
-                    let summary = title_for_result.clone().unwrap_or_default();
-                    let diffs = original_edits.clone();
-                    if *accepted {
-                        me.ai_controller.update(ctx, |controller, ctx| {
-                            controller.send_passive_suggestion_result(
-                                Some(conversation_id),
-                                PassiveSuggestionResultType::CodeDiff {
-                                    diffs,
-                                    summary,
-                                    accepted: true,
-                                },
-                                Some(trigger.clone()),
-                                ctx,
-                            );
-                        });
-                    } else {
-                        // Queue the result so it's included with the next
-                        // user-initiated request on this conversation.
-                        me.ai_controller.update(ctx, |controller, _ctx| {
-                            controller.queue_passive_suggestion_result(
-                                conversation_id,
-                                PassiveSuggestionResultType::CodeDiff {
-                                    diffs,
-                                    summary,
-                                    accepted: false,
-                                },
-                                Some(trigger.clone()),
-                            );
-                        });
-                    }
-                }
-                CodeDiffViewEvent::EditModeChanged { enabled } => {
-                    if *enabled {
-                        me.open_code_diff(view.clone(), ctx);
-                    }
-                    ctx.notify();
-                }
-                CodeDiffViewEvent::ToggleCodeReviewPane { entrypoint } => {
-                    me.toggle_code_review_pane(
-                        GitDeltaPreference::Always,
-                        *entrypoint,
-                        None,
-                        true,
-                        ctx,
-                    );
-                }
-                CodeDiffViewEvent::DisplayModeChanged => {
-                    // Re-render wrapper when the diff view expands/collapses.
-                    ctx.notify();
-                }
-                CodeDiffViewEvent::Blur => {
-                    me.focus_terminal(ctx);
-                }
-                _ => {}
-            }
-        });
-
-        self.insert_rich_content(
-            None,
-            wrapper_view,
-            None,
-            RichContentInsertionPosition::Append {
-                insert_below_long_running_block: true,
-            },
-            ctx,
-        );
     }
 
     fn on_legacy_prompt_suggestion_generated(
@@ -14868,47 +14600,6 @@ impl TerminalView {
         bytes.push(b'\n');
         self.write_to_pty(bytes.to_vec(), ctx);
         self.close_context_menu(ctx, true);
-    }
-
-    pub(crate) fn note_ssh_secret_auto_injected(&mut self, ctx: &mut ViewContext<Self>) {
-        self.onekey_last_prompt_at = Some(Instant::now());
-        if matches!(
-            self.context_menu_state.map(|state| state.menu_type),
-            Some(ContextMenuType::OneKeyPrompt)
-        ) {
-            self.close_context_menu(ctx, true);
-        }
-    }
-
-    /// 仅由 `secret_injector` 在起飞/结束时调用。详见字段文档。
-    pub(crate) fn set_ssh_secret_auto_injection_in_flight(&mut self, in_flight: bool) {
-        self.ssh_secret_auto_injection_in_flight = in_flight;
-    }
-
-    /// 检测到 su root 密码提示后弹出确认菜单。
-    pub(crate) fn show_su_root_confirm_menu(&mut self, ctx: &mut ViewContext<Self>) {
-        if self.context_menu_state.is_some() {
-            return;
-        }
-        let items = vec![
-            MenuItemFields::new_with_stacked_label(
-                crate::t!("terminal-su-root-password-confirm"),
-                crate::t!("terminal-su-root-password-confirm-subtitle"),
-            )
-            .with_icon(icons::Icon::Key)
-            .with_on_select_action(TerminalAction::SuRootFillRootPassword)
-            .into_item(),
-            MenuItemFields::new(crate::t!("terminal-su-root-password-cancel"))
-                .with_on_select_action(TerminalAction::CloseContextMenu)
-                .into_item(),
-        ];
-        self.show_context_menu(
-            ContextMenuState {
-                menu_type: ContextMenuType::SuRootPasswordConfirm,
-            },
-            items,
-            ctx,
-        );
     }
 
     /// 用户确认后注入暂存的 root 密码。
@@ -19232,7 +18923,6 @@ impl TerminalView {
                 self.ai_context_model.clone(),
                 self.find_model.clone(),
                 self.active_session.clone(),
-                self.ambient_agent_view_model.clone(),
                 &self.cli_subagent_controller,
                 &self.model_events_handle,
                 self.agent_view_controller.clone(),
@@ -22375,7 +22065,6 @@ impl TypedActionView for TerminalView {
             | SetInputModeAgent
             | SetInputModeTerminal
             | HyperlinkClick { .. }
-            | AttemptLoginGatedFeature
             | StartFileDropTarget
             | StopFileDropTarget
             | RunNativeShellCompletions { .. }
@@ -22949,15 +22638,6 @@ impl TypedActionView for TerminalView {
             HyperlinkClick(hyperlink) => {
                 ctx.notify();
                 ctx.open_url(&hyperlink.url);
-            }
-            AttemptLoginGatedFeature => {
-                AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
-                    auth_manager.attempt_login_gated_feature(
-                        "Upgrade AI Usage",
-                        AuthViewVariant::RequireLoginCloseable,
-                        ctx,
-                    )
-                });
             }
             StartFileDropTarget => {
                 let Some(session) = self

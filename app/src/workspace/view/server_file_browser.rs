@@ -1,19 +1,18 @@
 use std::any::Any;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Local, TimeZone};
 use pathfinder_geometry::rect::RectF;
-use pathfinder_geometry::vector::{Vector2F, vec2f};
+use pathfinder_geometry::vector::{vec2f, Vector2F};
 use uuid::Uuid;
 use walkdir::WalkDir;
 use warp_core::ui::theme::color::internal_colors;
 use warp_core::{HostId, SessionId};
 use warp_util::standardized_path::StandardizedPath;
-use warpui::r#async::{SpawnedFutureHandle, Timer};
 use warpui::clipboard::ClipboardContent;
 use warpui::elements::{
     Border, ChildAnchor, ChildView, Clipped, ConstrainedBox, Container, CornerRadius,
@@ -25,6 +24,7 @@ use warpui::elements::{
 use warpui::event::DispatchedEvent;
 use warpui::modals::{AlertDialogWithCallbacks, ModalButton};
 use warpui::platform::{Cursor, FilePickerConfiguration, SaveFilePickerConfiguration};
+use warpui::r#async::{SpawnedFutureHandle, Timer};
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::{
     AfterLayoutContext, AppContext, BlurContext, Entity, Event, EventContext, FocusContext,
@@ -40,8 +40,8 @@ use crate::editor::{
     PropagateHorizontalNavigationKeys, SingleLineEditorOptions, TextOptions,
 };
 use crate::menu::{
-    DEFAULT_WIDTH as MENU_DEFAULT_WIDTH, Event as MenuEvent, MENU_ITEM_VERTICAL_PADDING, Menu,
-    MenuItem, MenuItemFields, SUBMENU_OVERLAP, SubMenu,
+    Event as MenuEvent, Menu, MenuItem, MenuItemFields, SubMenu,
+    DEFAULT_WIDTH as MENU_DEFAULT_WIDTH, MENU_ITEM_VERTICAL_PADDING, SUBMENU_OVERLAP,
 };
 use crate::ui_components::icons::Icon;
 use crate::workspace::environment_runtime::{
@@ -70,10 +70,8 @@ const UPLOAD_STAGING_DIR_NAME: &str = ".ashide-upload-staging";
 #[derive(Clone, Debug)]
 pub enum ServerFileBrowserAction {
     Refresh,
-    JumpToPath,
     ClickEntry(usize),
     OpenEntry(usize),
-    ToggleDirectory(String),
     SelectPreviousItem,
     SelectNextItem,
     ExpandSelectedItem,
@@ -82,8 +80,12 @@ pub enum ServerFileBrowserAction {
     OpenContextMenu { index: usize, position: Vector2F },
     DismissContextMenu,
     CopyPath(String),
+    CopyRelativePath(String),
     CopyName(String),
     CdToTerminal(String),
+    OpenInTerminalTab(String),
+    RevealInFileManager(String),
+    OpenWithDefaultApp(String),
     Download(String),
     UploadFiles(String),
     UploadFolder(String),
@@ -94,12 +96,11 @@ pub enum ServerFileBrowserAction {
     CreateFolder(String),
     RenameEntry(usize),
     DeleteEntry(usize),
-    CommitRename,
-    CancelRename,
     DismissRenameEditor,
     ToggleUploadProgressPanel,
     DismissUploadProgressPanel,
     ClearCompletedUploads,
+    ToggleHiddenFiles,
 }
 
 #[derive(Clone, Debug)]
@@ -113,6 +114,9 @@ pub enum ServerFileBrowserEvent {
     CdToDirectory {
         path: String,
     },
+    OpenDirectoryInNewTab {
+        path: String,
+    },
     EnvironmentRuntimeUnavailable {
         session_id: Option<SessionId>,
         host_id: Option<HostId>,
@@ -124,9 +128,38 @@ struct ServerFileBrowserEntry {
     name: String,
     path: String,
     kind: EnvironmentRuntimeFileKind,
+    /// For symlink entries, the kind of the resolved target.
+    /// `Unspecified` for non-symlink entries.
+    target_kind: EnvironmentRuntimeFileKind,
     size_bytes: Option<u64>,
     modified_epoch_millis: Option<u64>,
     depth: usize,
+}
+
+impl ServerFileBrowserEntry {
+    /// True if this entry navigates like a directory: either a plain directory
+    /// or a symlink whose target is a directory.
+    fn is_directory_like(&self) -> bool {
+        match self.kind {
+            EnvironmentRuntimeFileKind::Directory => true,
+            EnvironmentRuntimeFileKind::Symlink => {
+                self.target_kind == EnvironmentRuntimeFileKind::Directory
+            }
+            _ => false,
+        }
+    }
+
+    /// True if this entry opens like a file: either a plain file or a symlink
+    /// whose target is a file.
+    fn is_file_like(&self) -> bool {
+        match self.kind {
+            EnvironmentRuntimeFileKind::File => true,
+            EnvironmentRuntimeFileKind::Symlink => {
+                self.target_kind == EnvironmentRuntimeFileKind::File
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,6 +174,7 @@ struct UploadConflict {
     path: String,
     display_name: String,
     kind: EnvironmentRuntimeFileKind,
+    target_kind: EnvironmentRuntimeFileKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,7 +190,6 @@ enum UploadTaskStatus {
     Uploading,
     Completed,
     Failed(String),
-    Skipped,
 }
 
 struct ServerFileUploadTask {
@@ -172,10 +205,7 @@ struct ServerFileUploadTask {
 struct ServerFileUploadBatch {
     operation_scope: FileBrowserOperationScope,
     staging_root: String,
-    environment_directory: String,
     conflict_policy: UploadConflictPolicy,
-    /// Paths that existed on the environment host when the batch started.
-    conflict_paths: HashSet<String>,
     directory_overwrite_roots: HashSet<String>,
     phase: UploadBatchPhase,
     tasks: Vec<ServerFileUploadTask>,
@@ -249,6 +279,23 @@ impl FileBrowserRootKind {
     }
 }
 
+/// Distinguishes the full-disk file browser from the cd-rooted project explorer.
+/// The project explorer's path bar doubles as a fuzzy filter input; the file
+/// browser's path bar is a pure navigation (jump-to-path) input.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FileBrowserRole {
+    FileBrowser,
+    ProjectExplorer,
+}
+
+/// Result of parsing the path-bar input: navigate to a path, or filter entries by name.
+#[derive(Debug)]
+enum QueryIntent {
+    Navigate(String),
+    Filter(String),
+    Clear,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FileBrowserOperationScope {
     root_kind: FileBrowserRootKind,
@@ -262,7 +309,13 @@ pub struct ServerFileBrowserView {
     session_id: Option<SessionId>,
     environment_lifecycle_state: Option<EnvironmentLifecycleState>,
     root_kind: FileBrowserRootKind,
+    role: FileBrowserRole,
     current_path: String,
+    /// The initial root path the browser was opened at. Used as the reference
+    /// point for "copy relative path" in project-explorer role. Stays fixed
+    /// even as the user navigates into subdirectories.
+    project_root: String,
+    search_filter: Option<String>,
     path_editor: ViewHandle<EditorView>,
     rename_editor: ViewHandle<EditorView>,
     pending_rename_index: Option<usize>,
@@ -279,6 +332,7 @@ pub struct ServerFileBrowserView {
     resolve_generation: u64,
     directory_load_generations: HashMap<String, u64>,
     refresh_button: MouseStateHandle,
+    hidden_files_button: MouseStateHandle,
     upload_file_button: MouseStateHandle,
     upload_folder_button: MouseStateHandle,
     row_states: HashMap<String, MouseStateHandle>,
@@ -296,6 +350,7 @@ pub struct ServerFileBrowserView {
     active_download_batch_index: Option<usize>,
     transfer_progress_poll_handle: Option<SpawnedFutureHandle>,
     drag_files_hovered: bool,
+    show_hidden_files: bool,
     view_handle: WeakViewHandle<Self>,
 }
 
@@ -332,11 +387,11 @@ impl ServerFileBrowserView {
         });
 
         ctx.subscribe_to_view(&path_editor, |me, _, event, ctx| match event {
-            EditorEvent::Enter => me.jump_to_editor_path(ctx),
-            EditorEvent::Escape => me.sync_editor_to_current_path(ctx),
+            EditorEvent::Enter => me.handle_query_submit(ctx),
+            EditorEvent::Escape => me.handle_query_cancel(ctx),
+            EditorEvent::Edited(_) => me.handle_query_edit(ctx),
             _ => {}
         });
-
         let rename_editor = ctx.add_typed_action_view(|ctx| {
             let appearance = crate::appearance::Appearance::as_ref(ctx);
             let mut editor = EditorView::single_line(
@@ -366,8 +421,11 @@ impl ServerFileBrowserView {
             host_id: None,
             session_id: None,
             environment_lifecycle_state: None,
-            root_kind: FileBrowserRootKind::Environment,
+            root_kind: FileBrowserRootKind::Terminal,
+            role: FileBrowserRole::FileBrowser,
             current_path: String::new(),
+            project_root: String::new(),
+            search_filter: None,
             path_editor,
             rename_editor,
             pending_rename_index: None,
@@ -384,6 +442,7 @@ impl ServerFileBrowserView {
             resolve_generation: 0,
             directory_load_generations: HashMap::new(),
             refresh_button: Default::default(),
+            hidden_files_button: Default::default(),
             upload_file_button: Default::default(),
             upload_folder_button: Default::default(),
             row_states: HashMap::new(),
@@ -400,6 +459,7 @@ impl ServerFileBrowserView {
             active_download_batch_index: None,
             transfer_progress_poll_handle: None,
             drag_files_hovered: false,
+            show_hidden_files: false,
             view_handle: ctx.handle(),
         }
     }
@@ -431,10 +491,29 @@ impl ServerFileBrowserView {
         self.environment_lifecycle_state = None;
         self.root_kind = FileBrowserRootKind::Terminal;
         if should_load {
-            self.current_path = path;
+            self.current_path = path.clone();
+            self.project_root = path;
             self.sync_editor_to_current_path(ctx);
             self.load_current_directory(ctx);
         }
+    }
+
+    pub fn set_role(&mut self, role: FileBrowserRole, ctx: &mut ViewContext<Self>) {
+        if self.role == role {
+            return;
+        }
+        self.role = role;
+        self.search_filter = None;
+        let placeholder = match role {
+            FileBrowserRole::FileBrowser => crate::t!("server-file-browser-path-placeholder"),
+            FileBrowserRole::ProjectExplorer => crate::t!("server-file-browser-search-placeholder"),
+        };
+        self.path_editor.update(ctx, |editor, ctx| {
+            editor.set_placeholder_text(placeholder, ctx);
+        });
+        self.sync_editor_to_current_path(ctx);
+        self.rebuild_entries();
+        ctx.notify();
     }
 
     pub fn set_environment_root(
@@ -475,6 +554,9 @@ impl ServerFileBrowserView {
             || became_available
             || should_retry_unavailable_status;
         if should_load {
+            if path_changed {
+                self.project_root = path.clone();
+            }
             self.current_path = path;
             self.sync_editor_to_current_path(ctx);
             self.load_current_directory(ctx);
@@ -533,22 +615,111 @@ impl ServerFileBrowserView {
     }
 
     fn sync_editor_to_current_path(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.role == FileBrowserRole::ProjectExplorer {
+            // Project explorer's bar is a filter input, not a path mirror.
+            self.path_editor.update(ctx, |editor, ctx| {
+                editor.clear_buffer(ctx);
+            });
+            self.search_filter = None;
+            self.rebuild_entries();
+            ctx.notify();
+            return;
+        }
         self.path_editor.update(ctx, |editor, ctx| {
             editor.set_buffer_text(&self.current_path, ctx);
         });
     }
 
-    fn jump_to_editor_path(&mut self, ctx: &mut ViewContext<Self>) {
-        let path = self
+    /// Decide whether the input looks like a path (navigate) or a name pattern (filter).
+    fn classify_query(input: &str) -> QueryIntent {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return QueryIntent::Clear;
+        }
+        let looks_like_path = trimmed.starts_with('/')
+            || trimmed.starts_with('~')
+            || trimmed.starts_with("./")
+            || trimmed.starts_with("../")
+            || trimmed.contains('/');
+        if looks_like_path {
+            QueryIntent::Navigate(trimmed.to_string())
+        } else {
+            QueryIntent::Filter(trimmed.to_string())
+        }
+    }
+
+    fn handle_query_submit(&mut self, ctx: &mut ViewContext<Self>) {
+        let text = self
             .path_editor
             .as_ref(ctx)
             .buffer_text(ctx)
             .trim()
             .to_string();
-        if path.is_empty() {
+        if text.is_empty() {
             return;
         }
-        self.resolve_and_open(path, ctx);
+        match Self::classify_query(&text) {
+            QueryIntent::Navigate(path) => {
+                self.search_filter = None;
+                self.resolve_and_open(path, ctx);
+            }
+            QueryIntent::Filter(pattern) => {
+                if self.role == FileBrowserRole::ProjectExplorer {
+                    self.search_filter = Some(pattern);
+                    self.rebuild_entries();
+                    ctx.notify();
+                } else {
+                    // File browser: a bare name with no path isn't a navigation target.
+                    // Fall back to no-op; user can type a full path to navigate.
+                }
+            }
+            QueryIntent::Clear => {
+                self.search_filter = None;
+                self.rebuild_entries();
+                ctx.notify();
+            }
+        }
+    }
+
+    fn handle_query_edit(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.role != FileBrowserRole::ProjectExplorer {
+            return;
+        }
+        let text = self
+            .path_editor
+            .as_ref(ctx)
+            .buffer_text(ctx)
+            .trim()
+            .to_string();
+        match Self::classify_query(&text) {
+            QueryIntent::Filter(pattern) => {
+                self.search_filter = Some(pattern);
+                self.rebuild_entries();
+                ctx.notify();
+            }
+            QueryIntent::Clear => {
+                if self.search_filter.take().is_some() {
+                    self.rebuild_entries();
+                    ctx.notify();
+                }
+            }
+            QueryIntent::Navigate(_) => {
+                // Don't filter while user is typing a path; let Enter handle navigation.
+            }
+        }
+    }
+
+    fn handle_query_cancel(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.role == FileBrowserRole::ProjectExplorer {
+            self.path_editor.update(ctx, |editor, ctx| {
+                editor.clear_buffer(ctx);
+            });
+            self.search_filter = None;
+            self.rebuild_entries();
+            ctx.notify();
+        } else {
+            self.sync_editor_to_current_path(ctx);
+        }
     }
 
     fn effective_host_id(&self, ctx: &AppContext) -> Option<HostId> {
@@ -570,6 +741,20 @@ impl ServerFileBrowserView {
         let manager = EnvironmentRuntimeClientRegistry::as_ref(ctx);
         bound_environment_session_id(self.session_id, |session_id| {
             manager.client_for_session(session_id).is_some()
+        })
+    }
+
+    fn backend(&self, ctx: &AppContext) -> Option<FileBrowserBackend> {
+        if self.root_kind.is_terminal() {
+            return Some(FileBrowserBackend::Terminal);
+        }
+        let client = self.client(ctx)?;
+        let session_id = self.environment_session_id(ctx);
+        let host_id = self.effective_host_id(ctx);
+        Some(FileBrowserBackend::Environment {
+            client,
+            session_id,
+            host_id,
         })
     }
 
@@ -648,8 +833,7 @@ impl ServerFileBrowserView {
         match lifecycle_state {
             Some(EnvironmentLifecycleState::Connecting | EnvironmentLifecycleState::Installing)
             | None => crate::t!("server-file-browser-runtime-preparing"),
-            Some(EnvironmentLifecycleState::Reconnecting)
-            | Some(EnvironmentLifecycleState::Connected) => {
+            Some(EnvironmentLifecycleState::Connected) => {
                 crate::t!("server-file-browser-runtime-reconnecting")
             }
             Some(EnvironmentLifecycleState::Dormant) => {
@@ -705,10 +889,6 @@ impl ServerFileBrowserView {
         &self.operation_scope() == scope
     }
 
-    fn is_current_or_finished_operation_scope(&self, scope: &FileBrowserOperationScope) -> bool {
-        self.is_current_operation_scope(scope)
-    }
-
     fn load_current_directory(&mut self, ctx: &mut ViewContext<Self>) {
         self.reload_directory(ctx, true);
     }
@@ -743,49 +923,23 @@ impl ServerFileBrowserView {
             .and_then(|index| self.entries.get(index))
             .map(|entry| entry.path.clone());
 
-        if self.root_kind.is_terminal() {
-            self.loading = true;
-            if reset_tree {
-                self.status = None;
-            }
-            ctx.notify();
-            ctx.spawn(
-                async move {
-                    reload_directory_tree(
-                        DirectoryListingSource::Terminal,
-                        path,
-                        expanded_directories,
-                        depth_by_path,
-                    )
-                    .await
-                },
-                move |me, result, ctx| {
-                    me.finish_directory_reload(result, selected_path, reset_tree, generation, ctx);
-                },
-            );
-        } else if let Some(client) = self.client(ctx) {
-            self.loading = true;
-            if reset_tree {
-                self.status = None;
-            }
-            ctx.notify();
-            ctx.spawn(
-                async move {
-                    reload_directory_tree(
-                        DirectoryListingSource::RuntimeClient(client),
-                        path,
-                        expanded_directories,
-                        depth_by_path,
-                    )
-                    .await
-                },
-                move |me, result, ctx| {
-                    me.finish_directory_reload(result, selected_path, reset_tree, generation, ctx);
-                },
-            );
-        } else {
+        let Some(backend) = self.backend(ctx) else {
             self.set_environment_runtime_unavailable(ctx);
+            return;
+        };
+        self.loading = true;
+        if reset_tree {
+            self.status = None;
         }
+        ctx.notify();
+        ctx.spawn(
+            async move {
+                reload_directory_tree(backend, path, expanded_directories, depth_by_path).await
+            },
+            move |me, result, ctx| {
+                me.finish_directory_reload(result, selected_path, reset_tree, generation, ctx);
+            },
+        );
     }
 
     fn refresh_directory_tree(&mut self, ctx: &mut ViewContext<Self>) {
@@ -853,38 +1007,24 @@ impl ServerFileBrowserView {
         self.resolve_generation += 1;
         let generation = self.resolve_generation;
         let operation_scope = self.operation_scope();
-        let host_id = self.effective_host_id(ctx);
-        let path_for_spawn = path.clone();
-
-        if self.root_kind.is_terminal() {
-            self.loading = true;
-            self.status = None;
-            ctx.notify();
-            ctx.spawn(
-                async move { resolve_terminal_path(path_for_spawn).await },
-                move |me, result, ctx| {
-                    me.finish_resolve_and_open(result, host_id, generation, operation_scope, ctx);
-                },
-            );
-        } else if let Some(client) = self.client(ctx) {
-            self.loading = true;
-            self.status = None;
-            ctx.notify();
-            ctx.spawn(
-                async move { resolve_path(client, path_for_spawn).await },
-                move |me, result, ctx| {
-                    me.finish_resolve_and_open(result, host_id, generation, operation_scope, ctx);
-                },
-            );
-        } else {
+        let Some(backend) = self.backend(ctx) else {
             self.set_environment_runtime_unavailable(ctx);
-        }
+            return;
+        };
+        self.loading = true;
+        self.status = None;
+        ctx.notify();
+        ctx.spawn(
+            async move { backend.resolve_path(path).await },
+            move |me, result, ctx| {
+                me.finish_resolve_and_open(result, generation, operation_scope, ctx);
+            },
+        );
     }
 
     fn finish_resolve_and_open(
         &mut self,
         result: Result<ResolvedEnvironmentFilePath, String>,
-        host_id: Option<HostId>,
         generation: u64,
         operation_scope: FileBrowserOperationScope,
         ctx: &mut ViewContext<Self>,
@@ -899,23 +1039,23 @@ impl ServerFileBrowserView {
         }
         self.loading = false;
         match result {
-            Ok(resolved) if resolved.kind == EnvironmentRuntimeFileKind::Directory => {
+            Ok(resolved) if resolved.is_directory_like() => {
                 self.current_path = resolved.canonical_path;
                 self.sync_editor_to_current_path(ctx);
                 self.load_current_directory(ctx);
             }
-            Ok(resolved) if resolved.kind == EnvironmentRuntimeFileKind::File => {
-                if self.root_kind.is_terminal() {
-                    ctx.emit(ServerFileBrowserEvent::OpenCurrentAppFile {
-                        path: PathBuf::from(&resolved.canonical_path),
-                    });
-                } else {
-                    if let (Some(host_id), Ok(path)) = (
-                        host_id.clone(),
-                        StandardizedPath::try_new(&resolved.canonical_path),
-                    ) {
-                        ctx.emit(ServerFileBrowserEvent::OpenEnvironmentFile {
-                            environment_file_path: EnvironmentFilePath::new(host_id, path),
+            Ok(resolved) if resolved.is_file_like() => {
+                if let Some(backend) = self.backend(ctx) {
+                    if let Some(target) = backend.open_file_target(&resolved.canonical_path) {
+                        ctx.emit(match target {
+                            FileOpenTarget::LocalFile(path) => {
+                                ServerFileBrowserEvent::OpenCurrentAppFile { path }
+                            }
+                            FileOpenTarget::EnvironmentFile(environment_file_path) => {
+                                ServerFileBrowserEvent::OpenEnvironmentFile {
+                                    environment_file_path,
+                                }
+                            }
                         });
                     }
                 }
@@ -925,9 +1065,16 @@ impl ServerFileBrowserView {
                     self.load_current_directory(ctx);
                 }
             }
-            Ok(_) => {
-                self.status = Some(crate::t!("server-file-browser-unsupported-path"));
-            }
+            Ok(resolved) => match resolved.kind {
+                EnvironmentRuntimeFileKind::Symlink
+                    if resolved.target_kind == EnvironmentRuntimeFileKind::Missing =>
+                {
+                    self.status = Some(crate::t!("server-file-browser-broken-symlink"));
+                }
+                _ => {
+                    self.status = Some(crate::t!("server-file-browser-unsupported-path"));
+                }
+            },
             Err(error) => {
                 if Self::is_environment_connection_error(&error) {
                     self.set_listing_error(error, ctx);
@@ -991,39 +1138,24 @@ impl ServerFileBrowserView {
             .and_modify(|generation| *generation += 1)
             .or_insert(1);
         let generation = *generation;
-        if self.root_kind.is_terminal() {
-            self.loading = true;
-            ctx.notify();
-            ctx.spawn(
-                async move { list_terminal_directory(path_for_spawn).await },
-                move |me, result, ctx| {
-                    me.finish_toggle_directory_load(
-                        result,
-                        child_depth,
-                        generation,
-                        operation_scope,
-                        ctx,
-                    );
-                },
-            );
-        } else if let Some(client) = self.client(ctx) {
-            self.loading = true;
-            ctx.notify();
-            ctx.spawn(
-                async move { list_directory(client, path_for_spawn).await },
-                move |me, result, ctx| {
-                    me.finish_toggle_directory_load(
-                        result,
-                        child_depth,
-                        generation,
-                        operation_scope,
-                        ctx,
-                    );
-                },
-            );
-        } else {
+        let Some(backend) = self.backend(ctx) else {
             self.set_environment_runtime_unavailable(ctx);
-        }
+            return;
+        };
+        self.loading = true;
+        ctx.notify();
+        ctx.spawn(
+            async move { backend.list_directory(path_for_spawn).await },
+            move |me, result, ctx| {
+                me.finish_toggle_directory_load(
+                    result,
+                    child_depth,
+                    generation,
+                    operation_scope,
+                    ctx,
+                );
+            },
+        );
     }
 
     fn finish_toggle_directory_load(
@@ -1074,21 +1206,21 @@ impl ServerFileBrowserView {
             .filter(|entry| entry.depth == 0)
             .cloned()
             .collect();
-        self.entries =
-            rebuild_entries_from(roots, &self.expanded_directories, &self.loaded_directories);
+        let show_hidden = self.show_hidden_files;
+        let search_filter = self.search_filter.clone();
+        self.entries = rebuild_entries_from(
+            roots,
+            &self.expanded_directories,
+            &self.loaded_directories,
+            show_hidden,
+            search_filter.as_deref(),
+        );
         self.selected_index = selected_index_after_rebuild(
             &self.entries,
             selected_path.as_deref(),
             self.selected_index,
         );
         self.sync_row_states();
-    }
-
-    fn select_index(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
-        if index < self.entries.len() {
-            self.selected_index = Some(index);
-            ctx.notify();
-        }
     }
 
     fn click_entry(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
@@ -1099,7 +1231,7 @@ impl ServerFileBrowserView {
             return;
         };
         self.selected_index = Some(index);
-        if entry.kind == EnvironmentRuntimeFileKind::Directory {
+        if entry.is_directory_like() {
             self.toggle_directory(entry.path, ctx);
         } else {
             ctx.notify();
@@ -1111,30 +1243,26 @@ impl ServerFileBrowserView {
             return;
         };
         self.selected_index = Some(index);
-        match entry.kind {
-            EnvironmentRuntimeFileKind::Directory => self.toggle_directory(entry.path, ctx),
-            EnvironmentRuntimeFileKind::File => {
-                if self.root_kind.is_terminal() {
-                    ctx.emit(ServerFileBrowserEvent::OpenCurrentAppFile {
-                        path: PathBuf::from(entry.path),
+        if entry.is_directory_like() {
+            self.toggle_directory(entry.path, ctx);
+        } else if entry.is_file_like() {
+            if let Some(backend) = self.backend(ctx) {
+                if let Some(target) = backend.open_file_target(&entry.path) {
+                    ctx.emit(match target {
+                        FileOpenTarget::LocalFile(path) => {
+                            ServerFileBrowserEvent::OpenCurrentAppFile { path }
+                        }
+                        FileOpenTarget::EnvironmentFile(environment_file_path) => {
+                            ServerFileBrowserEvent::OpenEnvironmentFile {
+                                environment_file_path,
+                            }
+                        }
                     });
-                } else {
-                    if let (Some(host_id), Ok(path)) = (
-                        self.effective_host_id(ctx),
-                        StandardizedPath::try_new(entry.path.as_str()),
-                    ) {
-                        ctx.emit(ServerFileBrowserEvent::OpenEnvironmentFile {
-                            environment_file_path: EnvironmentFilePath::new(host_id, path),
-                        });
-                    }
                 }
-                ctx.notify();
             }
-            EnvironmentRuntimeFileKind::Symlink
-            | EnvironmentRuntimeFileKind::Other
-            | EnvironmentRuntimeFileKind::Unspecified => {
-                self.resolve_and_open(entry.path, ctx);
-            }
+            ctx.notify();
+        } else {
+            self.resolve_and_open(entry.path, ctx);
         }
     }
 
@@ -1242,11 +1370,44 @@ impl ServerFileBrowserView {
         self.dismiss_context_menu(ctx);
     }
 
+    fn copy_relative_path(&mut self, path: String, ctx: &mut ViewContext<Self>) {
+        let relative = make_relative_path(&self.project_root, &path);
+        ctx.clipboard()
+            .write(ClipboardContent::plain_text(relative));
+        self.status = Some(crate::t!("server-file-browser-copied-relative-path"));
+        self.dismiss_context_menu(ctx);
+    }
+
     fn copy_name(&mut self, name: String, ctx: &mut ViewContext<Self>) {
         ctx.clipboard()
             .write(ClipboardContent::plain_text(name.clone()));
         self.status = Some(crate::t!("server-file-browser-copied-name"));
         self.dismiss_context_menu(ctx);
+    }
+
+    fn reveal_in_file_manager(&mut self, path: String, ctx: &mut ViewContext<Self>) {
+        self.dismiss_context_menu(ctx);
+        let path = PathBuf::from(path);
+        let result = reveal_path_in_file_manager(&path);
+        self.status = Some(match result {
+            Ok(()) => crate::t!("server-file-browser-reveal-ok"),
+            Err(error) => {
+                log::error!("failed to reveal in file manager: {error:#}");
+                crate::t!("server-file-browser-reveal-failed")
+            }
+        });
+        ctx.notify();
+    }
+
+    fn open_with_default_app(&mut self, path: String, ctx: &mut ViewContext<Self>) {
+        self.dismiss_context_menu(ctx);
+        let path = PathBuf::from(path);
+        let result = open_path_with_default_app(&path);
+        if let Err(error) = result {
+            log::error!("failed to open with default app: {error:#}");
+            self.status = Some(crate::t!("server-file-browser-open-failed"));
+        }
+        ctx.notify();
     }
 
     fn select_previous_item(&mut self, ctx: &mut ViewContext<Self>) {
@@ -1267,9 +1428,7 @@ impl ServerFileBrowserView {
         else {
             return;
         };
-        if entry.kind == EnvironmentRuntimeFileKind::Directory
-            && !self.expanded_directories.contains(&entry.path)
-        {
+        if entry.is_directory_like() && !self.expanded_directories.contains(&entry.path) {
             self.toggle_directory(entry.path, ctx);
         }
     }
@@ -1282,9 +1441,7 @@ impl ServerFileBrowserView {
         else {
             return;
         };
-        if entry.kind == EnvironmentRuntimeFileKind::Directory
-            && self.expanded_directories.contains(&entry.path)
-        {
+        if entry.is_directory_like() && self.expanded_directories.contains(&entry.path) {
             self.toggle_directory(entry.path, ctx);
         }
     }
@@ -1301,7 +1458,7 @@ impl ServerFileBrowserView {
         target: &ServerFileBrowserEntry,
         ctx: &AppContext,
     ) -> Vec<MenuItem<ServerFileBrowserAction>> {
-        let target_is_directory = target.kind == EnvironmentRuntimeFileKind::Directory;
+        let target_is_directory = target.is_directory_like();
         let upload_target = if target_is_directory {
             target.path.clone()
         } else {
@@ -1313,14 +1470,30 @@ impl ServerFileBrowserView {
             environment_parent(&target.path).unwrap_or_else(|| self.current_path.clone())
         };
         let delete_color = Appearance::as_ref(ctx).theme().ansi_fg_red();
+        let supports_transfers = self.backend(ctx).is_some_and(|b| b.supports_transfers());
 
-        vec![
+        let supports_local_open = self.backend(ctx).is_some_and(|b| b.supports_local_open());
+        let is_project_explorer = self.role == FileBrowserRole::ProjectExplorer;
+
+        let mut items = Vec::new();
+        items.push(
             MenuItemFields::new(crate::t!("server-file-browser-menu-refresh"))
                 .with_icon(Icon::Refresh)
                 .with_on_select_action(ServerFileBrowserAction::Refresh)
                 .into_item(),
-            MenuItem::Separator,
-            context_menu_submenu(
+        );
+        items.push(MenuItem::Separator);
+
+        // Open: explicit open entry. For directories this means toggling; for
+        // files it opens the file. Matches double-click behavior.
+        items.push(
+            MenuItemFields::new(crate::t!("server-file-browser-menu-open"))
+                .with_on_select_action(ServerFileBrowserAction::OpenEntry(index))
+                .into_item(),
+        );
+
+        if supports_transfers {
+            items.push(context_menu_submenu(
                 crate::t!("server-file-browser-menu-upload"),
                 Icon::UploadCloud,
                 vec![
@@ -1337,53 +1510,112 @@ impl ServerFileBrowserView {
                         ))
                         .into_item(),
                 ],
-            ),
-            context_menu_submenu(
-                crate::t!("server-file-browser-menu-new"),
-                Icon::Plus,
-                vec![
-                    MenuItemFields::new(crate::t!("server-file-browser-menu-new-file"))
-                        .with_icon(Icon::File)
-                        .with_on_select_action(ServerFileBrowserAction::CreateFile(
-                            upload_target.clone(),
-                        ))
-                        .into_item(),
-                    MenuItemFields::new(crate::t!("server-file-browser-menu-new-folder"))
-                        .with_icon(Icon::Folder)
-                        .with_on_select_action(ServerFileBrowserAction::CreateFolder(upload_target))
-                        .into_item(),
-                ],
-            ),
-            MenuItem::Separator,
-            MenuItemFields::new(crate::t!("server-file-browser-menu-download"))
-                .with_icon(Icon::Download)
-                .with_on_select_action(ServerFileBrowserAction::Download(target.path.clone()))
-                .into_item(),
+            ));
+        }
+
+        items.push(context_menu_submenu(
+            crate::t!("server-file-browser-menu-new"),
+            Icon::Plus,
+            vec![
+                MenuItemFields::new(crate::t!("server-file-browser-menu-new-file"))
+                    .with_icon(Icon::File)
+                    .with_on_select_action(ServerFileBrowserAction::CreateFile(
+                        upload_target.clone(),
+                    ))
+                    .into_item(),
+                MenuItemFields::new(crate::t!("server-file-browser-menu-new-folder"))
+                    .with_icon(Icon::Folder)
+                    .with_on_select_action(ServerFileBrowserAction::CreateFolder(
+                        upload_target.clone(),
+                    ))
+                    .into_item(),
+            ],
+        ));
+        items.push(MenuItem::Separator);
+
+        if supports_transfers {
+            items.push(
+                MenuItemFields::new(crate::t!("server-file-browser-menu-download"))
+                    .with_icon(Icon::Download)
+                    .with_on_select_action(ServerFileBrowserAction::Download(target.path.clone()))
+                    .into_item(),
+            );
+        }
+
+        if supports_local_open {
+            items.push(
+                MenuItemFields::new(crate::t!("server-file-browser-menu-reveal"))
+                    .with_on_select_action(ServerFileBrowserAction::RevealInFileManager(
+                        target.path.clone(),
+                    ))
+                    .into_item(),
+            );
+            if !target_is_directory {
+                items.push(
+                    MenuItemFields::new(crate::t!(
+                        "server-file-browser-menu-open-with-default-app"
+                    ))
+                    .with_on_select_action(ServerFileBrowserAction::OpenWithDefaultApp(
+                        target.path.clone(),
+                    ))
+                    .into_item(),
+                );
+            }
+        }
+
+        items.push(
             MenuItemFields::new(crate::t!("server-file-browser-menu-copy-path"))
                 .with_icon(Icon::Copy)
                 .with_on_select_action(ServerFileBrowserAction::CopyPath(target.path.clone()))
                 .into_item(),
-            MenuItem::Separator,
+        );
+        if is_project_explorer {
+            items.push(
+                MenuItemFields::new(crate::t!("server-file-browser-menu-copy-relative-path"))
+                    .with_icon(Icon::Copy)
+                    .with_on_select_action(ServerFileBrowserAction::CopyRelativePath(
+                        target.path.clone(),
+                    ))
+                    .into_item(),
+            );
+        }
+        items.push(MenuItem::Separator);
+        items.push(
             MenuItemFields::new(crate::t!("server-file-browser-menu-cd-to-terminal"))
                 .with_icon(Icon::Terminal)
-                .with_on_select_action(ServerFileBrowserAction::CdToTerminal(cd_target))
+                .with_on_select_action(ServerFileBrowserAction::CdToTerminal(cd_target.clone()))
                 .into_item(),
+        );
+        if target_is_directory {
+            items.push(
+                MenuItemFields::new(crate::t!("server-file-browser-menu-open-in-terminal-tab"))
+                    .with_icon(Icon::Terminal)
+                    .with_on_select_action(ServerFileBrowserAction::OpenInTerminalTab(cd_target))
+                    .into_item(),
+            );
+        }
+        items.push(
             MenuItemFields::new(crate::t!("server-file-browser-menu-rename"))
                 .with_icon(Icon::Rename)
                 .with_on_select_action(ServerFileBrowserAction::RenameEntry(index))
                 .into_item(),
+        );
+        items.push(
             MenuItemFields::new(crate::t!("server-file-browser-menu-copy-filename"))
                 .with_icon(Icon::Copy)
                 .with_on_select_action(ServerFileBrowserAction::CopyName(target.name.clone()))
                 .into_item(),
-            MenuItem::Separator,
+        );
+        items.push(MenuItem::Separator);
+        items.push(
             MenuItemFields::new(crate::t!("server-file-browser-menu-delete"))
                 .with_icon(Icon::Trash)
                 .with_override_icon_color(delete_color.into())
                 .with_override_text_color(delete_color)
                 .with_on_select_action(ServerFileBrowserAction::DeleteEntry(index))
                 .into_item(),
-        ]
+        );
+        items
     }
 
     fn create_new_entry(
@@ -1393,7 +1625,7 @@ impl ServerFileBrowserView {
         ctx: &mut ViewContext<Self>,
     ) {
         self.dismiss_context_menu(ctx);
-        let Some(client) = self.client(ctx) else {
+        let Some(backend) = self.backend(ctx) else {
             self.set_listing_error(
                 crate::t!("server-file-browser-create-requires-session"),
                 ctx,
@@ -1406,7 +1638,7 @@ impl ServerFileBrowserView {
         let operation_scope = self.operation_scope();
         ctx.notify();
         ctx.spawn(
-            async move { create_environment_entry(client, environment_directory, kind).await },
+            async move { backend.create_entry(environment_directory, kind).await },
             move |me, result, ctx| {
                 if !me.is_current_operation_scope(&operation_scope) {
                     log::info!("server file browser ignored stale create entry result");
@@ -1493,19 +1725,14 @@ impl ServerFileBrowserView {
             return;
         }
 
-        let Some(client) = self.client(ctx) else {
-            self.set_environment_runtime_unavailable(ctx);
-            ctx.focus_self();
-            return;
-        };
-        let Some(environment_session_id) = self.environment_session_id(ctx) else {
+        let Some(backend) = self.backend(ctx) else {
             self.set_environment_runtime_unavailable(ctx);
             ctx.focus_self();
             return;
         };
 
         let from_path = entry.path.clone();
-        let is_directory = entry.kind == EnvironmentRuntimeFileKind::Directory;
+        let is_directory = entry.is_directory_like();
         let from_path_for_rename = from_path.clone();
         let new_name_for_rename = new_name.clone();
         let operation_scope = self.operation_scope();
@@ -1514,13 +1741,9 @@ impl ServerFileBrowserView {
         ctx.notify();
         ctx.spawn(
             async move {
-                rename_environment_path(
-                    client,
-                    environment_session_id,
-                    from_path_for_rename,
-                    new_name_for_rename,
-                )
-                .await
+                backend
+                    .rename_path(from_path_for_rename, new_name_for_rename)
+                    .await
             },
             move |me, result, ctx| {
                 if !me.is_current_operation_scope(&operation_scope) {
@@ -1592,7 +1815,7 @@ impl ServerFileBrowserView {
         self.dismiss_context_menu(ctx);
         self.selected_index = Some(index);
 
-        let is_directory = entry.kind == EnvironmentRuntimeFileKind::Directory;
+        let is_directory = entry.is_directory_like();
         let info = if is_directory {
             crate::t!("server-file-browser-delete-info-directory")
         } else {
@@ -1626,20 +1849,17 @@ impl ServerFileBrowserView {
         is_directory: bool,
         ctx: &mut ViewContext<Self>,
     ) {
-        let Some(client) = self.client(ctx) else {
+        let Some(backend) = self.backend(ctx) else {
             self.set_environment_runtime_unavailable(ctx);
             return;
         };
-        let environment_session_id = self.environment_session_id(ctx);
         let operation_scope = self.operation_scope();
         self.loading = true;
         self.status = None;
         ctx.notify();
         let path_for_cleanup = path.clone();
         ctx.spawn(
-            async move {
-                delete_environment_path(client, environment_session_id, path, is_directory).await
-            },
+            async move { backend.delete_path(path, is_directory).await },
             move |me, result, ctx| {
                 if !me.is_current_operation_scope(&operation_scope) {
                     log::info!("server file browser ignored stale delete result");
@@ -1794,18 +2014,16 @@ impl ServerFileBrowserView {
             .map(|entry| entry.path.clone());
         let operation_scope = self.operation_scope();
 
-        if let Some(client) = self.client(ctx) {
-            self.loading = true;
-            ctx.notify();
-            ctx.spawn(
-                async move {
-                    fetch_directory_listings_selective(
-                        DirectoryListingSource::RuntimeClient(client),
-                        directories,
-                        depth_by_path,
-                    )
-                    .await
-                },
+        let Some(backend) = self.backend(ctx) else {
+            self.set_environment_runtime_unavailable(ctx);
+            return;
+        };
+        self.loading = true;
+        ctx.notify();
+        ctx.spawn(
+            async move {
+                fetch_directory_listings_selective(backend, directories, depth_by_path).await
+            },
                 move |me, result, ctx| {
                     if !me.is_current_operation_scope(&operation_scope) {
                         log::info!("server file browser ignored stale selective reload result");
@@ -1836,9 +2054,6 @@ impl ServerFileBrowserView {
                     ctx.notify();
                 },
             );
-        } else {
-            self.set_environment_runtime_unavailable(ctx);
-        }
     }
 
     fn active_upload_batch(&self) -> Option<&ServerFileUploadBatch> {
@@ -1927,32 +2142,6 @@ impl ServerFileBrowserView {
         }
     }
 
-    fn active_upload_count(&self) -> usize {
-        let Some(batch) = self.active_upload_batch() else {
-            return 0;
-        };
-        let in_flight = batch
-            .tasks
-            .iter()
-            .filter(|task| {
-                matches!(
-                    task.status,
-                    UploadTaskStatus::Pending | UploadTaskStatus::Uploading
-                )
-            })
-            .count();
-        if in_flight > 0 {
-            return in_flight;
-        }
-        if matches!(
-            batch.phase,
-            UploadBatchPhase::Verifying | UploadBatchPhase::Promoting
-        ) {
-            return 1;
-        }
-        0
-    }
-
     fn has_completed_upload_tasks(&self) -> bool {
         self.upload_batches.iter().any(|batch| {
             batch
@@ -2035,7 +2224,13 @@ impl ServerFileBrowserView {
             if conflict_policy == UploadConflictPolicy::OverwriteAll {
                 conflicts
                     .iter()
-                    .filter(|c| c.kind == EnvironmentRuntimeFileKind::Directory)
+                    .filter(|c| match c.kind {
+                        EnvironmentRuntimeFileKind::Directory => true,
+                        EnvironmentRuntimeFileKind::Symlink => {
+                            c.target_kind == EnvironmentRuntimeFileKind::Directory
+                        }
+                        _ => false,
+                    })
                     .map(|c| c.path.clone())
                     .collect()
             } else {
@@ -2090,10 +2285,8 @@ impl ServerFileBrowserView {
                     me.start_upload_batch_after_staging_ready(
                         client,
                         operation_scope.clone(),
-                        environment_directory,
                         staging_root,
                         conflict_policy,
-                        conflict_paths,
                         directory_overwrite_roots,
                         tasks,
                         ctx,
@@ -2114,10 +2307,8 @@ impl ServerFileBrowserView {
         &mut self,
         client: Arc<EnvironmentFileBrowserClient>,
         operation_scope: FileBrowserOperationScope,
-        environment_directory: String,
         staging_root: String,
         conflict_policy: UploadConflictPolicy,
-        conflict_paths: HashSet<String>,
         directory_overwrite_roots: HashSet<String>,
         tasks: Vec<ServerFileUploadTask>,
         ctx: &mut ViewContext<Self>,
@@ -2135,9 +2326,7 @@ impl ServerFileBrowserView {
         self.upload_batches.push(ServerFileUploadBatch {
             operation_scope: operation_scope.clone(),
             staging_root,
-            environment_directory,
             conflict_policy,
-            conflict_paths,
             directory_overwrite_roots,
             phase: UploadBatchPhase::Uploading,
             tasks,
@@ -2748,14 +2937,25 @@ impl ServerFileBrowserView {
         ctx.notify();
     }
 
+    fn toggle_hidden_files(&mut self, ctx: &mut ViewContext<Self>) {
+        self.show_hidden_files = !self.show_hidden_files;
+        let selected_path = self
+            .selected_index
+            .and_then(|index| self.entries.get(index))
+            .map(|entry| entry.path.clone());
+        self.rebuild_entries();
+        self.selected_index = selected_index_after_rebuild(
+            &self.entries,
+            selected_path.as_deref(),
+            self.selected_index,
+        );
+        self.sync_row_states();
+        ctx.notify();
+    }
+
     fn active_download_batch(&self) -> Option<&ServerFileDownloadBatch> {
         self.active_download_batch_index
             .and_then(|index| self.download_batches.get(index))
-    }
-
-    fn active_download_batch_mut(&mut self) -> Option<&mut ServerFileDownloadBatch> {
-        self.active_download_batch_index
-            .and_then(|index| self.download_batches.get_mut(index))
     }
 
     fn has_active_download(&self) -> bool {
@@ -2767,22 +2967,6 @@ impl ServerFileBrowserView {
                 )
             })
         })
-    }
-
-    fn active_download_count(&self) -> usize {
-        let Some(batch) = self.active_download_batch() else {
-            return 0;
-        };
-        batch
-            .tasks
-            .iter()
-            .filter(|task| {
-                matches!(
-                    task.status,
-                    DownloadTaskStatus::Pending | DownloadTaskStatus::Downloading
-                )
-            })
-            .count()
     }
 
     fn has_completed_download_tasks(&self) -> bool {
@@ -3484,9 +3668,14 @@ impl ServerFileBrowserView {
             .finish()
     }
 
-    fn render_toolbar(&self, appearance: &crate::appearance::Appearance) -> Box<dyn Element> {
+    fn render_toolbar(
+        &self,
+        app: &AppContext,
+        appearance: &crate::appearance::Appearance,
+    ) -> Box<dyn Element> {
         let theme = appearance.theme();
         let icon_color = theme.sub_text_color(theme.background());
+        let supports_transfers = self.backend(app).is_some_and(|b| b.supports_transfers());
         let make_btn = |icon: Icon,
                         state: MouseStateHandle,
                         action: ServerFileBrowserAction|
@@ -3513,7 +3702,7 @@ impl ServerFileBrowserView {
             .finish()
         };
 
-        Flex::row()
+        let mut row = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(6.0)
@@ -3544,17 +3733,27 @@ impl ServerFileBrowserView {
                 ServerFileBrowserAction::Refresh,
             ))
             .with_child(make_btn(
-                Icon::UploadCloud,
-                self.upload_file_button.clone(),
-                ServerFileBrowserAction::UploadFiles(self.current_path.clone()),
-            ))
-            .with_child(make_btn(
-                Icon::Folder,
-                self.upload_folder_button.clone(),
-                ServerFileBrowserAction::UploadFolder(self.current_path.clone()),
-            ))
-            .with_child(self.render_upload_progress_button(appearance))
-            .finish()
+                Icon::Eye,
+                self.hidden_files_button.clone(),
+                ServerFileBrowserAction::ToggleHiddenFiles,
+            ));
+
+        if supports_transfers {
+            row = row
+                .with_child(make_btn(
+                    Icon::UploadCloud,
+                    self.upload_file_button.clone(),
+                    ServerFileBrowserAction::UploadFiles(self.current_path.clone()),
+                ))
+                .with_child(make_btn(
+                    Icon::Folder,
+                    self.upload_folder_button.clone(),
+                    ServerFileBrowserAction::UploadFolder(self.current_path.clone()),
+                ))
+                .with_child(self.render_upload_progress_button(appearance));
+        }
+
+        row.finish()
     }
 
     fn render_entries(
@@ -3563,26 +3762,44 @@ impl ServerFileBrowserView {
         appearance: &crate::appearance::Appearance,
     ) -> Box<dyn Element> {
         let theme = appearance.theme();
-        if self.effective_host_id(app).is_none() {
-            if !self.root_kind.is_terminal() && self.environment_lifecycle_state.is_some() {
-                return self.render_status_text(self.unavailable_environment_message(), appearance);
+        let backend = self.backend(app);
+        let is_loading = self.loading && self.entries.is_empty();
+        let is_empty = self.entries.is_empty();
+        let is_environment_unavailable = backend
+            .as_ref()
+            .is_some_and(|b| matches!(b, FileBrowserBackend::Environment { .. }))
+            && (self.host_id.is_some() || self.environment_lifecycle_state.is_some())
+            && self.client(app).is_none();
+
+        match &backend {
+            None => {
+                if self.environment_lifecycle_state.is_some() {
+                    return self
+                        .render_status_text(self.unavailable_environment_message(), appearance);
+                }
+                return self
+                    .render_status_text(crate::t!("server-file-browser-no-session"), appearance);
             }
-            return self
-                .render_status_text(crate::t!("server-file-browser-no-session"), appearance);
-        } else if self.loading && self.entries.is_empty() {
-            return self.render_status_text(crate::t!("server-file-browser-loading"), appearance);
-        } else if self.entries.is_empty() {
-            if self.is_environment_unavailable(app) {
+            Some(_) if is_loading => {
+                return self
+                    .render_status_text(crate::t!("server-file-browser-loading"), appearance);
+            }
+            Some(_) if is_empty => {
+                if is_environment_unavailable {
+                    return self.render_status_text(
+                        crate::t!("server-file-browser-connection-lost"),
+                        appearance,
+                    );
+                }
+                if let Some(status) = &self.status {
+                    return self.render_status_text(status.clone(), appearance);
+                }
                 return self.render_status_text(
-                    crate::t!("server-file-browser-connection-lost"),
+                    crate::t!("server-file-browser-empty-directory"),
                     appearance,
                 );
             }
-            if let Some(status) = &self.status {
-                return self.render_status_text(status.clone(), appearance);
-            }
-            return self
-                .render_status_text(crate::t!("server-file-browser-empty-directory"), appearance);
+            Some(_) => {}
         }
 
         let entries = self.entries.clone();
@@ -3687,7 +3904,7 @@ fn render_entry_row(
 ) -> Box<dyn Element> {
     let theme = appearance.theme();
     let icon_color = theme.sub_text_color(theme.background());
-    let is_directory = entry.kind == EnvironmentRuntimeFileKind::Directory;
+    let is_directory = entry.is_directory_like();
 
     let chevron: Box<dyn Element> = if is_directory {
         let icon = if is_expanded {
@@ -3821,7 +4038,6 @@ impl TypedActionView for ServerFileBrowserView {
     fn handle_action(&mut self, action: &Self::Action, ctx: &mut ViewContext<Self>) {
         match action {
             ServerFileBrowserAction::Refresh => self.refresh_directory_tree(ctx),
-            ServerFileBrowserAction::JumpToPath => self.jump_to_editor_path(ctx),
             ServerFileBrowserAction::ClickEntry(index) => {
                 ctx.focus_self();
                 self.click_entry(*index, ctx);
@@ -3829,9 +4045,6 @@ impl TypedActionView for ServerFileBrowserView {
             ServerFileBrowserAction::OpenEntry(index) => {
                 ctx.focus_self();
                 self.open_index(*index, ctx);
-            }
-            ServerFileBrowserAction::ToggleDirectory(path) => {
-                self.toggle_directory(path.clone(), ctx)
             }
             ServerFileBrowserAction::SelectPreviousItem => self.select_previous_item(ctx),
             ServerFileBrowserAction::SelectNextItem => self.select_next_item(ctx),
@@ -3843,10 +4056,23 @@ impl TypedActionView for ServerFileBrowserView {
             }
             ServerFileBrowserAction::DismissContextMenu => self.dismiss_context_menu(ctx),
             ServerFileBrowserAction::CopyPath(path) => self.copy_path(path.clone(), ctx),
+            ServerFileBrowserAction::CopyRelativePath(path) => {
+                self.copy_relative_path(path.clone(), ctx)
+            }
             ServerFileBrowserAction::CopyName(name) => self.copy_name(name.clone(), ctx),
             ServerFileBrowserAction::CdToTerminal(path) => {
                 self.dismiss_context_menu(ctx);
                 ctx.emit(ServerFileBrowserEvent::CdToDirectory { path: path.clone() });
+            }
+            ServerFileBrowserAction::OpenInTerminalTab(path) => {
+                self.dismiss_context_menu(ctx);
+                ctx.emit(ServerFileBrowserEvent::OpenDirectoryInNewTab { path: path.clone() });
+            }
+            ServerFileBrowserAction::RevealInFileManager(path) => {
+                self.reveal_in_file_manager(path.clone(), ctx)
+            }
+            ServerFileBrowserAction::OpenWithDefaultApp(path) => {
+                self.open_with_default_app(path.clone(), ctx)
             }
             ServerFileBrowserAction::Download(path) => {
                 self.dismiss_context_menu(ctx);
@@ -3879,8 +4105,6 @@ impl TypedActionView for ServerFileBrowserView {
             }
             ServerFileBrowserAction::RenameEntry(index) => self.start_rename(*index, ctx),
             ServerFileBrowserAction::DeleteEntry(index) => self.confirm_delete(*index, ctx),
-            ServerFileBrowserAction::CommitRename => self.commit_rename(ctx),
-            ServerFileBrowserAction::CancelRename => self.cancel_rename(ctx),
             ServerFileBrowserAction::DismissRenameEditor => self.commit_rename(ctx),
             ServerFileBrowserAction::ToggleUploadProgressPanel => {
                 self.toggle_upload_progress_panel(ctx)
@@ -3889,6 +4113,7 @@ impl TypedActionView for ServerFileBrowserView {
                 self.dismiss_upload_progress_panel(ctx)
             }
             ServerFileBrowserAction::ClearCompletedUploads => self.clear_completed_uploads(ctx),
+            ServerFileBrowserAction::ToggleHiddenFiles => self.toggle_hidden_files(ctx),
         }
     }
 }
@@ -3915,7 +4140,7 @@ impl View for ServerFileBrowserView {
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
         let appearance = crate::appearance::Appearance::as_ref(app);
-        let toolbar = Container::new(self.render_toolbar(appearance))
+        let toolbar = Container::new(self.render_toolbar(app, appearance))
             .with_uniform_padding(8.0)
             .finish();
         let entries = Shrinkable::new(1.0, self.render_entries(app, appearance)).finish();
@@ -4119,6 +4344,8 @@ fn rebuild_entries_from(
     entries: Vec<ServerFileBrowserEntry>,
     expanded_directories: &HashSet<String>,
     loaded_directories: &HashMap<String, Vec<ServerFileBrowserEntry>>,
+    show_hidden: bool,
+    search_filter: Option<&str>,
 ) -> Vec<ServerFileBrowserEntry> {
     let roots = entries
         .into_iter()
@@ -4129,6 +4356,8 @@ fn rebuild_entries_from(
         roots,
         expanded_directories,
         loaded_directories,
+        show_hidden,
+        search_filter,
         &mut rebuilt,
     );
     rebuilt
@@ -4138,19 +4367,53 @@ fn append_entries_from(
     entries: Vec<ServerFileBrowserEntry>,
     expanded_directories: &HashSet<String>,
     loaded_directories: &HashMap<String, Vec<ServerFileBrowserEntry>>,
+    show_hidden: bool,
+    search_filter: Option<&str>,
     out: &mut Vec<ServerFileBrowserEntry>,
 ) {
     for entry in entries {
+        if !show_hidden && entry.name.starts_with('.') {
+            continue;
+        }
         let path = entry.path.clone();
-        out.push(entry);
-        if expanded_directories.contains(&path) {
+        let is_dir = entry.is_directory_like();
+        let matches_filter = match search_filter {
+            None => true,
+            Some(pattern) => entry.name.to_lowercase().contains(&pattern.to_lowercase()),
+        };
+
+        if matches_filter {
+            out.push(entry.clone());
+            // When not filtering, expand per expanded_directories state.
+            if search_filter.is_none() && is_dir && expanded_directories.contains(&path) {
+                if let Some(children) = loaded_directories.get(&path) {
+                    append_entries_from(
+                        children.clone(),
+                        expanded_directories,
+                        loaded_directories,
+                        show_hidden,
+                        search_filter,
+                        out,
+                    );
+                }
+            }
+        } else if is_dir {
+            // Directory doesn't match filter — include it only if a descendant does,
+            // and show those descendants (auto-expand during search).
+            let mut descendant_out = Vec::new();
             if let Some(children) = loaded_directories.get(&path) {
                 append_entries_from(
                     children.clone(),
                     expanded_directories,
                     loaded_directories,
-                    out,
+                    show_hidden,
+                    search_filter,
+                    &mut descendant_out,
                 );
+            }
+            if !descendant_out.is_empty() {
+                out.push(entry);
+                out.extend(descendant_out);
             }
         }
     }
@@ -4188,11 +4451,6 @@ fn selected_index_after_rebuild(
         })
 }
 
-enum DirectoryListingSource {
-    RuntimeClient(Arc<EnvironmentFileBrowserClient>),
-    Terminal,
-}
-
 struct DirectoryTreeReload {
     current_path: String,
     root_entries: Vec<ServerFileBrowserEntry>,
@@ -4200,44 +4458,33 @@ struct DirectoryTreeReload {
     expanded_directories: HashSet<String>,
 }
 
-async fn list_directory_with_source(
-    source: &DirectoryListingSource,
-    path: String,
-) -> Result<(String, Vec<ServerFileBrowserEntry>), String> {
-    match source {
-        DirectoryListingSource::RuntimeClient(client) => list_directory(client.clone(), path).await,
-        DirectoryListingSource::Terminal => list_terminal_directory(path).await,
-    }
-}
-
 async fn fetch_directory_listings_selective(
-    source: DirectoryListingSource,
+    backend: FileBrowserBackend,
     directories: HashSet<String>,
     depth_by_path: HashMap<String, usize>,
 ) -> Result<Vec<(String, Vec<ServerFileBrowserEntry>, usize)>, String> {
     let mut updates = Vec::new();
     for directory in directories {
         let depth = depth_by_path.get(&directory).copied().unwrap_or(1);
-        let (canonical_path, entries) =
-            list_directory_with_source(&source, directory.clone()).await?;
+        let (canonical_path, entries) = backend.list_directory(directory.clone()).await?;
         updates.push((canonical_path, entries, depth));
     }
     Ok(updates)
 }
 
 async fn reload_directory_tree(
-    source: DirectoryListingSource,
+    backend: FileBrowserBackend,
     current_path: String,
     expanded_directories: HashSet<String>,
     depth_by_path: HashMap<String, usize>,
 ) -> Result<DirectoryTreeReload, String> {
-    let (current_path, root_entries) = list_directory_with_source(&source, current_path).await?;
+    let (current_path, root_entries) = backend.list_directory(current_path).await?;
 
     let mut loaded_directories = HashMap::new();
     let mut still_expanded = HashSet::new();
     for directory_path in expanded_directories {
         let depth = depth_by_path.get(&directory_path).copied().unwrap_or(1);
-        match list_directory_with_source(&source, directory_path.clone()).await {
+        match backend.list_directory(directory_path.clone()).await {
             Ok((canonical_path, entries)) => {
                 still_expanded.insert(canonical_path.clone());
                 loaded_directories.insert(canonical_path, entries_with_depth(entries, depth));
@@ -4264,6 +4511,7 @@ async fn resolve_path(
     Ok(ResolvedEnvironmentFilePath {
         canonical_path: resolved.canonical_path,
         kind: resolved.kind,
+        target_kind: resolved.target_kind,
     })
 }
 
@@ -4286,6 +4534,7 @@ async fn list_directory(
                 path: join_environment_path(&canonical_path, &entry.name),
                 name: entry.name,
                 kind,
+                target_kind: entry.target_kind,
                 size_bytes: entry.size_bytes,
                 modified_epoch_millis: entry.modified_epoch_millis,
                 depth: 0,
@@ -4310,19 +4559,45 @@ async fn list_terminal_directory(
         .await
         .map_err(|error| error.to_string())?
     {
-        let metadata = entry.metadata().await.map_err(|error| error.to_string())?;
+        // symlink_metadata 不跟随符号链接，保留 link 身份；
+        // 失败时（broken symlink 等）跳过。
+        let link_metadata = match tokio::fs::symlink_metadata(entry.path()).await {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
-        let kind = if metadata.is_dir() {
-            EnvironmentRuntimeFileKind::Directory
-        } else if metadata.is_file() {
-            EnvironmentRuntimeFileKind::File
-        } else if metadata.file_type().is_symlink() {
-            EnvironmentRuntimeFileKind::Symlink
+        let (kind, target_kind) = if link_metadata.file_type().is_symlink() {
+            let tk = match tokio::fs::metadata(&path).await {
+                Ok(target_metadata) => {
+                    if target_metadata.is_dir() {
+                        EnvironmentRuntimeFileKind::Directory
+                    } else if target_metadata.is_file() {
+                        EnvironmentRuntimeFileKind::File
+                    } else {
+                        EnvironmentRuntimeFileKind::Other
+                    }
+                }
+                Err(_) => EnvironmentRuntimeFileKind::Missing,
+            };
+            (EnvironmentRuntimeFileKind::Symlink, tk)
+        } else if link_metadata.is_dir() {
+            (
+                EnvironmentRuntimeFileKind::Directory,
+                EnvironmentRuntimeFileKind::Unspecified,
+            )
+        } else if link_metadata.is_file() {
+            (
+                EnvironmentRuntimeFileKind::File,
+                EnvironmentRuntimeFileKind::Unspecified,
+            )
         } else {
-            EnvironmentRuntimeFileKind::Other
+            (
+                EnvironmentRuntimeFileKind::Other,
+                EnvironmentRuntimeFileKind::Unspecified,
+            )
         };
-        let modified_epoch_millis = metadata
+        let modified_epoch_millis = link_metadata
             .modified()
             .ok()
             .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
@@ -4331,45 +4606,263 @@ async fn list_terminal_directory(
             path: path.to_string_lossy().to_string(),
             name,
             kind,
-            size_bytes: metadata.is_file().then_some(metadata.len()),
+            target_kind,
+            size_bytes: link_metadata.is_file().then_some(link_metadata.len()),
             modified_epoch_millis,
             depth: 0,
         });
     }
     entries.sort_by(|a, b| {
-        let a_is_dir = a.kind == EnvironmentRuntimeFileKind::Directory;
-        let b_is_dir = b.kind == EnvironmentRuntimeFileKind::Directory;
+        let a_is_dir = a.is_directory_like();
+        let b_is_dir = b.is_directory_like();
         b_is_dir.cmp(&a_is_dir).then_with(|| a.name.cmp(&b.name))
     });
     Ok((canonical_path.to_string_lossy().to_string(), entries))
 }
 
 async fn resolve_terminal_path(path: String) -> Result<ResolvedEnvironmentFilePath, String> {
+    // 用 symlink_metadata 保留 symlink 身份；canonicalize 跟随 symlink 给出真实路径。
+    let link_metadata = tokio::fs::symlink_metadata(&path)
+        .await
+        .map_err(|error| error.to_string())?;
     let canonical_path = tokio::fs::canonicalize(&path)
         .await
         .map_err(|error| error.to_string())?;
-    let metadata = tokio::fs::metadata(&canonical_path)
-        .await
-        .map_err(|error| error.to_string())?;
-    let kind = if metadata.is_dir() {
-        EnvironmentRuntimeFileKind::Directory
-    } else if metadata.is_file() {
-        EnvironmentRuntimeFileKind::File
-    } else if metadata.file_type().is_symlink() {
-        EnvironmentRuntimeFileKind::Symlink
+    let (kind, target_kind) = if link_metadata.file_type().is_symlink() {
+        let tk = match tokio::fs::metadata(&path).await {
+            Ok(target_metadata) => {
+                if target_metadata.is_dir() {
+                    EnvironmentRuntimeFileKind::Directory
+                } else if target_metadata.is_file() {
+                    EnvironmentRuntimeFileKind::File
+                } else {
+                    EnvironmentRuntimeFileKind::Other
+                }
+            }
+            Err(_) => EnvironmentRuntimeFileKind::Missing,
+        };
+        (EnvironmentRuntimeFileKind::Symlink, tk)
+    } else if link_metadata.is_dir() {
+        (
+            EnvironmentRuntimeFileKind::Directory,
+            EnvironmentRuntimeFileKind::Unspecified,
+        )
+    } else if link_metadata.is_file() {
+        (
+            EnvironmentRuntimeFileKind::File,
+            EnvironmentRuntimeFileKind::Unspecified,
+        )
     } else {
-        EnvironmentRuntimeFileKind::Other
+        (
+            EnvironmentRuntimeFileKind::Other,
+            EnvironmentRuntimeFileKind::Unspecified,
+        )
     };
     Ok(ResolvedEnvironmentFilePath {
         canonical_path: canonical_path.to_string_lossy().to_string(),
         kind,
+        target_kind,
     })
+}
+
+async fn create_terminal_entry(
+    environment_directory: String,
+    kind: NewEnvironmentEntryKind,
+) -> Result<ServerFileBrowserEntry, String> {
+    let canonical_directory = tokio::fs::canonicalize(&environment_directory)
+        .await
+        .map_err(|error| error.to_string())?;
+    let entries = list_terminal_directory(canonical_directory.to_string_lossy().to_string())
+        .await
+        .map(|(_, entries)| entries)?;
+    let base_name = match kind {
+        NewEnvironmentEntryKind::File => crate::t!("server-file-browser-default-file-name"),
+        NewEnvironmentEntryKind::Directory => crate::t!("server-file-browser-default-folder-name"),
+    };
+    let name = next_available_entry_name(&base_name, &entries);
+    let path = join_environment_path(&canonical_directory.to_string_lossy(), &name);
+    match kind {
+        NewEnvironmentEntryKind::File => {
+            use tokio::io::AsyncWriteExt;
+            tokio::fs::File::create(&path)
+                .await
+                .map_err(|error| error.to_string())?
+                .flush()
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        NewEnvironmentEntryKind::Directory => {
+            tokio::fs::create_dir(&path)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(ServerFileBrowserEntry {
+        name,
+        path,
+        kind: match kind {
+            NewEnvironmentEntryKind::File => EnvironmentRuntimeFileKind::File,
+            NewEnvironmentEntryKind::Directory => EnvironmentRuntimeFileKind::Directory,
+        },
+        target_kind: EnvironmentRuntimeFileKind::Unspecified,
+        size_bytes: Some(0),
+        modified_epoch_millis: None,
+        depth: 0,
+    })
+}
+
+async fn delete_terminal_path(path: String, is_directory: bool) -> Result<(), String> {
+    if is_directory {
+        tokio::fs::remove_dir_all(&path)
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        tokio::fs::remove_file(&path)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+async fn rename_terminal_path(from_path: String, new_name: String) -> Result<(), String> {
+    let parent = environment_parent(&from_path).ok_or_else(|| {
+        crate::t!(
+            "server-file-browser-operation-failed",
+            error = "missing parent path"
+        )
+    })?;
+    let new_path = join_environment_path(&parent, &new_name);
+    tokio::fs::rename(&from_path, &new_path)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Clone)]
 struct ResolvedEnvironmentFilePath {
     canonical_path: String,
     kind: EnvironmentRuntimeFileKind,
+    target_kind: EnvironmentRuntimeFileKind,
+}
+
+impl ResolvedEnvironmentFilePath {
+    fn is_directory_like(&self) -> bool {
+        match self.kind {
+            EnvironmentRuntimeFileKind::Directory => true,
+            EnvironmentRuntimeFileKind::Symlink => {
+                self.target_kind == EnvironmentRuntimeFileKind::Directory
+            }
+            _ => false,
+        }
+    }
+
+    fn is_file_like(&self) -> bool {
+        match self.kind {
+            EnvironmentRuntimeFileKind::File => true,
+            EnvironmentRuntimeFileKind::Symlink => {
+                self.target_kind == EnvironmentRuntimeFileKind::File
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Unified backend for file browser operations. UI layer holds this and calls
+/// its methods without knowing whether it talks to local fs or a remote host.
+#[derive(Clone)]
+enum FileBrowserBackend {
+    Terminal,
+    Environment {
+        client: Arc<EnvironmentFileBrowserClient>,
+        session_id: Option<SessionId>,
+        host_id: Option<HostId>,
+    },
+}
+
+enum FileOpenTarget {
+    LocalFile(PathBuf),
+    EnvironmentFile(EnvironmentFilePath),
+}
+
+impl FileBrowserBackend {
+    fn supports_transfers(&self) -> bool {
+        match self {
+            Self::Terminal => false,
+            Self::Environment { .. } => true,
+        }
+    }
+
+    /// Whether files live on the local machine and can be opened in the
+    /// platform file manager / default app. Terminal backend operates on the
+    /// local filesystem; environment backend's files are remote.
+    fn supports_local_open(&self) -> bool {
+        matches!(self, Self::Terminal)
+    }
+
+    fn open_file_target(&self, path: &str) -> Option<FileOpenTarget> {
+        match self {
+            Self::Terminal => Some(FileOpenTarget::LocalFile(PathBuf::from(path))),
+            Self::Environment { host_id, .. } => {
+                let host_id = host_id.clone()?;
+                let standardized = StandardizedPath::try_new(path).ok()?;
+                Some(FileOpenTarget::EnvironmentFile(EnvironmentFilePath::new(
+                    host_id,
+                    standardized,
+                )))
+            }
+        }
+    }
+
+    async fn list_directory(
+        &self,
+        path: String,
+    ) -> Result<(String, Vec<ServerFileBrowserEntry>), String> {
+        match self {
+            Self::Terminal => list_terminal_directory(path).await,
+            Self::Environment { client, .. } => list_directory(client.clone(), path).await,
+        }
+    }
+
+    async fn resolve_path(&self, path: String) -> Result<ResolvedEnvironmentFilePath, String> {
+        match self {
+            Self::Terminal => resolve_terminal_path(path).await,
+            Self::Environment { client, .. } => resolve_path(client.clone(), path).await,
+        }
+    }
+
+    async fn create_entry(
+        &self,
+        directory: String,
+        kind: NewEnvironmentEntryKind,
+    ) -> Result<ServerFileBrowserEntry, String> {
+        match self {
+            Self::Terminal => create_terminal_entry(directory, kind).await,
+            Self::Environment { client, .. } => {
+                create_environment_entry(client.clone(), directory, kind).await
+            }
+        }
+    }
+
+    async fn delete_path(&self, path: String, is_directory: bool) -> Result<(), String> {
+        match self {
+            Self::Terminal => delete_terminal_path(path, is_directory).await,
+            Self::Environment {
+                client, session_id, ..
+            } => delete_environment_path(client.clone(), *session_id, path, is_directory).await,
+        }
+    }
+
+    async fn rename_path(&self, from_path: String, new_name: String) -> Result<(), String> {
+        match self {
+            Self::Terminal => rename_terminal_path(from_path, new_name).await,
+            Self::Environment {
+                client, session_id, ..
+            } => {
+                let Some(session_id) = session_id else {
+                    return Err(crate::t!("server-file-browser-rename-requires-session"));
+                };
+                rename_environment_path(client.clone(), *session_id, from_path, new_name).await
+            }
+        }
+    }
 }
 
 fn collect_upload_tasks(
@@ -4475,6 +4968,7 @@ async fn create_environment_entry(
             NewEnvironmentEntryKind::File => EnvironmentRuntimeFileKind::File,
             NewEnvironmentEntryKind::Directory => EnvironmentRuntimeFileKind::Directory,
         },
+        target_kind: EnvironmentRuntimeFileKind::Unspecified,
         size_bytes: Some(0),
         modified_epoch_millis: None,
         depth: 0,
@@ -4643,7 +5137,6 @@ fn upload_task_progress(task: &ServerFileUploadTask) -> f32 {
         UploadTaskStatus::Pending => 0.0,
         UploadTaskStatus::Completed => 1.0,
         UploadTaskStatus::Failed(_) => 0.0,
-        UploadTaskStatus::Skipped => 0.0,
         UploadTaskStatus::Uploading => {
             if task.total_bytes == 0 {
                 0.0
@@ -4717,8 +5210,7 @@ fn upload_task_status_label(task: &ServerFileUploadTask, batch_phase: UploadBatc
                     error = error.clone()
                 );
             }
-            UploadTaskStatus::Pending | UploadTaskStatus::Uploading | UploadTaskStatus::Skipped => {
-            }
+            UploadTaskStatus::Pending | UploadTaskStatus::Uploading => {}
         }
     }
     match batch_phase {
@@ -4746,7 +5238,6 @@ fn upload_task_status_label(task: &ServerFileUploadTask, batch_phase: UploadBatc
                 error = error.clone()
             )
         }
-        UploadTaskStatus::Skipped => crate::t!("server-file-browser-upload-status-skipped"),
     }
 }
 
@@ -4803,7 +5294,9 @@ fn format_upload_conflict_summary(conflicts: &[UploadConflict]) -> String {
                 EnvironmentRuntimeFileKind::Symlink => {
                     crate::t!("server-file-browser-upload-conflict-kind-symlink")
                 }
-                EnvironmentRuntimeFileKind::Other | EnvironmentRuntimeFileKind::Unspecified => {
+                EnvironmentRuntimeFileKind::Other
+                | EnvironmentRuntimeFileKind::Unspecified
+                | EnvironmentRuntimeFileKind::Missing => {
                     crate::t!("server-file-browser-upload-conflict-kind-other")
                 }
             };
@@ -4840,6 +5333,7 @@ fn append_reserved_path_conflicts(
             path: file.final_environment_path.clone(),
             display_name: file.display_name.clone(),
             kind: EnvironmentRuntimeFileKind::File,
+            target_kind: EnvironmentRuntimeFileKind::Unspecified,
         });
     }
 }
@@ -4895,6 +5389,7 @@ async fn environment_path_conflict(
                 path: path.to_string(),
                 display_name,
                 kind: resolved.kind,
+                target_kind: resolved.target_kind,
             }))
         }
         None => Ok(None),
@@ -5034,31 +5529,25 @@ async fn collect_download_files_into_prefixed(
         } else {
             format!("{display_prefix}/{}", entry.name)
         };
-        match entry.kind {
-            EnvironmentRuntimeFileKind::Directory => {
-                tokio::fs::create_dir_all(&current_app_path)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                Box::pin(collect_download_files_into_prefixed(
-                    client.clone(),
-                    entry.path,
-                    current_app_path,
-                    &display_name,
-                    files,
-                ))
-                .await?;
-            }
-            EnvironmentRuntimeFileKind::File
-            | EnvironmentRuntimeFileKind::Symlink
-            | EnvironmentRuntimeFileKind::Other
-            | EnvironmentRuntimeFileKind::Unspecified => {
-                files.push(PendingDownloadFile {
-                    environment_path: entry.path,
-                    current_app_path,
-                    display_name,
-                    total_bytes: entry.size_bytes.unwrap_or(0),
-                });
-            }
+        if entry.is_directory_like() {
+            tokio::fs::create_dir_all(&current_app_path)
+                .await
+                .map_err(|error| error.to_string())?;
+            Box::pin(collect_download_files_into_prefixed(
+                client.clone(),
+                entry.path,
+                current_app_path,
+                &display_name,
+                files,
+            ))
+            .await?;
+        } else {
+            files.push(PendingDownloadFile {
+                environment_path: entry.path,
+                current_app_path,
+                display_name,
+                total_bytes: entry.size_bytes.unwrap_or(0),
+            });
         }
     }
     Ok(())
@@ -5260,6 +5749,112 @@ fn environment_parent(path: &str) -> Option<String> {
     }
 }
 
+/// Build a path relative to `root`. Falls back to the absolute `path` if it is
+/// not under `root`. Uses POSIX separators so the result is portable across
+/// local/remote contexts.
+fn make_relative_path(root: &str, path: &str) -> String {
+    let root = root.trim_end_matches('/');
+    if root.is_empty() || path == root {
+        return ".".to_string();
+    }
+    if let Some(rest) = path.strip_prefix(root).and_then(|r| r.strip_prefix('/')) {
+        return rest.to_string();
+    }
+    // Not under root — fall back to absolute path.
+    path.to_string()
+}
+
+/// Reveal a path in the platform file manager (Finder / Explorer / Files).
+/// Uses the `command` crate per AGENTS.md §5.7.
+fn reveal_path_in_file_manager(path: &Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use command::blocking::Command;
+        let status = Command::new("open").arg("-R").arg(path).output()?;
+        if !status.status.success() {
+            anyhow::bail!(
+                "`open -R` failed: {}",
+                String::from_utf8_lossy(&status.stderr)
+            );
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use command::blocking::Command;
+        let status = Command::new("explorer")
+            .arg("/select,")
+            .arg(path)
+            .output()?;
+        if !status.status.success() {
+            anyhow::bail!(
+                "explorer failed: {}",
+                String::from_utf8_lossy(&status.stderr)
+            );
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use command::blocking::Command;
+        let status = Command::new("xdg-open")
+            .arg(path.parent().unwrap_or(path))
+            .output()?;
+        if !status.status.success() {
+            anyhow::bail!(
+                "xdg-open failed: {}",
+                String::from_utf8_lossy(&status.stderr)
+            );
+        }
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        anyhow::bail!("reveal in file manager is not supported on this platform");
+    }
+}
+
+/// Open a file with the platform default application.
+fn open_path_with_default_app(path: &Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use command::blocking::Command;
+        let status = Command::new("open").arg(path).output()?;
+        if !status.status.success() {
+            anyhow::bail!("open failed: {}", String::from_utf8_lossy(&status.stderr));
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use command::blocking::Command;
+        let status = Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(path)
+            .output()?;
+        if !status.status.success() {
+            anyhow::bail!("start failed: {}", String::from_utf8_lossy(&status.stderr));
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use command::blocking::Command;
+        let status = Command::new("xdg-open").arg(path).output()?;
+        if !status.status.success() {
+            anyhow::bail!(
+                "xdg-open failed: {}",
+                String::from_utf8_lossy(&status.stderr)
+            );
+        }
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        anyhow::bail!("open with default app is not supported on this platform");
+    }
+}
+
 fn environment_basename(path: &str) -> Option<String> {
     Path::new(path)
         .file_name()
@@ -5306,23 +5901,13 @@ fn bound_environment_session_id(
     is_session_connected(session_id).then_some(session_id)
 }
 
+#[cfg(test)]
 fn directory_listing_failed_message(stderr: &str) -> String {
     if stderr.is_empty() {
         crate::t!("server-file-browser-directory-listing-failed")
     } else {
         crate::t!(
             "server-file-browser-directory-listing-failed-detail",
-            error = stderr
-        )
-    }
-}
-
-fn path_resolution_failed_message(stderr: &str) -> String {
-    if stderr.is_empty() {
-        crate::t!("server-file-browser-path-resolution-failed")
-    } else {
-        crate::t!(
-            "server-file-browser-path-resolution-failed-detail",
             error = stderr
         )
     }
@@ -5342,6 +5927,24 @@ mod tests {
             name: name.to_string(),
             path: path.to_string(),
             kind,
+            target_kind: EnvironmentRuntimeFileKind::Unspecified,
+            size_bytes: None,
+            modified_epoch_millis: None,
+            depth,
+        }
+    }
+
+    fn symlink_entry(
+        path: &str,
+        name: &str,
+        target_kind: EnvironmentRuntimeFileKind,
+        depth: usize,
+    ) -> ServerFileBrowserEntry {
+        ServerFileBrowserEntry {
+            name: name.to_string(),
+            path: path.to_string(),
+            kind: EnvironmentRuntimeFileKind::Symlink,
+            target_kind,
             size_bytes: None,
             modified_epoch_millis: None,
             depth,
@@ -5365,12 +5968,6 @@ mod tests {
         assert_eq!(
             ServerFileBrowserView::unavailable_environment_message_for_state(Some(
                 &EnvironmentLifecycleState::Connected
-            )),
-            crate::t!("server-file-browser-runtime-reconnecting")
-        );
-        assert_eq!(
-            ServerFileBrowserView::unavailable_environment_message_for_state(Some(
-                &EnvironmentLifecycleState::Reconnecting
             )),
             crate::t!("server-file-browser-runtime-reconnecting")
         );
@@ -5470,7 +6067,7 @@ mod tests {
             )],
             0,
         );
-        let rebuilt = rebuild_entries_from(fixed, &HashSet::new(), &HashMap::new());
+        let rebuilt = rebuild_entries_from(fixed, &HashSet::new(), &HashMap::new(), true, None);
         assert_eq!(rebuilt.len(), 1);
         assert_eq!(rebuilt[0].depth, 0);
     }
@@ -5497,9 +6094,16 @@ mod tests {
             vec![root.clone()],
             &expanded_directories,
             &loaded_directories,
+            true,
+            None,
         );
-        let rebuilt_again =
-            rebuild_entries_from(rebuilt, &expanded_directories, &loaded_directories);
+        let rebuilt_again = rebuild_entries_from(
+            rebuilt,
+            &expanded_directories,
+            &loaded_directories,
+            true,
+            None,
+        );
 
         assert_eq!(
             rebuilt_again
@@ -5640,11 +6244,9 @@ mod tests {
     #[test]
     fn clear_context_menu_state_removes_items_and_selection() {
         let mut position = Some(vec2f(10.0, 20.0));
-        let mut menu_items = vec![
-            MenuItemFields::new("Refresh")
-                .with_on_select_action(ServerFileBrowserAction::Refresh)
-                .into_item(),
-        ];
+        let mut menu_items = vec![MenuItemFields::new("Refresh")
+            .with_on_select_action(ServerFileBrowserAction::Refresh)
+            .into_item()];
 
         clear_context_menu_state(&mut position, &mut menu_items);
 
@@ -5665,5 +6267,194 @@ mod tests {
             selected_index_after_rebuild(&entries, Some("/root/.openwarp/remote-server"), Some(4),),
             Some(0)
         );
+    }
+
+    #[test]
+    fn symlink_to_directory_is_directory_like() {
+        let e = symlink_entry(
+            "/root/link-to-dir",
+            "link-to-dir",
+            EnvironmentRuntimeFileKind::Directory,
+            0,
+        );
+        assert!(e.is_directory_like());
+        assert!(!e.is_file_like());
+    }
+
+    #[test]
+    fn symlink_to_file_is_file_like() {
+        let e = symlink_entry(
+            "/root/link-to-file",
+            "link-to-file",
+            EnvironmentRuntimeFileKind::File,
+            0,
+        );
+        assert!(e.is_file_like());
+        assert!(!e.is_directory_like());
+    }
+
+    #[test]
+    fn broken_symlink_is_neither_directory_nor_file() {
+        let e = symlink_entry(
+            "/root/broken-link",
+            "broken-link",
+            EnvironmentRuntimeFileKind::Missing,
+            0,
+        );
+        assert!(!e.is_directory_like());
+        assert!(!e.is_file_like());
+    }
+
+    #[test]
+    fn resolved_path_classifies_directory_like_and_file_like() {
+        let dir_resolved = ResolvedEnvironmentFilePath {
+            canonical_path: "/root/dir".to_string(),
+            kind: EnvironmentRuntimeFileKind::Directory,
+            target_kind: EnvironmentRuntimeFileKind::Unspecified,
+        };
+        assert!(dir_resolved.is_directory_like());
+        assert!(!dir_resolved.is_file_like());
+
+        let symlink_to_dir = ResolvedEnvironmentFilePath {
+            canonical_path: "/root/link".to_string(),
+            kind: EnvironmentRuntimeFileKind::Symlink,
+            target_kind: EnvironmentRuntimeFileKind::Directory,
+        };
+        assert!(symlink_to_dir.is_directory_like());
+        assert!(!symlink_to_dir.is_file_like());
+
+        let symlink_to_file = ResolvedEnvironmentFilePath {
+            canonical_path: "/root/link".to_string(),
+            kind: EnvironmentRuntimeFileKind::Symlink,
+            target_kind: EnvironmentRuntimeFileKind::File,
+        };
+        assert!(symlink_to_file.is_file_like());
+        assert!(!symlink_to_file.is_directory_like());
+
+        let broken = ResolvedEnvironmentFilePath {
+            canonical_path: "/root/broken".to_string(),
+            kind: EnvironmentRuntimeFileKind::Symlink,
+            target_kind: EnvironmentRuntimeFileKind::Missing,
+        };
+        assert!(!broken.is_directory_like());
+        assert!(!broken.is_file_like());
+    }
+
+    #[test]
+    fn rebuild_entries_hides_dotfiles_by_default() {
+        let visible = entry("/root/src", "src", EnvironmentRuntimeFileKind::Directory, 0);
+        let hidden = entry(
+            "/root/.git",
+            ".git",
+            EnvironmentRuntimeFileKind::Directory,
+            0,
+        );
+        let hidden_file = entry("/root/.env", ".env", EnvironmentRuntimeFileKind::File, 0);
+        let roots = entries_with_depth(vec![visible.clone(), hidden, hidden_file], 0);
+
+        let rebuilt = rebuild_entries_from(roots, &HashSet::new(), &HashMap::new(), false, None);
+        assert_eq!(rebuilt.len(), 1);
+        assert_eq!(rebuilt[0].name, "src");
+    }
+
+    #[test]
+    fn rebuild_entries_shows_dotfiles_when_enabled() {
+        let visible = entry("/root/src", "src", EnvironmentRuntimeFileKind::Directory, 0);
+        let hidden = entry(
+            "/root/.git",
+            ".git",
+            EnvironmentRuntimeFileKind::Directory,
+            0,
+        );
+        let roots = entries_with_depth(vec![visible, hidden], 0);
+
+        let rebuilt = rebuild_entries_from(roots, &HashSet::new(), &HashMap::new(), true, None);
+        assert_eq!(rebuilt.len(), 2);
+    }
+
+    #[test]
+    fn rebuild_entries_applies_search_filter() {
+        let foo = entry(
+            "/root/foo.rs",
+            "foo.rs",
+            EnvironmentRuntimeFileKind::File,
+            0,
+        );
+        let bar = entry(
+            "/root/bar.rs",
+            "bar.rs",
+            EnvironmentRuntimeFileKind::File,
+            0,
+        );
+        let roots = entries_with_depth(vec![foo, bar], 0);
+
+        let rebuilt =
+            rebuild_entries_from(roots, &HashSet::new(), &HashMap::new(), true, Some("foo"));
+        assert_eq!(rebuilt.len(), 1);
+        assert_eq!(rebuilt[0].name, "foo.rs");
+    }
+
+    #[test]
+    fn rebuild_entries_search_filter_keeps_directory_with_matching_descendant() {
+        let dir = entry("/root/src", "src", EnvironmentRuntimeFileKind::Directory, 0);
+        let child = entry(
+            "/root/src/target.rs",
+            "target.rs",
+            EnvironmentRuntimeFileKind::File,
+            1,
+        );
+        let expanded_directories = HashSet::from([dir.path.clone()]);
+        let loaded_directories =
+            HashMap::from([(dir.path.clone(), entries_with_depth(vec![child], 1))]);
+
+        let rebuilt = rebuild_entries_from(
+            vec![dir],
+            &expanded_directories,
+            &loaded_directories,
+            true,
+            Some("target"),
+        );
+        // Directory doesn't match "target" but its child does → keep both.
+        assert_eq!(rebuilt.len(), 2);
+        assert_eq!(rebuilt[0].name, "src");
+        assert_eq!(rebuilt[1].name, "target.rs");
+    }
+
+    #[test]
+    fn classify_query_distinguishes_path_from_filter() {
+        use crate::workspace::view::server_file_browser::QueryIntent;
+
+        match ServerFileBrowserView::classify_query("/abs/path") {
+            QueryIntent::Navigate(_) => {}
+            other => panic!("expected Navigate, got {other:?}"),
+        }
+        match ServerFileBrowserView::classify_query("~/home") {
+            QueryIntent::Navigate(_) => {}
+            other => panic!("expected Navigate, got {other:?}"),
+        }
+        match ServerFileBrowserView::classify_query("./relative") {
+            QueryIntent::Navigate(_) => {}
+            other => panic!("expected Navigate, got {other:?}"),
+        }
+        match ServerFileBrowserView::classify_query("foo bar") {
+            QueryIntent::Filter(p) => assert_eq!(p, "foo bar"),
+            other => panic!("expected Filter, got {other:?}"),
+        }
+        match ServerFileBrowserView::classify_query("") {
+            QueryIntent::Clear => {}
+            other => panic!("expected Clear, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn make_relative_path_strips_root_prefix() {
+        assert_eq!(make_relative_path("/root", "/root"), ".");
+        assert_eq!(
+            make_relative_path("/root", "/root/src/main.rs"),
+            "src/main.rs"
+        );
+        assert_eq!(make_relative_path("/root/", "/root/src"), "src");
+        // Path outside root falls back to absolute.
+        assert_eq!(make_relative_path("/root", "/other/path"), "/other/path");
     }
 }

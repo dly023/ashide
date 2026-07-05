@@ -86,12 +86,4 @@ impl ProjectRulesPersister {
 
         Self { persistence_tx }
     }
-
-    /// 仅用于测试:不绑定持久化 channel,也不订阅任何 model。
-    #[cfg(test)]
-    pub fn new_for_test(_ctx: &mut ModelContext<Self>) -> Self {
-        Self {
-            persistence_tx: None,
-        }
-    }
 }

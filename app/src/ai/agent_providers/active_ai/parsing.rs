@@ -122,6 +122,7 @@ pub fn sanitize_predict(raw: &str) -> Option<String> {
     Some(s)
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct RelevantFilesDto {
     #[serde(default)]
@@ -192,6 +193,7 @@ pub fn parse_workflow_metadata(raw: &str) -> Option<WorkflowMetadataDto> {
 }
 
 /// 解析 relevant_files 的 JSON 输出,与输入路径取交集过滤幻觉。
+#[cfg(test)]
 pub fn parse_relevant_files(raw: &str, input_paths: &[String]) -> Vec<String> {
     let cleaned = strip_code_fence(raw);
     let Ok(dto) = serde_json::from_str::<RelevantFilesDto>(cleaned) else {

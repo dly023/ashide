@@ -11,8 +11,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use warpui::{AppContext, Entity, ModelContext, SingletonEntity};
 
-use crate::server_time::ServerTimestamp;
-
 pub const TEST_USER_EMAIL: &str = "test_user@ashide.local";
 pub const TEST_USER_UID: &str = "test_user_uid";
 
@@ -137,11 +135,6 @@ pub struct User {
     pub local_id: UserUid,
     pub metadata: UserMetadata,
     pub is_onboarded: bool,
-    pub needs_sso_link: bool,
-    pub anonymous_user_type: Option<AnonymousUserType>,
-    pub is_on_work_domain: bool,
-    pub linked_at: Option<ServerTimestamp>,
-    pub principal_type: PrincipalType,
 }
 
 impl User {
@@ -168,25 +161,7 @@ impl User {
                 photo_url: None,
             },
             is_onboarded: true,
-            needs_sso_link: false,
-            anonymous_user_type: None,
-            is_on_work_domain: false,
-            linked_at: None,
-            principal_type: PrincipalType::User,
         }
-    }
-
-    /// 用户是否匿名。Ashide 永远返回 `false`。
-    pub fn is_user_anonymous(&self) -> bool {
-        false
-    }
-
-    pub fn anonymous_user_type(&self) -> Option<AnonymousUserType> {
-        self.anonymous_user_type
-    }
-
-    pub fn linked_at(&self) -> Option<ServerTimestamp> {
-        self.linked_at
     }
 }
 
@@ -408,6 +383,7 @@ impl AuthStateProvider {
         Self { auth_state }
     }
 
+    #[cfg(test)]
     pub fn new_for_test() -> Self {
         Self {
             auth_state: Arc::new(AuthState::new_for_test()),
@@ -417,6 +393,7 @@ impl AuthStateProvider {
     /// 构造测试用 AuthState provider。
     ///
     /// Ashide 本地身份没有登出态;需要覆盖“非 API key 用户”路径的测试使用该构造器。
+    #[cfg(test)]
     pub fn new_logged_out_for_test() -> Self {
         Self::new_for_test()
     }
@@ -432,28 +409,16 @@ impl Entity for AuthStateProvider {
 
 impl SingletonEntity for AuthStateProvider {}
 
-// ---------- AuthManager ----------
+// ---------- 本地身份门控 view ----------
 
-/// 本地身份门控功能标识。
-pub type LoginGatedFeature = &'static str;
+use warpui::elements::Empty;
+use warpui::{Element, View, ViewContext};
 
 /// 本地身份门控视图变体。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthViewVariant {
     Initial,
-    RequireLoginCloseable,
-    ShareRequirementCloseable,
 }
-
-// ---------- 本地身份门控 view ----------
-//
-// 本地身份没有登录表单。这些 view 只承载少量既有窗口状态事件,不渲染账号 UI。
-//
-// 运行时这些 view 代码路径仍会被创建但不渲染(`View::render` 返回 `Empty`)、
-// 事件不被触发(原 UI 交互点已不存在)。
-
-use warpui::elements::Empty;
-use warpui::{Element, View, ViewContext};
 
 /// 本地身份门控 view。
 pub struct AuthView {
@@ -468,18 +433,10 @@ impl AuthView {
     pub fn set_variant(&mut self, _ctx: &mut ViewContext<Self>, variant: AuthViewVariant) {
         self.variant = variant;
     }
-
-    /// 返回当前 variant。
-    pub fn variant(&self) -> AuthViewVariant {
-        self.variant
-    }
-
-    /// 本地身份没有浏览器登录步骤。
-    pub fn skip_to_browser_open_step(&mut self, _ctx: &mut ViewContext<Self>) {}
 }
 
 impl Entity for AuthView {
-    type Event = AuthViewEvent;
+    type Event = ();
 }
 
 impl View for AuthView {
@@ -497,22 +454,17 @@ impl warpui::TypedActionView for AuthView {
     fn handle_action(&mut self, _action: &(), _ctx: &mut ViewContext<Self>) {}
 }
 
-#[derive(Debug)]
-pub enum AuthViewEvent {
-    Close,
-}
-
-/// 本地身份覆盖提醒 modal。
+/// 本地身份覆盖警告 modal。
 pub struct AuthOverrideWarningModal;
 
 impl AuthOverrideWarningModal {
-    pub fn new(_ctx: &mut ViewContext<Self>, _variant: AuthOverrideWarningModalVariant) -> Self {
+    pub fn new(_ctx: &mut ViewContext<Self>) -> Self {
         Self
     }
 }
 
 impl Entity for AuthOverrideWarningModal {
-    type Event = AuthOverrideWarningModalEvent;
+    type Event = ();
 }
 
 impl View for AuthOverrideWarningModal {
@@ -530,67 +482,23 @@ impl warpui::TypedActionView for AuthOverrideWarningModal {
     fn handle_action(&mut self, _action: &(), _ctx: &mut ViewContext<Self>) {}
 }
 
-#[derive(Debug)]
-pub enum AuthOverrideWarningModalEvent {
-    Close,
-    BulkExport,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum AuthOverrideWarningModalVariant {
-    OnboardingView,
-    WorkspaceModal,
-}
-
-/// SSO 链接状态 view。Ashide 本地身份不会展示该 view。
-pub struct NeedsSsoLinkView;
-
-impl NeedsSsoLinkView {
-    pub fn new() -> Self {
-        Self
-    }
-
-    pub fn set_email(&mut self, _email: String) {}
-}
-
-impl Default for NeedsSsoLinkView {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Entity for NeedsSsoLinkView {
-    type Event = ();
-}
-
-impl View for NeedsSsoLinkView {
-    fn ui_name() -> &'static str {
-        "NeedsSsoLinkView"
-    }
-
-    fn render(&self, _app: &AppContext) -> Box<dyn Element> {
-        Box::new(Empty::new())
-    }
-}
-
-impl warpui::TypedActionView for NeedsSsoLinkView {
-    type Action = ();
-    fn handle_action(&mut self, _action: &(), _ctx: &mut ViewContext<Self>) {}
-}
-
 /// Web host handoff view。Ashide native 不使用该 view。
+#[cfg(target_family = "wasm")]
 pub struct WebHandoffView;
 
+#[cfg(target_family = "wasm")]
 impl WebHandoffView {
     pub fn new(_ctx: &mut ViewContext<Self>) -> Self {
         Self
     }
 }
 
+#[cfg(target_family = "wasm")]
 impl Entity for WebHandoffView {
     type Event = WebHandoffEvent;
 }
 
+#[cfg(target_family = "wasm")]
 impl View for WebHandoffView {
     fn ui_name() -> &'static str {
         "WebHandoffView"
@@ -601,38 +509,18 @@ impl View for WebHandoffView {
     }
 }
 
+#[cfg(target_family = "wasm")]
 #[derive(Debug)]
 pub enum WebHandoffEvent {
     Unsupported,
 }
 
+// ---------- AuthManager ----------
+
 /// AuthManager 事件。
 #[derive(Debug)]
 pub enum AuthManagerEvent {
     AuthComplete,
-    AuthFailed(UserAuthenticationError),
-    SkippedLogin,
-    NeedsReauth,
-    AttemptedLoginGatedFeature {
-        auth_view_variant: AuthViewVariant,
-    },
-    /// 低频 失败:同上。
-    CreateAnonymousUserFailed,
-}
-
-/// 用户认证错误。Ashide native 本地身份正常路径不会触发这些错误。
-#[derive(Debug, thiserror::Error)]
-pub enum UserAuthenticationError {
-    #[error("Access token denied")]
-    DeniedAccessToken,
-    #[error("User account disabled")]
-    UserAccountDisabled,
-    #[error("Invalid state parameter")]
-    InvalidStateParameter,
-    #[error("Missing state parameter")]
-    MissingStateParameter,
-    #[error("Unexpected error: {0}")]
-    Unexpected(anyhow::Error),
 }
 
 /// 持久化在 SQLite `current_user_information` 表里的当前用户信息。
@@ -657,42 +545,9 @@ impl AuthManager {
     }
 
     /// 测试场景构造,与 [`Self::new`] 等价。
+    #[cfg(test)]
     pub fn new_for_test(ctx: &mut ModelContext<Self>) -> Self {
         Self::new(ctx)
-    }
-
-    /// 刷新当前用户态。
-    ///
-    /// 本地身份在启动时已经可用,刷新不会发起网络请求。
-    pub fn refresh_user(&self, _ctx: &mut ModelContext<Self>) {}
-
-    /// 重置本地身份快照。
-    ///
-    /// Ashide 本地身份没有远端登出流程;该入口只恢复默认本地用户。
-    pub(crate) fn log_out(&mut self, _ctx: &mut ModelContext<Self>) {
-        self.auth_state.reset_local_defaults();
-        log::debug!("AuthManager::log_out 已本地 reset: 已切换为本地占位用户态");
-    }
-
-    /// 标记需要重新认证。Ashide 本地身份忽略该状态。
-    pub fn set_needs_reauth(&mut self, _new_value: bool, _ctx: &mut ModelContext<Self>) {}
-
-    /// 创建本地用户并发出 `AuthComplete` 让 onboarding 流推进。
-    pub fn create_anonymous_user(
-        &mut self,
-        _referral_code: Option<String>,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        ctx.emit(AuthManagerEvent::AuthComplete);
-    }
-
-    /// 本地身份下登录门控不展示账号 UI。
-    pub fn attempt_login_gated_feature(
-        &mut self,
-        _feature: LoginGatedFeature,
-        _auth_view_variant: AuthViewVariant,
-        _ctx: &mut ModelContext<Self>,
-    ) {
     }
 
     /// 用户引导走完后置本地 onboarded 标记。

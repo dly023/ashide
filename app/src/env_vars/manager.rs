@@ -102,7 +102,6 @@ impl EnvVarCollectionManager {
         let entry = self.panes_by_hashed_id.entry(env_var_collection_id.uid());
         if let Entry::Vacant(entry) = entry {
             entry.insert(EnvVarCollectionPaneData {
-                env_var_collection_id,
                 window_id,
                 locator: PaneViewLocator {
                     pane_group_id,
@@ -163,14 +162,9 @@ impl EnvVarCollectionManager {
             _ => log::warn!("Can only reload existing environment variable collection"),
         }
     }
-
-    pub fn reset(&mut self) {
-        self.panes_by_hashed_id.clear();
-    }
 }
 
 struct EnvVarCollectionPaneData {
-    env_var_collection_id: ObjectStoreId,
     window_id: WindowId,
     handle: WeakViewHandle<EnvVarCollectionView>,
     locator: PaneViewLocator,

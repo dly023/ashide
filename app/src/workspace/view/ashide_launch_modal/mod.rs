@@ -1,3 +1,3 @@
 mod view;
 
-pub use view::{AshideLaunchModal, AshideLaunchModalEvent, init};
+pub use view::{init, AshideLaunchModal, AshideLaunchModalEvent};

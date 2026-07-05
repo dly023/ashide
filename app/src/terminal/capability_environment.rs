@@ -27,3 +27,41 @@ pub(crate) fn terminal_capability_environment_variables() -> HashMap<String, Str
 
     environment_variables
 }
+
+pub(crate) fn terminal_capability_environment_variables_to_remove() -> &'static [&'static str] {
+    &["NO_COLOR"]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        terminal_capability_environment_variables,
+        terminal_capability_environment_variables_to_remove,
+    };
+
+    #[test]
+    fn terminal_capability_environment_enables_color_by_default() {
+        let environment_variables = terminal_capability_environment_variables();
+
+        assert_eq!(
+            environment_variables.get("TERM").map(String::as_str),
+            Some("xterm-256color")
+        );
+        assert_eq!(
+            environment_variables.get("COLORTERM").map(String::as_str),
+            Some("truecolor")
+        );
+    }
+
+    #[test]
+    fn terminal_capability_environment_strips_inherited_color_disable_flags() {
+        assert!(
+            terminal_capability_environment_variables_to_remove().contains(&"NO_COLOR"),
+            "terminal sessions should not inherit process-level no-color defaults"
+        );
+        assert!(
+            !terminal_capability_environment_variables().contains_key("NO_COLOR"),
+            "terminal capability overrides must enable color rather than explicitly disable it"
+        );
+    }
+}

@@ -109,7 +109,7 @@ fn should_autoexecute_returns_false_when_questions_are_allowed() {
         let result = executor.update(&mut app, |executor, ctx| {
             let input = ExecuteActionInput {
                 action: &action,
-                conversation_id: AIConversationId::new(),
+                conversation_id: AIConversationId::default(),
             };
             executor.should_autoexecute(input, ctx)
         });
@@ -177,7 +177,7 @@ fn execute_returns_async_and_resolves_on_complete() {
         let execution = executor.update(&mut app, |executor, ctx| {
             let input = ExecuteActionInput {
                 action: &action,
-                conversation_id: AIConversationId::new(),
+                conversation_id: AIConversationId::default(),
             };
             let result: AnyActionExecution = executor.execute(input, ctx).into();
             result
@@ -221,7 +221,7 @@ fn cancel_resolves_as_cancelled() {
         let execution = executor.update(&mut app, |executor, ctx| {
             let input = ExecuteActionInput {
                 action: &action,
-                conversation_id: AIConversationId::new(),
+                conversation_id: AIConversationId::default(),
             };
             let result: AnyActionExecution = executor.execute(input, ctx).into();
             result

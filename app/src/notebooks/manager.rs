@@ -293,23 +293,6 @@ impl NotebookManager {
         );
     }
 
-    /// Swap the ID of the notebook open in a pane. This assumes the pane location and view are
-    /// unchanged.
-    pub(super) fn swap_notebook(&mut self, old_id: ObjectStoreId, new_id: ObjectStoreId) {
-        if let Some(mut pane_data) = self.panes_by_hashed_id.remove(&old_id.uid()) {
-            debug_assert_eq!(pane_data.notebook_id, old_id);
-            pane_data.notebook_id = new_id;
-            debug_assert!(
-                self.panes_by_hashed_id
-                    .insert(new_id.uid(), pane_data)
-                    .is_none(),
-                "New notebook was already open"
-            );
-        } else {
-            log::warn!("Tried to swap notebooks, but the old one was not open");
-        }
-    }
-
     /// Close all open notebooks, saving any changes. This is called before the app terminates to
     /// prevent data loss, since notebooks are not saved immediately after every user edit.
     pub fn close_notebooks(&self, ctx: &mut ModelContext<Self>) {
@@ -320,18 +303,6 @@ impl NotebookManager {
                     full: ("Closing notebook {} on termination", pane.notebook_id)
                 );
                 notebook_view.update(ctx, |view, ctx| view.on_detach(ctx));
-            }
-        }
-    }
-
-    /// Reset the notebook manager state for logout.
-    ///
-    /// This _does not_ save any pending notebook changes.
-    pub fn reset(&mut self) {
-        self.panes_by_hashed_id.clear();
-        for (_, status) in self.raw_text_by_hashed_id.drain() {
-            if let NotebookRawTextStatus::ParseInFlight(handle) = status {
-                handle.abort();
             }
         }
     }

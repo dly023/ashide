@@ -120,9 +120,7 @@ fn render_button(
     let theme = appearance.theme();
     let is_button_disabled = matches!(
         prompt_alert_state,
-        PromptAlertState::NoConnection
-            | PromptAlertState::AnonymousUserRequestLimitHardGate
-            | PromptAlertState::RequestLimitReached
+        PromptAlertState::NoConnection | PromptAlertState::RequestLimitReached
     );
     let opacity: f32 = if is_button_disabled { 0.5 } else { 1.0 };
     let opacity_u8 = (opacity * 255.0).round() as u8;
@@ -266,7 +264,6 @@ fn get_tooltip_text_for_alert_state(alert_state: &PromptAlertState) -> Option<St
     // so we can keep the tooltip's text relatively minimal and just capture broad groups.
     match alert_state {
         PromptAlertState::RequestLimitReached
-        | PromptAlertState::AnonymousUserRequestLimitHardGate
         | PromptAlertState::AnonymousUserRequestLimitSoftGate => {
             Some(OUT_OF_REQUESTS_TOOLTIP_MESSAGE.to_string())
         }

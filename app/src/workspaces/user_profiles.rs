@@ -69,14 +69,6 @@ impl UserProfiles {
         }
     }
 
-    pub fn clear_profiles(&mut self) {
-        self.users_by_id.clear()
-    }
-
-    pub fn profile_for_uid(&self, uid: UserUid) -> Option<&UserProfileData> {
-        self.users_by_id.get(&uid)
-    }
-
     pub fn displayable_identifier_for_uid(&self, uid: UserUid) -> Option<String> {
         self.users_by_id
             .get(&uid)

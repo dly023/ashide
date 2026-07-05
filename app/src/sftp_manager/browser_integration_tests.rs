@@ -80,28 +80,6 @@ fn create_connected_view(
 
     (win_id, view, temp_dir)
 }
-
-/// 创建带子目录结构的 Connected 视图
-///
-/// 根目录下包含: docs/ 子目录, readme.txt, config.yaml
-fn create_standard_view(
-    app: &mut warpui::App,
-) -> (
-    warpui::WindowId,
-    warpui::ViewHandle<SftpBrowserView>,
-    tempfile::TempDir,
-) {
-    create_connected_view(
-        app,
-        &[
-            ("docs/report.txt", b"report content"),
-            ("readme.txt", b"hello world"),
-            ("config.yaml", b"key: value"),
-            ("data/sub/deep.txt", b"deep file"),
-        ],
-    )
-}
-
 // ============================================================
 // A. 连接管理测试（6 个）
 // ============================================================
@@ -1283,39 +1261,6 @@ fn test_overwrite_confirm_dialog() {
 
         view.read(&app, |v, _| {
             assert!(v.dialog.is_none(), "覆盖确认后对话框应关闭");
-        });
-    });
-}
-
-/// 验证移动确认对话框
-#[test]
-fn test_move_confirm_dialog() {
-    warpui::App::test((), |mut app| async move {
-        let temp =
-            create_temp_dir_with_files(&[("move_src.txt", b"move me"), ("dest_dir/.keep", b"")]);
-        initialize_app(&mut app);
-        let backend =
-            Arc::new(InMemorySftpBackend::new(temp.path().to_path_buf())) as Arc<dyn SftpBackend>;
-        let (_, view) = create_view(&mut app);
-        view.update(&mut app, |v, ctx| {
-            v.set_backend_for_test(backend, PathBuf::from("/"), ctx);
-        });
-
-        // 手动设置移动对话框
-        view.update(&mut app, |v, ctx| {
-            v.dialog = Some(Dialog::Move {
-                source: PathBuf::from("/move_src.txt"),
-                target_dir: PathBuf::from("/dest_dir"),
-            });
-            ctx.notify();
-        });
-
-        view.update(&mut app, |v, ctx| {
-            v.handle_action(&SftpBrowserAction::ConfirmMove, ctx);
-        });
-
-        view.read(&app, |v, _| {
-            assert!(v.dialog.is_none(), "移动确认后对话框应关闭");
         });
     });
 }

@@ -2,7 +2,6 @@ use warpui::{AppContext, Entity, ModelContext, SingletonEntity};
 
 use crate::{
     ai::document::ai_document_model::AIDocumentId,
-    drive::access::{ContentEditability, LocalObjectAccessLevel},
     notebooks::NotebookObject,
     object_store::ids::{ClientId, ObjectStoreId},
     object_store::{
@@ -244,43 +243,13 @@ impl ActiveNotebookData {
             }
         }
     }
-
-    /// The current user's access level on the notebook.
-    pub fn access_level(&self, app: &AppContext) -> LocalObjectAccessLevel {
-        match &self.active_notebook {
-            ActiveNotebook::CommittedNotebook(object_id) => {
-                ObjectStoreViewModel::as_ref(app).access_level(&object_id.uid(), app)
-            }
-            ActiveNotebook::None | ActiveNotebook::NewNotebook(_) => LocalObjectAccessLevel::Full,
-        }
-    }
-
-    /// Whether or not the current user can edit the notebook.
-    pub fn editability(&self, app: &AppContext) -> ContentEditability {
-        match &self.active_notebook {
-            ActiveNotebook::CommittedNotebook(object_id) => {
-                ObjectStoreViewModel::as_ref(app).object_editability(&object_id.uid(), app)
-            }
-            ActiveNotebook::None | ActiveNotebook::NewNotebook(_) => ContentEditability::Editable,
-        }
-    }
 }
 
 pub enum ActiveNotebookDataEvent {
     /// The current editor changed outside this view.
     EditorChangedExternally,
-    /// Local edit access was successfully granted for the current object.
-    SwitchedToEditMode,
-    /// An edit to the current object was rejected.
-    EditRejected,
     /// The notebook's breadcrumbs were updated.
     BreadcrumbsChanged,
-    /// This notebook was created in the local object store.
-    CreatedInObjectStore,
-    /// This notebook was trashed or untrashed (used for refreshing pane overflow items)
-    TrashStatusChanged,
-    // This notebook was moved in Local Drive.
-    MovedInLocalDrive,
 }
 
 /// Whether or not a notebook is trashed.

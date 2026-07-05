@@ -163,12 +163,6 @@ impl CodeFooterView {
             .with_margin_left(ICON_MARGIN)
             .finish()
     }
-
-    /// 给宿主显式控制是否画顶部 border —— 与原签名保持兼容。
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub fn set_show_border(&mut self, show: bool) {
-        self.show_border = show;
-    }
 }
 
 impl Entity for CodeFooterView {

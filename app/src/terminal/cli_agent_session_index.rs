@@ -113,6 +113,7 @@ pub(crate) fn scan_current_app_cli_agent_sessions(
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: system_time_to_unix_ms(session.modified),
+                is_live_container: false,
             };
             snapshot.is_pinned = snapshot.is_pinned_by(&pinned_session_ids);
             snapshot
@@ -576,12 +577,6 @@ fn remove_codex_session_index_entry(snapshot_id: &str) -> Result<String, String>
     fs::write(&index_path, rewritten)
         .map_err(|error| format!("failed to write {}: {error}", index_path.display()))?;
     Ok(removed_line)
-}
-
-fn validate_mutable_session_path(path: &Path) -> Result<PathBuf, String> {
-    validate_mutable_session_path_location(path)?;
-    path.canonicalize()
-        .map_err(|error| format!("failed to resolve {}: {error}", path.display()))
 }
 
 fn validate_mutable_session_path_location(path: &Path) -> Result<(), String> {

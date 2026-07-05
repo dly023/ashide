@@ -4,14 +4,19 @@ use anyhow::Context;
 use comfy_table::modifiers::UTF8_ROUND_CORNERS;
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, ContentArrangement, Table};
+#[cfg(test)]
 use jaq_all::data::Runner;
+#[cfg(test)]
 use jaq_all::fmts::write::Writer;
+#[cfg(test)]
 use jaq_all::fmts::Format;
 // Use jaq_json directly to ensure serde support is included.
+#[cfg(test)]
 use jaq_json::{write as jaq_write, Val};
 use serde::Serialize;
 use tabwriter::TabWriter;
 use warp_cli::agent::OutputFormat;
+#[cfg(test)]
 use warp_cli::json_filter::JqFilter;
 
 pub fn standard_table() -> Table {
@@ -69,6 +74,7 @@ where
 /// Top-level scalar outputs are written as raw text (see [`write_filter_output`]).
 /// Runtime errors from the filter are returned as `anyhow::Error`; any outputs
 /// produced before the error are still written to `out`, matching jq's behavior.
+#[cfg(test)]
 fn run_jq_filter<W: std::io::Write>(
     value: serde_json::Value,
     jq_filter: &JqFilter,
@@ -106,6 +112,7 @@ fn run_jq_filter<W: std::io::Write>(
 /// Pretty-printer configuration used for non-scalar filter output. Matches
 /// `serde_json`'s pretty printer: two-space indent, space after `:`, no
 /// trailing space after `,` (since commas sit at end-of-line).
+#[cfg(test)]
 fn pretty_pp() -> jaq_write::Pp {
     jaq_write::Pp {
         indent: Some("  ".to_string()),
@@ -124,6 +131,7 @@ fn pretty_pp() -> jaq_write::Pp {
 ///   formatting conventions as the non-filtered `--output-format json` path.
 ///
 /// Every output is followed by a newline.
+#[cfg(test)]
 fn write_filter_output<W: std::io::Write>(val: &Val, out: &mut W) -> anyhow::Result<()> {
     match val {
         Val::Null => writeln!(out, "null")?,

@@ -403,6 +403,7 @@ pub fn render_init_project_command(arguments: Option<&str>) -> String {
 /// 上游 LLM 的工具名列表(内置 + MCP,已应用 gating)。模板按此动态渲染白名单,
 /// 不要再硬编码"unavailable tools"黑名单 —— 模型看不到的工具自然不会调,
 /// 反过来用文本黑名单会让模型连真实可用的工具也不敢调。
+#[cfg(test)]
 pub fn render_system(
     model: &LLMId,
     ctx: &[AIAgentContext],

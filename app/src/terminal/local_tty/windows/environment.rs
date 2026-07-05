@@ -1,6 +1,7 @@
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::{collections::BTreeMap, ffi::OsString};
 
+use crate::terminal::capability_environment::terminal_capability_environment_variables_to_remove;
 use crate::terminal::cli_agent_sessions::event::current_protocol_version;
 use crate::terminal::local_tty::shell::{extra_path_entries, ssh_socket_dir};
 use itertools::Itertools;
@@ -51,6 +52,10 @@ pub(super) fn get_shell_environment_variables(options: &PtyOptions) -> Vec<u16> 
 
     add_local_machine_env(&mut env);
     add_user_env(&mut env);
+
+    for key in terminal_capability_environment_variables_to_remove() {
+        env.remove(&map_key(OsString::from(*key)));
+    }
 
     env.insert(
         map_key(HONOR_PS1_NAME.into()),

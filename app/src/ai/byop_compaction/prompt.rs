@@ -29,6 +29,7 @@ pub fn build_prompt(previous_summary: Option<&str>, context: &[String]) -> Strin
 /// 字节级对齐 `compaction.ts:533-537`。
 ///
 /// `overflow=true` 时前面会拼一段额外的 "previous request exceeded ... attachments were too large" 解释。
+#[cfg(test)]
 pub fn build_continue_message(overflow: bool) -> String {
     let prefix = if overflow {
         "The previous request exceeded the provider's size limit due to large media attachments. \

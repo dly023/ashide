@@ -1,5 +1,4 @@
 use crate::ai::byop_readiness::BlockedByopReadinessError;
-use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use warp_core::errors::{AnyhowErrorExt, ErrorExt};
 use warp_core::register_error;
@@ -100,32 +99,6 @@ impl AIApiError {
         }
 
         AIApiError::Transport(err)
-    }
-
-    pub(crate) async fn from_stream_error(
-        stream_type: &'static str,
-        err: reqwest_eventsource::Error,
-    ) -> Self {
-        match err {
-            reqwest_eventsource::Error::InvalidStatusCode(
-                http::StatusCode::TOO_MANY_REQUESTS,
-                _,
-            ) => AIApiError::ServerOverloaded,
-            reqwest_eventsource::Error::InvalidStatusCode(status, res) => Self::ErrorStatus(
-                status,
-                res.text()
-                    .await
-                    .unwrap_or_else(|e| format!("(no response body: {e:#})")),
-            ),
-            reqwest_eventsource::Error::Transport(err) => Self::from_transport_error(err),
-            err => AIApiError::Stream {
-                stream_type,
-                #[cfg(target_family = "wasm")]
-                source: anyhow!("{err:#?}"),
-                #[cfg(not(target_family = "wasm"))]
-                source: anyhow!(err),
-            },
-        }
     }
 
     pub fn is_retryable(&self) -> bool {

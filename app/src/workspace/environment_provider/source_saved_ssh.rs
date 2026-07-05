@@ -37,12 +37,11 @@ pub(crate) fn provider_manager_event(
                 target: target_from_server(node_id.clone(), server.clone()),
             }
         }
-        crate::ssh_manager::SshManagerPanelEvent::OpenProviderFileBrowserPane {
-            node_id,
-            server: _,
-        } => EnvironmentProviderManagerEvent::OpenFileBrowser {
-            connection_ref: node_id.clone(),
-        },
+        crate::ssh_manager::SshManagerPanelEvent::OpenProviderFileBrowserPane { node_id } => {
+            EnvironmentProviderManagerEvent::OpenFileBrowser {
+                connection_ref: node_id.clone(),
+            }
+        }
         crate::ssh_manager::SshManagerPanelEvent::PersistenceError(message) => {
             EnvironmentProviderManagerEvent::PersistenceError(message.clone())
         }
@@ -408,7 +407,6 @@ fn provider_candidate_from_config(
         authority_key,
         title: alias,
         detail,
-        uses_key_auth,
     }
 }
 

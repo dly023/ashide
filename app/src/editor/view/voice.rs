@@ -259,14 +259,6 @@ impl EditorView {
                     return false;
                 }
 
-                if !crate::ai::AIRequestUsageModel::handle(ctx)
-                    .as_ref(ctx)
-                    .can_request_voice()
-                {
-                    self.voice_error_toast(&crate::t!("editor-voice-limit-hit-toast"), ctx);
-                    return false;
-                }
-
                 // We allow toggling voice input from a button click even if the editor is not focused.
                 if self.focused || matches!(*source, voice_input::VoiceInputToggledFrom::Button) {
                     // Try to start voice input and get the session

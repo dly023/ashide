@@ -4,17 +4,27 @@
 #[path = "conversation_yaml_tests.rs"]
 mod tests;
 
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::fs;
+#[cfg(test)]
 use std::io::Write;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 
+#[cfg(test)]
 use warp_multi_agent_api as api;
 
+#[cfg(test)]
 use api::message::tool_call::Tool;
+#[cfg(test)]
 use api::message::tool_call_result::Result as ToolCallResultType;
+#[cfg(test)]
 use api::message::Message;
 
+#[cfg(test)]
 use super::task::helper::{SubagentExt, ToolExt};
 
 const BASE_DIR_NAME: &str = "warp_conversation_search";
@@ -30,6 +40,7 @@ pub(crate) fn base_dir() -> PathBuf {
 /// Materializes a conversation's tasks into a directory of YAML files.
 ///
 /// Returns the path to the root directory, or an error string.
+#[cfg(test)]
 pub fn materialize_tasks_to_yaml(tasks: &[api::Task]) -> Result<String, String> {
     let base_dir = base_dir();
     fs::create_dir_all(&base_dir).map_err(|e| format!("Failed to create base dir: {e}"))?;
@@ -61,6 +72,7 @@ pub fn materialize_tasks_to_yaml(tasks: &[api::Task]) -> Result<String, String> 
 }
 
 /// Writes YAML files for each message in a task, recursing into subtasks.
+#[cfg(test)]
 fn write_task_messages(
     task: &api::Task,
     dir: &Path,
@@ -251,6 +263,7 @@ fn write_task_messages(
     Ok(())
 }
 
+#[cfg(test)]
 fn write_yaml_file(dir: &Path, filename: &str, content: &str) -> Result<(), String> {
     let path = dir.join(filename);
     let mut file =
@@ -261,10 +274,13 @@ fn write_yaml_file(dir: &Path, filename: &str, content: &str) -> Result<(), Stri
 }
 
 /// Writes a YAML block scalar (|) with each line indented by 2 spaces.
+#[cfg(test)]
 fn write_block_scalar(out: &mut String, text: &str) {
     write_block_scalar_with_indent(out, text, 2);
 }
 
+#[cfg(test)]
+#[cfg(test)]
 fn write_block_scalar_with_indent(out: &mut String, text: &str, indent: usize) {
     let indent = " ".repeat(indent);
     for line in text.lines() {
@@ -280,6 +296,7 @@ fn write_block_scalar_with_indent(out: &mut String, text: &str, indent: usize) {
 }
 
 /// Writes key arguments from structured tool calls into the YAML content.
+#[cfg(test)]
 fn write_tool_call_args(out: &mut String, tool: &Tool) {
     match tool {
         Tool::RunShellCommand(cmd) => {
@@ -503,6 +520,7 @@ fn write_tool_call_args(out: &mut String, tool: &Tool) {
 }
 
 /// Writes content from structured tool call results.
+#[cfg(test)]
 fn write_tool_call_result_content(out: &mut String, result: &ToolCallResultType) {
     match result {
         ToolCallResultType::StartAgentV2(r) => match &r.result {
@@ -984,6 +1002,7 @@ fn write_tool_call_result_content(out: &mut String, result: &ToolCallResultType)
 
 /// Looks up the subtask_id for a given tool_call_id by scanning the task's messages for a
 /// matching Subagent tool call.
+#[cfg(test)]
 fn find_subtask_id_for_tool_call(task: &api::Task, tool_call_id: &str) -> Option<String> {
     task.messages.iter().find_map(|m| {
         if let Some(Message::ToolCall(tc)) = &m.message {
@@ -997,10 +1016,12 @@ fn find_subtask_id_for_tool_call(task: &api::Task, tool_call_id: &str) -> Option
     })
 }
 
+#[cfg(test)]
 fn escape_yaml_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+#[cfg(test)]
 fn truncate_content(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
@@ -1014,6 +1035,7 @@ fn truncate_content(s: &str, max_bytes: usize) -> &str {
 }
 
 /// Returns (file_path, truncated_content_preview) for an AnyFileContent.
+#[cfg(test)]
 fn any_file_content_summary(content: &api::AnyFileContent) -> (String, String) {
     match &content.content {
         Some(api::any_file_content::Content::TextContent(f)) => (
@@ -1028,6 +1050,7 @@ fn any_file_content_summary(content: &api::AnyFileContent) -> (String, String) {
 }
 
 /// Converts a prost Struct to a serde_json Value for pretty-printing.
+#[cfg(test)]
 fn prost_struct_to_json(s: &prost_types::Struct) -> serde_json::Value {
     let map: serde_json::Map<String, serde_json::Value> = s
         .fields
@@ -1037,6 +1060,7 @@ fn prost_struct_to_json(s: &prost_types::Struct) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
+#[cfg(test)]
 fn prost_value_to_json(v: &prost_types::Value) -> serde_json::Value {
     use prost_types::value::Kind;
     match &v.kind {

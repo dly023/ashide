@@ -4,13 +4,14 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 use walkdir::WalkDir;
 
-use crate::cli_agent_jsonl::{
-    nested_string as shared_nested_string, parse_jsonl_values, sha256_hex,
-};
+#[cfg(test)]
+use crate::cli_agent_jsonl::sha256_hex;
+use crate::cli_agent_jsonl::{nested_string as shared_nested_string, parse_jsonl_values};
 use crate::terminal::cli_agent_session_index::CurrentAppCliAgentSessionSourceTarget;
 use crate::terminal::CLIAgent;
 
 use super::adapter_registry::session_bridge_adapter_for_agent;
+#[cfg(test)]
 use super::ashide_store::SessionBridgeImportSource;
 use super::ir::{SessionIr, SessionMessageIr, SessionTimestamp};
 use super::SessionBridgeError;
@@ -18,13 +19,13 @@ use super::SessionBridgeError;
 #[derive(Debug, Clone)]
 pub(crate) struct CliAgentSessionSourceBytes {
     pub(crate) reference: String,
-    pub(crate) sha256: String,
     pub(crate) bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct CliAgentSessionReadResult {
     pub(crate) session: SessionIr,
+    #[cfg(test)]
     pub(crate) source: SessionBridgeImportSource,
 }
 
@@ -63,12 +64,17 @@ pub(crate) fn parse_cli_agent_session_source_bytes(
         title,
         cwd,
     )?;
-    let source = SessionBridgeImportSource {
+    #[cfg(test)]
+    let import_source = SessionBridgeImportSource {
         source_session_id: provider_session_id,
-        reference: source.reference,
-        sha256: source.sha256,
+        reference: source.reference.clone(),
+        sha256: sha256_hex(&source.bytes),
     };
-    Ok(CliAgentSessionReadResult { session, source })
+    Ok(CliAgentSessionReadResult {
+        session,
+        #[cfg(test)]
+        source: import_source,
+    })
 }
 
 fn read_current_app_cli_agent_session_source(
@@ -87,11 +93,7 @@ fn read_current_app_cli_agent_session_source(
     };
     let bytes = fs::read(&path)?;
     let reference = path.canonicalize().unwrap_or(path).display().to_string();
-    Ok(CliAgentSessionSourceBytes {
-        reference,
-        sha256: sha256_hex(&bytes),
-        bytes,
-    })
+    Ok(CliAgentSessionSourceBytes { reference, bytes })
 }
 
 fn validate_current_app_session_source_path(path: &Path) -> Result<PathBuf, SessionBridgeError> {
@@ -495,7 +497,6 @@ mod tests {
             "codex-1".to_owned(),
             CliAgentSessionSourceBytes {
                 reference: "/tmp/rollout.jsonl".to_owned(),
-                sha256: "hash".to_owned(),
                 bytes: bytes.to_vec(),
             },
             None,
@@ -526,7 +527,6 @@ mod tests {
             "claude-1".to_owned(),
             CliAgentSessionSourceBytes {
                 reference: "/tmp/claude.jsonl".to_owned(),
-                sha256: "hash".to_owned(),
                 bytes: bytes.to_vec(),
             },
             None,

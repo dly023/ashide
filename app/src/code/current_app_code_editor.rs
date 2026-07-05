@@ -29,7 +29,6 @@ use warpui::{
         Radius, Rect, Shrinkable, Stack, Text,
     },
     keymap::{macros::*, FixedBinding},
-    text::point::Point,
     ui_components::{
         button::ButtonVariant,
         components::{Coords, UiComponent, UiComponentStyles},
@@ -140,10 +139,7 @@ enum LoadedFileMetadata {
     /// Environment Runtime buffer: 文件位于 Environment Runtime host 上,通过 buffer-sync 协议同步,
     /// current-app 文件系统里没有对应路径。
     #[cfg_attr(not(feature = "local_tty"), allow(dead_code))]
-    EnvironmentFile {
-        id: FileId,
-        environment_file_path: crate::code::buffer_location::EnvironmentFilePath,
-    },
+    EnvironmentFile { id: FileId },
 }
 
 pub use super::diff_viewer::DisplayMode;
@@ -454,10 +450,7 @@ impl CurrentAppCodeEditorView {
         let mut current_file_editor =
             Self::new(editor, None, enable_diff_nav_by_default, display_mode, ctx);
 
-        current_file_editor.metadata = Some(LoadedFileMetadata::EnvironmentFile {
-            id: file_id,
-            environment_file_path,
-        });
+        current_file_editor.metadata = Some(LoadedFileMetadata::EnvironmentFile { id: file_id });
 
         Self::subscribe_to_global_buffer_events(file_id, ctx);
 
@@ -691,12 +684,6 @@ impl CurrentAppCodeEditorView {
             SaveOutcome::Succeeded
         };
         callback(save_outcome, ctx);
-    }
-
-    pub fn cursor_at(&self, point: Point, ctx: &mut ViewContext<Self>) {
-        self.editor.update(ctx, |editor, ctx| {
-            editor.cursor_at(point, ctx);
-        });
     }
 
     /// If there is a pending diff available, apply it on the buffer. This should only be called _after_ the buffer

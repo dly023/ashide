@@ -116,12 +116,8 @@ impl MCPGalleryManager {
     }
 }
 
-pub enum MCPGalleryManagerEvent {
-    ItemsRefreshed,
-}
-
 impl Entity for MCPGalleryManager {
-    type Event = MCPGalleryManagerEvent;
+    type Event = ();
 }
 
 impl SingletonEntity for MCPGalleryManager {}

@@ -10,7 +10,6 @@ use diesel::sql_types::{BigInt, Nullable, Text};
 use diesel::{RunQueryDsl, SqliteConnection};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use warp_cli::memory::{MemoryKind, MemoryRecallTier};
 
@@ -219,62 +218,6 @@ impl<'a> ContextAssembler<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum EvidenceTrustedLevel {
-    Untrusted,
-    Low,
-    Medium,
-    High,
-}
-
-impl EvidenceTrustedLevel {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Untrusted => "untrusted",
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-        }
-    }
-
-    fn can_support_memory_write(self) -> bool {
-        match self {
-            Self::Untrusted | Self::Low => false,
-            Self::Medium | Self::High => true,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct EvidenceObservationRequest {
-    pub(crate) tool_name: String,
-    pub(crate) input: serde_json::Value,
-    pub(crate) output_summary: String,
-    pub(crate) source_paths: Vec<String>,
-    pub(crate) artifact_refs: Vec<String>,
-    pub(crate) trusted_level: EvidenceTrustedLevel,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct EvidenceRecord {
-    pub(crate) evidence_id: String,
-    pub(crate) tool_name: String,
-    pub(crate) input_hash: String,
-    pub(crate) output_summary: String,
-    pub(crate) source_paths: Vec<String>,
-    pub(crate) artifact_refs: Vec<String>,
-    pub(crate) trusted_level: String,
-    pub(crate) created_at: i64,
-}
-
-impl EvidenceRecord {
-    pub(crate) fn citation_id(&self) -> String {
-        format!("evidence:{}", self.evidence_id)
-    }
-}
-
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EvidenceCitation {
@@ -288,29 +231,11 @@ pub(crate) struct EvidenceCitation {
     pub(crate) created_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct EvidenceMemoryWriteEligibility {
-    pub(crate) evidence_id: String,
-    pub(crate) eligible: bool,
-    pub(crate) source_ref: Option<String>,
-    pub(crate) reasons: Vec<String>,
-}
-
 pub(crate) struct EvidenceLedger {
-    project_root: PathBuf,
-    evidence_root: PathBuf,
-    database_path: PathBuf,
     conn: SqliteConnection,
 }
 
 impl EvidenceLedger {
-    pub(crate) fn open_discovered() -> Result<Self> {
-        let cwd = std::env::current_dir().context("unable to determine working directory")?;
-        let project_root = discover_project_root(&cwd);
-        Self::open_for_project(project_root)
-    }
-
     pub(crate) fn open_existing_for_project(
         project_root: impl Into<PathBuf>,
     ) -> Result<Option<Self>> {
@@ -330,82 +255,11 @@ impl EvidenceLedger {
             .with_context(|| format!("unable to create {}", evidence_root.display()))?;
         let mut conn = open_connection(&database_path)?;
         initialize_evidence_schema(&mut conn)?;
-        Ok(Self {
-            project_root,
-            evidence_root,
-            database_path,
-            conn,
-        })
-    }
-
-    pub(crate) fn record_observation(
-        &mut self,
-        request: EvidenceObservationRequest,
-    ) -> Result<EvidenceRecord> {
-        validate_evidence_observation(&request)?;
-        let record = EvidenceRecord {
-            evidence_id: Uuid::new_v4().to_string(),
-            tool_name: request.tool_name.trim().to_owned(),
-            input_hash: sha256_json(&request.input)?,
-            output_summary: request.output_summary.trim().to_owned(),
-            source_paths: clean_string_list(request.source_paths),
-            artifact_refs: clean_string_list(request.artifact_refs),
-            trusted_level: request.trusted_level.as_str().to_owned(),
-            created_at: now_millis(),
-        };
-
-        diesel::sql_query(
-            r#"
-            INSERT INTO evidence_records(
-                evidence_id, tool_name, input_hash, output_summary, source_paths_json,
-                artifact_refs_json, trusted_level, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-            "#,
-        )
-        .bind::<Text, _>(&record.evidence_id)
-        .bind::<Text, _>(&record.tool_name)
-        .bind::<Text, _>(&record.input_hash)
-        .bind::<Text, _>(&record.output_summary)
-        .bind::<Text, _>(&serde_json::to_string(&record.source_paths)?)
-        .bind::<Text, _>(&serde_json::to_string(&record.artifact_refs)?)
-        .bind::<Text, _>(&record.trusted_level)
-        .bind::<BigInt, _>(record.created_at)
-        .execute(&mut self.conn)
-        .context("unable to append evidence record")?;
-
-        Ok(record)
+        Ok(Self { conn })
     }
 
     pub(crate) fn recent_citations(&mut self, limit: usize) -> Result<Vec<EvidenceCitation>> {
         recent_evidence_citations(&mut self.conn, limit.clamp(0, 100) as i64)
-    }
-
-    pub(crate) fn memory_write_eligibility(
-        &self,
-        record: &EvidenceRecord,
-    ) -> EvidenceMemoryWriteEligibility {
-        let mut reasons = Vec::new();
-        let trusted_level = evidence_trusted_level_from_str(&record.trusted_level);
-        if !trusted_level.can_support_memory_write() {
-            reasons.push(format!(
-                "trusted_level={} cannot support durable memory writes",
-                record.trusted_level
-            ));
-        }
-        if record.output_summary.trim().is_empty() {
-            reasons.push("output_summary is empty".to_owned());
-        }
-        if record.tool_name.trim().is_empty() {
-            reasons.push("tool_name is empty".to_owned());
-        }
-
-        let eligible = reasons.is_empty();
-        EvidenceMemoryWriteEligibility {
-            evidence_id: record.evidence_id.clone(),
-            eligible,
-            source_ref: eligible.then(|| record.citation_id()),
-            reasons,
-        }
     }
 }
 
@@ -987,42 +841,6 @@ fn looks_like_openai_key(text: &str) -> bool {
         .any(|token| token.starts_with("sk-") && token.len() >= 24)
 }
 
-fn validate_evidence_observation(request: &EvidenceObservationRequest) -> Result<()> {
-    if request.tool_name.trim().is_empty() {
-        anyhow::bail!("evidence tool_name is required");
-    }
-    if request.output_summary.trim().is_empty() {
-        anyhow::bail!("evidence output_summary is required");
-    }
-    reject_secret_like_text(&request.output_summary)
-        .context("evidence output_summary looks unsafe for durable storage")?;
-    Ok(())
-}
-
-fn evidence_trusted_level_from_str(value: &str) -> EvidenceTrustedLevel {
-    match value {
-        "untrusted" => EvidenceTrustedLevel::Untrusted,
-        "low" => EvidenceTrustedLevel::Low,
-        "medium" => EvidenceTrustedLevel::Medium,
-        "high" => EvidenceTrustedLevel::High,
-        _ => EvidenceTrustedLevel::Untrusted,
-    }
-}
-
-fn sha256_json(value: &serde_json::Value) -> Result<String> {
-    let bytes = serde_json::to_vec(value)?;
-    let digest = Sha256::digest(bytes);
-    Ok(hex::encode(digest))
-}
-
-fn clean_string_list(values: Vec<String>) -> Vec<String> {
-    values
-        .into_iter()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .collect()
-}
-
 fn fts_query(query: &str) -> String {
     query
         .split_whitespace()
@@ -1569,88 +1387,6 @@ mod tests {
     }
 
     #[test]
-    fn evidence_ledger_records_observation_and_qualifies_memory_source() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut ledger = EvidenceLedger::open_for_project(dir.path()).unwrap();
-
-        let record = ledger
-            .record_observation(EvidenceObservationRequest {
-                tool_name: "read_files".to_owned(),
-                input: json!({"paths": ["app/src/agent_memory/mod.rs"]}),
-                output_summary: "Confirmed ContextPacket is injected as context only".to_owned(),
-                source_paths: vec!["app/src/agent_memory/mod.rs".to_owned()],
-                artifact_refs: Vec::new(),
-                trusted_level: EvidenceTrustedLevel::Medium,
-            })
-            .unwrap();
-        let eligibility = ledger.memory_write_eligibility(&record);
-
-        assert!(dir.path().join(".agents/evidence/ledger.sqlite").exists());
-        assert_eq!(record.tool_name, "read_files");
-        assert_eq!(record.trusted_level, "medium");
-        assert_eq!(record.input_hash.len(), 64);
-        assert!(eligibility.eligible);
-        assert_eq!(eligibility.source_ref, Some(record.citation_id()));
-        assert!(eligibility.reasons.is_empty());
-
-        let citations = ledger.recent_citations(4).unwrap();
-        assert_eq!(citations.len(), 1);
-        assert_eq!(citations[0].citation_id, record.citation_id());
-        assert_eq!(citations[0].tool_name, "read_files");
-        assert_eq!(
-            citations[0].source_paths,
-            vec!["app/src/agent_memory/mod.rs".to_owned()]
-        );
-    }
-
-    #[test]
-    fn evidence_ledger_blocks_low_trust_from_memory_write() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut ledger = EvidenceLedger::open_for_project(dir.path()).unwrap();
-
-        let record = ledger
-            .record_observation(EvidenceObservationRequest {
-                tool_name: "shell".to_owned(),
-                input: json!({"cmd": "echo maybe"}),
-                output_summary: "Unverified shell output says maybe".to_owned(),
-                source_paths: Vec::new(),
-                artifact_refs: Vec::new(),
-                trusted_level: EvidenceTrustedLevel::Low,
-            })
-            .unwrap();
-        let eligibility = ledger.memory_write_eligibility(&record);
-
-        assert!(!eligibility.eligible);
-        assert_eq!(eligibility.source_ref, None);
-        assert!(eligibility
-            .reasons
-            .iter()
-            .any(|reason| reason.contains("trusted_level=low")));
-    }
-
-    #[test]
-    fn evidence_ledger_rejects_secret_like_summaries_without_instruction_writes() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut ledger = EvidenceLedger::open_for_project(dir.path()).unwrap();
-
-        let err = ledger
-            .record_observation(EvidenceObservationRequest {
-                tool_name: "read_files".to_owned(),
-                input: json!({"paths": ["secret.txt"]}),
-                output_summary: "token=abc123".to_owned(),
-                source_paths: vec!["secret.txt".to_owned()],
-                artifact_refs: Vec::new(),
-                trusted_level: EvidenceTrustedLevel::High,
-            })
-            .unwrap_err();
-
-        assert!(err.to_string().contains("unsafe for durable storage"));
-        assert!(!dir.path().join("AGENTS.md").exists());
-        assert!(!dir.path().join("CLAUDE.md").exists());
-        assert!(!dir.path().join("GEMINI.md").exists());
-    }
-
-    #[test]
     fn memory_recall_preview_combines_context_and_non_memory_evidence_citations() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = MemoryStore::open_for_project(dir.path()).unwrap();
@@ -1663,16 +1399,25 @@ mod tests {
         drop(store);
 
         let mut ledger = EvidenceLedger::open_for_project(dir.path()).unwrap();
-        let evidence = ledger
-            .record_observation(EvidenceObservationRequest {
-                tool_name: "cargo_test".to_owned(),
-                input: json!({"cmd": "cargo test -p warp --lib agent_memory"}),
-                output_summary: "agent_memory tests passed".to_owned(),
-                source_paths: vec!["app/src/agent_memory/mod.rs".to_owned()],
-                artifact_refs: vec!["test:agent_memory".to_owned()],
-                trusted_level: EvidenceTrustedLevel::High,
-            })
-            .unwrap();
+        diesel::sql_query(
+            r#"
+            INSERT INTO evidence_records(
+                evidence_id, tool_name, input_hash, output_summary, source_paths_json,
+                artifact_refs_json, trusted_level, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+        )
+        .bind::<Text, _>("evidence-for-preview")
+        .bind::<Text, _>("cargo_test")
+        .bind::<Text, _>("input-hash")
+        .bind::<Text, _>("agent_memory tests passed")
+        .bind::<Text, _>(&serde_json::to_string(&vec!["app/src/agent_memory/mod.rs"]).unwrap())
+        .bind::<Text, _>(&serde_json::to_string(&vec!["test:agent_memory"]).unwrap())
+        .bind::<Text, _>("high")
+        .bind::<BigInt, _>(now_millis())
+        .execute(&mut ledger.conn)
+        .unwrap();
+        let evidence = ledger.recent_citations(1).unwrap().remove(0);
         drop(ledger);
 
         let preview = build_memory_recall_preview_for_project(
@@ -1694,14 +1439,14 @@ mod tests {
         assert_eq!(preview.evidence_citations.len(), 1);
         assert_eq!(
             preview.evidence_citations[0].citation_id,
-            evidence.citation_id()
+            evidence.citation_id
         );
         let markdown = render_memory_recall_preview_markdown(&preview);
         assert!(markdown.contains("# Project memory preview"));
         assert!(markdown.contains("task: Show recall preview"));
         assert!(markdown.contains("Editor recall preview reuses ContextPacket"));
         assert!(markdown.contains("memory:event:1"));
-        assert!(markdown.contains(&evidence.citation_id()));
+        assert!(markdown.contains(&evidence.citation_id));
         assert!(markdown.contains("agent_memory tests passed"));
         assert!(markdown.contains("Evidence citations are observations, not durable memory."));
         assert!(preview

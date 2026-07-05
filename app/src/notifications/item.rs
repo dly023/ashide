@@ -165,20 +165,6 @@ impl NotificationItems {
         self.items.iter().find(|item| item.id == id)
     }
 
-    /// 把指定 terminal view 上的所有通知标记为已读;有变更则返回 true。
-    pub(crate) fn mark_all_terminal_view_items_as_read(
-        &mut self,
-        terminal_view_id: EntityId,
-    ) -> bool {
-        let mut any_changed = false;
-        for item in &mut self.items {
-            if item.terminal_view_id == terminal_view_id {
-                any_changed |= item.mark_as_read();
-            }
-        }
-        any_changed
-    }
-
     pub(crate) fn mark_item_read(&mut self, id: NotificationId) -> bool {
         self.items
             .iter_mut()
@@ -192,12 +178,6 @@ impl NotificationItems {
             any_changed |= item.mark_as_read();
         }
         any_changed
-    }
-
-    pub(crate) fn has_unread_for_terminal_view(&self, terminal_view_id: EntityId) -> bool {
-        self.items
-            .iter()
-            .any(|item| item.terminal_view_id == terminal_view_id && !item.is_read)
     }
 }
 

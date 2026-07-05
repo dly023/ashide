@@ -6,7 +6,7 @@ use pathfinder_geometry::vector::Vector2F;
 
 use crate::search::mixer::AddAsyncSourceOptions;
 use lazy_static::lazy_static;
-use std::{collections::HashSet, ops::Range, sync::Arc, time::Duration};
+use std::{collections::HashSet, ops::Range, time::Duration};
 use warp_core::features::FeatureFlag;
 use warpui::{
     accessibility::{AccessibilityContent, WarpA11yRole},
@@ -26,7 +26,6 @@ use warpui::{
 use crate::{
     ai_assistant::execution_context::AiExecutionContext,
     appearance::Appearance,
-    auth::{AuthState, AuthStateProvider},
     completer::SessionContext,
     drive::settings::LocalDriveSettings,
     search::{
@@ -114,7 +113,6 @@ pub struct CommandSearchView {
     zero_state_handle: ViewHandle<CommandSearchZeroStateView>,
     handle: WeakViewHandle<Self>,
     menu_positioning: MenuPositioning,
-    auth_state: Arc<AuthState>,
     state: CommandSearchViewState,
     visible_results_range_sender: Sender<Range<usize>>,
     resizable_state_handle: ResizableStateHandle,
@@ -186,7 +184,6 @@ impl CommandSearchView {
             });
 
         Self {
-            auth_state: AuthStateProvider::as_ref(ctx).get().clone(),
             zero_state_handle,
             menu_positioning: Default::default(),
             handle: ctx.handle(),

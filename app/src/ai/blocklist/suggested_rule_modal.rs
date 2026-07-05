@@ -10,9 +10,6 @@ use crate::network::NetworkStatus;
 use crate::object_store::ids::ObjectStoreId;
 use crate::object_store::model::generic_string_model::GenericStringObjectId;
 use crate::object_store::model::persistence::{ObjectStoreEvent, ObjectStoreModel};
-use crate::object_store::update_manager::{
-    ObjectOperation, OperationSuccessType, UpdateManagerEvent,
-};
 use crate::object_store::Owner;
 use crate::view_components::action_button::{ActionButton, PrimaryTheme};
 use crate::workspaces::user_workspaces::UserWorkspaces;
@@ -64,8 +61,8 @@ enum EditorType {
 
 #[derive(Debug, Clone)]
 pub enum SuggestedRuleModalEvent {
-    AddNewRule { rule: SuggestedRule },
-    OpenRuleForEditing { rule: SuggestedRule },
+    AddNewRule,
+    OpenRuleForEditing,
     Close,
 }
 
@@ -164,11 +161,9 @@ impl SuggestedRuleModal {
 
     fn handle_view_event(&mut self, event: &SuggestedRuleDialogEvent, ctx: &mut ViewContext<Self>) {
         match event {
-            SuggestedRuleDialogEvent::AddNewRule { rule } => {
-                ctx.emit(SuggestedRuleModalEvent::AddNewRule { rule: rule.clone() })
-            }
-            SuggestedRuleDialogEvent::OpenRuleForEditing { rule } => {
-                ctx.emit(SuggestedRuleModalEvent::OpenRuleForEditing { rule: rule.clone() })
+            SuggestedRuleDialogEvent::AddNewRule => ctx.emit(SuggestedRuleModalEvent::AddNewRule),
+            SuggestedRuleDialogEvent::OpenRuleForEditing => {
+                ctx.emit(SuggestedRuleModalEvent::OpenRuleForEditing)
             }
             SuggestedRuleDialogEvent::Close => ctx.emit(SuggestedRuleModalEvent::Close),
         }
@@ -212,8 +207,8 @@ enum SuggestedRuleDialogAction {
 
 #[derive(Debug, Clone)]
 pub enum SuggestedRuleDialogEvent {
-    AddNewRule { rule: SuggestedRule },
-    OpenRuleForEditing { rule: SuggestedRule },
+    AddNewRule,
+    OpenRuleForEditing,
     Close,
 }
 
@@ -237,11 +232,6 @@ struct SuggestedRuleView {
 
 impl SuggestedRuleView {
     fn new(ctx: &mut ViewContext<Self>) -> Self {
-        let update_manager = UpdateManager::handle(ctx);
-        ctx.subscribe_to_model(&update_manager, |me, _, event, ctx| {
-            me.handle_update_manager_event(event, ctx);
-        });
-
         let object_model = ObjectStoreModel::handle(ctx);
         ctx.subscribe_to_model(&object_model, |me, _, event, ctx| {
             me.handle_object_store_event(event, ctx);
@@ -394,33 +384,6 @@ impl SuggestedRuleView {
         }
     }
 
-    fn handle_update_manager_event(
-        &mut self,
-        event: &UpdateManagerEvent,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        let UpdateManagerEvent::ObjectOperationComplete { result } = event else {
-            return;
-        };
-
-        if let (ObjectOperation::Create { .. }, OperationSuccessType::Success) =
-            (&result.operation, &result.success_type)
-        {
-            if let Some(rule_and_id) = &self.rule_and_id {
-                if rule_and_id.object_store_id.into_client() == result.client_id {
-                    if let Some(stable_id) = result.stable_id {
-                        self.rule_and_id = Some(SuggestedRuleAndId {
-                            rule: rule_and_id.rule.clone(),
-                            object_store_id: ObjectStoreId::StableId(stable_id),
-                        });
-                        // Reload the rule from the local object store.
-                        self.load_rule(ctx);
-                    }
-                }
-            }
-        }
-    }
-
     fn handle_object_store_event(&mut self, event: &ObjectStoreEvent, ctx: &mut ViewContext<Self>) {
         match event {
             ObjectStoreEvent::ObjectUpdated {
@@ -534,7 +497,7 @@ impl SuggestedRuleView {
             });
         }
         self.on_add_rule(ctx);
-        ctx.emit(SuggestedRuleDialogEvent::AddNewRule { rule });
+        ctx.emit(SuggestedRuleDialogEvent::AddNewRule);
     }
 
     /// Updates the UI state to reflect that a rule has been added.
@@ -658,8 +621,8 @@ impl TypedActionView for SuggestedRuleView {
                 self.add_rule(ctx);
             }
             SuggestedRuleDialogAction::Edit => {
-                if let Some(SuggestedRuleAndId { rule, .. }) = &self.rule_and_id {
-                    ctx.emit(SuggestedRuleDialogEvent::OpenRuleForEditing { rule: rule.clone() });
+                if self.rule_and_id.is_some() {
+                    ctx.emit(SuggestedRuleDialogEvent::OpenRuleForEditing);
                 } else {
                     log::warn!("No rule to edit in suggested rule dialog");
                 }

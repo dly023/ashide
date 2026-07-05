@@ -5,8 +5,8 @@ use futures_util::future::BoxFuture;
 use warp_core::ui::appearance::Appearance;
 use warp_editor::editor::EditorView;
 use warpui::{
-    platform::WindowStyle, presenter::ChildView, r#async::Timer, AddSingletonModel, App,
-    AppContext, Element, Entity, SingletonEntity, TypedActionView, View, ViewHandle, WindowId,
+    platform::WindowStyle, presenter::ChildView, AddSingletonModel, App, AppContext, Element,
+    Entity, SingletonEntity, TypedActionView, View, ViewHandle, WindowId,
 };
 
 use crate::{
@@ -43,7 +43,7 @@ use crate::{
     GlobalResourceHandles, GlobalResourceHandlesProvider, PrivacySettings,
 };
 
-use super::{NotebookEvent, NotebookView, SAVE_PERIOD};
+use super::{NotebookEvent, NotebookView};
 
 fn initialize_app(app: &mut App) {
     initialize_settings_for_tests(app);
@@ -165,24 +165,6 @@ async fn initial_load(app: &mut App, updated_notebooks: impl Into<Vec<NotebookOb
     });
     load_complete.await
 }
-
-/// Wait for all edits to be saved.
-async fn ensure_saved(app: &mut App, notebook_view: &ViewHandle<NotebookView>) {
-    loop {
-        let has_edits = notebook_view.read(app, |notebook, _| {
-            notebook.content_is_dirty || notebook.title_is_dirty
-        });
-        if has_edits {
-            Timer::after(SAVE_PERIOD).await;
-        } else {
-            break;
-        }
-    }
-
-    // Ensure that any updates from the debounced save were processed.
-    app.update(|_| ());
-}
-
 /// Test that command-block execution events are correctly translated into workflows.
 #[test]
 fn test_command_block_dispatches_event() {

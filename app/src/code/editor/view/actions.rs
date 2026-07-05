@@ -680,13 +680,7 @@ pub enum CodeEditorViewAction {
     SelectionUpdate(CharOffset),
     SelectionEnd,
     MaybeClickOnHoveredLink(CharOffset),
-    MouseHovered {
-        offset: CharOffset,
-        cmd: bool,
-        clamped: bool,
-        /// Whether the mouse move event was covered by an element above the editor.
-        is_covered: bool,
-    },
+    MouseHovered,
     RightMouseDown {
         offset: CharOffset,
     },
@@ -789,7 +783,7 @@ impl CodeEditorViewAction {
             | Self::RevertDiffHunk { .. }
             | Self::NewCommentOnLine { .. }
             | Self::RequestOpenSavedComment { .. }
-            | Self::MouseHovered { .. }
+            | Self::MouseHovered
             | Self::MaybeClickOnHoveredLink(_)
             | Self::RightMouseDown { .. } => true,
         }
@@ -1081,18 +1075,8 @@ impl TypedActionView for CodeEditorView {
                     ctx.emit(CodeEditorEvent::RequestOpenComment(*uuid))
                 }
             }
-            MouseHovered {
-                offset,
-                cmd,
-                clamped,
-                is_covered,
-            } => {
-                ctx.emit(CodeEditorEvent::MouseHovered {
-                    offset: *offset,
-                    cmd: *cmd,
-                    clamped: *clamped,
-                    is_covered: *is_covered,
-                });
+            MouseHovered => {
+                ctx.emit(CodeEditorEvent::MouseHovered);
             }
             RightMouseDown { offset } => {
                 // Right mouse down should set the cursor at the offset location. This matches the behavior with other editors.
@@ -1258,30 +1242,14 @@ impl RichTextAction<CodeEditorView> for CodeEditorViewAction {
     fn mouse_hovered(
         location: Option<Location>,
         _parent_view: &WeakViewHandle<CodeEditorView>,
-        cmd: bool,
-        is_covered: bool,
+        _cmd: bool,
+        _is_covered: bool,
         _ctx: &AppContext,
     ) -> Option<Self> {
-        match location {
-            Some(Location::Text {
-                char_offset,
-                clamped,
-                ..
-            }) => Some(CodeEditorViewAction::MouseHovered {
-                offset: char_offset,
-                clamped,
-                cmd,
-                is_covered,
-            }),
-            // When the mouse moves outside the editor bounds (location is None),
-            // emit a clamped hover event to clear any active hover state.
-            _ => Some(CodeEditorViewAction::MouseHovered {
-                offset: CharOffset::default(),
-                clamped: true,
-                cmd,
-                is_covered,
-            }),
-        }
+        location.map_or_else(
+            || Some(CodeEditorViewAction::MouseHovered),
+            |_| Some(CodeEditorViewAction::MouseHovered),
+        )
     }
 
     fn task_list_clicked(

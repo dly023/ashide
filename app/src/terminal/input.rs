@@ -318,7 +318,6 @@ use super::{
 use crate::ai::blocklist::agent_view::{
     AgentInputFooter, AgentInputFooterEvent, AgentViewController,
 };
-use crate::terminal::view::ambient_agent::{HarnessSelector, HostSelector, NakedHeaderButtonTheme};
 use async_channel::Sender;
 use futures::stream::AbortHandle;
 use parking_lot::FairMutex;
@@ -1521,10 +1520,6 @@ pub struct Input {
 
     agent_input_footer: ViewHandle<AgentInputFooter>,
 
-    harness_selector: ViewHandle<HarnessSelector>,
-
-    host_selector: Option<ViewHandle<HostSelector>>,
-
     prompt_suggestions_view: ViewHandle<PromptSuggestionsView>,
 
     inline_slash_commands_view: ViewHandle<InlineSlashCommandView>,
@@ -2090,26 +2085,6 @@ impl Input {
                 ctx,
             )
         });
-
-        let harness_selector = ctx.add_typed_action_view(|ctx| {
-            HarnessSelector::new(
-                menu_positioning_provider.clone(),
-                ambient_agent_view_model.clone(),
-                ctx,
-            )
-        });
-
-        let host_selector = if false {
-            let view = ctx.add_typed_action_view(|ctx| {
-                HostSelector::new(menu_positioning_provider.clone(), ctx)
-            });
-            harness_selector.update(ctx, |selector, ctx| {
-                selector.set_button_theme(NakedHeaderButtonTheme, ctx);
-            });
-            Some(view)
-        } else {
-            None
-        };
 
         ctx.subscribe_to_view(&agent_input_footer, |me, _, event, ctx| {
             match event {
@@ -3128,8 +3103,6 @@ impl Input {
             agent_status_view,
             agent_view_controller,
             agent_input_footer,
-            harness_selector,
-            host_selector,
             agent_shortcut_view_model,
             ambient_agent_view_model,
             slash_command_data_source,

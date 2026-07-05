@@ -80,7 +80,6 @@ fn read_native_receipt_back(
         receipt.session_id.clone(),
         super::cli_agent_reader::CliAgentSessionSourceBytes {
             reference: receipt.session_file.display().to_string(),
-            sha256: "roundtrip-hash".to_owned(),
             bytes,
         },
         None,

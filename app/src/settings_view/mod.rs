@@ -5,7 +5,7 @@ use crate::{
     appearance::Appearance,
     editor::{
         EditorView, Event as EditorEvent, PropagateAndNoOpNavigationKeys, SingleLineEditorOptions,
-        TextColors, TextOptions,
+        TextOptions,
     },
     menu::{self, Menu, MenuItem, MenuItemFields},
     pane_group::{
@@ -105,15 +105,6 @@ fn sidebar_width() -> f32 {
 const SECTION_BORDER_WIDTH: f32 = 1.;
 
 const POSITION_ID: &str = "settings_pane";
-
-pub(super) fn editor_text_colors(appearance: &Appearance) -> TextColors {
-    let theme = appearance.theme();
-    TextColors {
-        default_color: theme.active_ui_text_color(),
-        disabled_color: theme.disabled_ui_text_color(),
-        hint_color: theme.disabled_ui_text_color(),
-    }
-}
 
 #[derive(PartialEq, Eq)]
 pub enum SettingsViewEvent {
@@ -944,8 +935,6 @@ pub struct SettingsView {
     nav_items: Vec<SettingsNavItem>,
     /// Handle to the AI settings page, used to switch subpage modes.
     ai_page_handle: ViewHandle<AISettingsPageView>,
-    /// Handle to the Code settings page, used to switch subpage modes.
-    code_page_handle: ViewHandle<CodeSettingsPageView>,
     /// Per-subpage search match results. Populated during search so that
     /// subpages sharing the same backing page can be filtered independently.
     subpage_filter: HashMap<SettingsSection, MatchData>,
@@ -999,7 +988,6 @@ impl SettingsView {
 
         // Code page
         let code_page_handle = ctx.add_typed_action_view(CodeSettingsPageView::new);
-        let code_page_handle_for_nav = code_page_handle.clone();
         ctx.subscribe_to_view(&code_page_handle, |me, _, event, ctx| {
             me.handle_code_page_event(event, ctx);
         });
@@ -1127,7 +1115,6 @@ impl SettingsView {
             context_menu_state: Default::default(),
             nav_items,
             ai_page_handle: ai_page_handle_for_nav,
-            code_page_handle: code_page_handle_for_nav,
             subpage_filter: HashMap::new(),
             settings_file_error: None,
             settings_error_banner_dismissed: false,
@@ -1442,10 +1429,6 @@ impl SettingsView {
     ) {
         match event {
             SettingsPageEvent::FocusModal => ctx.focus(&self.search_editor),
-            SettingsPageEvent::Pane(_) => {
-                // These events are not handled in standalone settings - only used
-                // when the view is hosted inside a pane.
-            }
         }
     }
 
@@ -1469,10 +1452,6 @@ impl SettingsView {
     ) {
         match event {
             SettingsPageEvent::FocusModal => ctx.focus(&self.search_editor),
-            SettingsPageEvent::Pane(_) => {
-                // These events are not handled in standalone settings - only used
-                // when the view is hosted inside a pane.
-            }
         }
     }
 

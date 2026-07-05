@@ -13,7 +13,7 @@ use warpui::{
     Entity, SingletonEntity as _, TypedActionView, View, ViewContext,
 };
 
-use crate::{terminal::model::terminal_model::ExitReason, ui_components};
+use crate::ui_components;
 
 /// A banner to display when the shell process terminates.
 ///
@@ -129,10 +129,7 @@ pub enum TerminationType {
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
     PtySpawnFailure { pty_spawn_error: anyhow::Error },
     /// The shell process terminated before we were able to bootstrap.
-    Premature {
-        shell_detail: String,
-        reason: ExitReason,
-    },
+    Premature { shell_detail: String },
 }
 
 impl TerminationType {
@@ -183,7 +180,7 @@ impl TerminationType {
             TerminationType::PtySpawnFailure { pty_spawn_error } => {
                 format!("{pty_spawn_error:#}").into()
             }
-            TerminationType::Premature { shell_detail, .. } => crate::t!(
+            TerminationType::Premature { shell_detail } => crate::t!(
                 "terminal-shell-premature-subtext",
                 shell_detail = shell_detail
             )

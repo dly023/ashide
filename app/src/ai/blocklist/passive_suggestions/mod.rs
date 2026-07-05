@@ -8,10 +8,7 @@ pub use legacy::{
     PassiveSuggestionsEvent as LegacyPassiveSuggestionsEvent,
     PassiveSuggestionsModel as LegacyPassiveSuggestionsModel,
 };
-pub use maa::{
-    PassiveSuggestionsEvent as MaaPassiveSuggestionsEvent,
-    PassiveSuggestionsModel as MaaPassiveSuggestionsModel,
-};
+pub use maa::PassiveSuggestionsModel as MaaPassiveSuggestionsModel;
 
 #[derive(Clone)]
 pub struct PassiveSuggestionsModels {

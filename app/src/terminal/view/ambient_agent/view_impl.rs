@@ -1,7 +1,5 @@
 //! [`TerminalView`]-specific implementation for ambient agent functionality.
 
-use warp_cli::agent::Harness;
-
 use crate::ai::agent::conversation::{AIConversationId, ConversationStatus};
 use warpui::prelude::Empty;
 
@@ -9,7 +7,6 @@ use crate::ai::blocklist::{agent_view::AgentViewEntryOrigin, BlocklistAIHistoryM
 use crate::terminal::view::ambient_agent::AmbientAgentInitialUserQuery;
 use crate::terminal::view::rich_content::RichContentInsertionPosition;
 use crate::terminal::view::TerminalView;
-use crate::terminal::CLIAgent;
 use warp_core::ui::appearance::Appearance;
 use warpui::elements::Align;
 use warpui::{AppContext, Element, EntityId, SingletonEntity, ViewContext};
@@ -310,31 +307,6 @@ impl TerminalView {
             .collect();
         for view_id in ids_to_retag {
             self.set_rich_content_agent_view_conversation_id(view_id, vehicle_conversation_id);
-        }
-    }
-
-    /// Returns `true` when the active block's command is the CLI for the run's configured
-    /// non-oz harness (e.g. `claude …` for [`Harness::Claude`]).
-    /// Used to detect the harness-start transition at `AfterBlockStarted` time. Unlike
-    /// `detect_cli_agent_from_model`, this does NOT gate on `is_active_and_long_running` —
-    /// we want to classify the block as the harness session as soon as it starts, before the
-    /// long-running timer would otherwise elapse.
-    fn active_block_matches_run_harness(&self, ctx: &AppContext) -> bool {
-        let command = self
-            .model
-            .lock()
-            .block_list()
-            .active_block()
-            .command_with_secrets_obfuscated(false);
-        let Some(cli_agent) = CLIAgent::detect(&command, None, None, ctx) else {
-            return false;
-        };
-        match self.ambient_agent_view_model.as_ref(ctx).selected_harness() {
-            Harness::Oz => false,
-            Harness::Claude => matches!(cli_agent, CLIAgent::Claude),
-            Harness::OpenCode => matches!(cli_agent, CLIAgent::OpenCode),
-            Harness::Gemini => matches!(cli_agent, CLIAgent::Gemini),
-            Harness::Unknown => false,
         }
     }
 

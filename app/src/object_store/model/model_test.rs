@@ -179,43 +179,6 @@ fn folder_from_object_store_model(model: &ObjectStoreModel, id: ObjectStoreId) -
 // 一并物理删除,以下依赖 `receive_rtc_update` / `move_object` helper 的 4 个
 // folder 排序时间戳测试(test_update_folder_timestamp_from_*)与 helper 同一删除,
 // 本地写入路径下的 metadata 更新由 `ObjectStoreModel` 直接接手,无需 RTC 路径。
-
-fn check_cloud_folders(app: &mut App, number_of_folders: usize) {
-    ObjectStoreModel::handle(app).read(app, |model, _| {
-        assert_eq!(
-            number_of_folders,
-            model.get_all_active_and_inactive_folders().count(),
-            "we expected {} folders, and received {}",
-            number_of_folders,
-            model.get_all_active_and_inactive_folders().count()
-        );
-    });
-}
-
-fn check_object_store_workflows(app: &mut App, number_of_workflows: usize) {
-    ObjectStoreModel::handle(app).read(app, |model, _| {
-        assert_eq!(
-            number_of_workflows,
-            model.get_all_active_and_inactive_workflows().count(),
-            "we expected {} workflows, and received {}",
-            number_of_workflows,
-            model.get_all_active_and_inactive_workflows().count()
-        );
-    });
-}
-
-fn check_local_notebooks(app: &mut App, number_of_notebooks: usize) {
-    ObjectStoreModel::handle(app).read(app, |model, _| {
-        assert_eq!(
-            number_of_notebooks,
-            model.get_all_active_and_inactive_notebooks().count(),
-            "we expected {} notebooks, and received {}",
-            number_of_notebooks,
-            model.get_all_active_and_inactive_notebooks().count()
-        );
-    });
-}
-
 #[test]
 fn test_collapse_all_in_location() {
     /*
@@ -458,30 +421,6 @@ fn test_breadcrumbs() {
         });
     });
 }
-
-/// Asserts that the object with the given ID has the expected sorting timestamp.
-#[track_caller]
-fn assert_sorting_timestamp(
-    id: StableObjectId,
-    expected_ts: impl Into<ServerTimestamp>,
-    app: &App,
-) {
-    let sorting_timestamp = app.read(|ctx| {
-        let object = ObjectStoreModel::as_ref(ctx).get_by_uid(&id.uid())?;
-        ObjectStoreViewModel::as_ref(ctx).object_sorting_timestamp(
-            object,
-            UpdateTimestamp::Revision,
-            ctx,
-        )
-    });
-    assert_eq!(
-        sorting_timestamp,
-        Some(expected_ts.into()),
-        "Unexpected timestamp for {}",
-        id.uid()
-    );
-}
-
 #[test]
 fn test_local_client_create_invalidates_parent_folder_sort_timestamp() {
     let folder_id = ObjectStoreId::ClientId(ClientId::new());

@@ -8,12 +8,7 @@ use crate::{
         folders::FolderObject,
     },
     object_store::ids::{ObjectStoreId, ObjectUid},
-    object_store::{
-        update_manager::{
-            ObjectOperation, OperationSuccessType, UpdateManager, UpdateManagerEvent,
-        },
-        Space, StoredObject, StoredObjectLocation,
-    },
+    object_store::{Space, StoredObject, StoredObjectLocation},
     server_time::ServerTimestamp,
 };
 
@@ -70,10 +65,6 @@ impl ObjectStoreViewModel {
         ctx.subscribe_to_model(
             &ObjectStoreModel::handle(ctx),
             Self::handle_object_store_event,
-        );
-        ctx.subscribe_to_model(
-            &UpdateManager::handle(ctx),
-            Self::handle_update_manager_event,
         );
         Self {
             folder_timestamp_cache: Default::default(),
@@ -240,54 +231,6 @@ impl ObjectStoreViewModel {
             ObjectStoreEvent::NotebookEditorChangedExternally { .. }
             | ObjectStoreEvent::ObjectForceExpanded { .. }
             | ObjectStoreEvent::InitialLoadCompleted => (),
-        }
-    }
-
-    fn handle_update_manager_event(
-        &mut self,
-        event: &UpdateManagerEvent,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        let UpdateManagerEvent::ObjectOperationComplete { result } = event else {
-            return;
-        };
-
-        if result.success_type != OperationSuccessType::Success {
-            return;
-        }
-
-        let object_store_model = ObjectStoreModel::as_ref(ctx);
-        if let ObjectOperation::Create { .. } = result.operation {
-            let created_id = result
-                .stable_id
-                .map(ObjectStoreId::StableId)
-                .or_else(|| result.client_id.map(ObjectStoreId::ClientId));
-            let Some(created_id) = created_id else {
-                return;
-            };
-
-            if object_store_model
-                .get_folder_by_uid(&created_id.uid())
-                .is_some()
-            {
-                if let Some(client_id) = result.client_id {
-                    let object_store_id = ObjectStoreId::ClientId(client_id);
-                    self.folder_timestamp_cache
-                        .borrow_mut()
-                        .remove(&object_store_id);
-                }
-            }
-
-            // For any new object, we need to recalculate its ancestors' timestamp with their
-            // new child.
-            if let Some(parent_id) = object_store_model
-                .get_by_uid(&created_id.uid())
-                .and_then(|object| object.metadata().folder_id)
-            {
-                if self.invalidate_folder_timestamps(&parent_id, object_store_model) {
-                    ctx.emit(ObjectStoreViewModelEvent::SortTimestampsChanged);
-                }
-            }
         }
     }
 

@@ -94,16 +94,8 @@ impl Entity for AIRequestUsageModel {
     type Event = AIRequestUsageModelEvent;
 }
 
-/// Ashide:保留 enum 定义以兼容订阅回调 `match` 模式;
-/// `AIRequestUsageModel` 本地化后不再 emit 任何变体 → 所有订阅回调成为静默 no-op。
-pub enum AIRequestUsageModelEvent {
-    RequestUsageUpdated,
-    RequestBonusRefunded {
-        requests_refunded: i32,
-        server_conversation_id: String,
-        request_id: String,
-    },
-}
+/// Ashide:本地化后不再 emit 用量事件;订阅方也不再保留云端配额刷新路径。
+pub enum AIRequestUsageModelEvent {}
 
 impl AIRequestUsageModel {
     pub fn new(_ctx: &mut ModelContext<Self>) -> Self {
@@ -113,11 +105,6 @@ impl AIRequestUsageModel {
     #[cfg(test)]
     pub fn new_for_test(_ctx: &mut ModelContext<Self>) -> Self {
         Self
-    }
-
-    /// Ashide(本地化):永远返回 true,BYOP 本地运行不受云端限额约束。
-    pub fn has_requests_remaining(&self) -> bool {
-        true
     }
 
     /// Ashide(本地化):永远返回 true。
@@ -154,11 +141,6 @@ impl AIRequestUsageModel {
 
     pub fn refresh_duration_to_string(&self) -> String {
         "monthly".to_string()
-    }
-
-    /// Ashide(本地化):语音输入不受云端用量限制,永远返回 true。
-    pub fn can_request_voice(&self) -> bool {
-        true
     }
 }
 

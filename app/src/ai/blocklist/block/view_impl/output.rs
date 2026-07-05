@@ -1158,41 +1158,6 @@ fn should_render_stopped_output(props: Props, app: &AppContext) -> bool {
     }) || cancellation_reason.is_some()
 }
 
-// Helper function to style a requested action with standard styling when streaming and action blocked on user
-fn renderable_action(
-    props: Props,
-    id: &AIAgentActionId,
-    text: &str,
-    app: &AppContext,
-    footer: Option<Box<dyn Element>>,
-    appearance: &Appearance,
-    status: Option<&AIActionStatus>,
-) -> RenderableAction {
-    let mut requested_action = RenderableAction::new(text, app);
-    let is_blocked_on_user = status.as_ref().is_some_and(|s| s.is_blocked());
-    if is_blocked_on_user {
-        requested_action =
-            requested_action.with_background_color(appearance.theme().background().into_solid())
-    } else {
-        if (props.model.status(app).is_streaming()
-            && !props.model.is_first_action_in_output(id, app))
-            || status.as_ref().is_some_and(|s| s.is_queued())
-        {
-            requested_action = requested_action.with_font_color(blended_colors::text_disabled(
-                appearance.theme(),
-                appearance.theme().surface_2(),
-            ));
-        }
-        requested_action = requested_action
-            .with_icon(action_icon(id, props.action_model, props.model, app).finish());
-    }
-
-    if let Some(footer) = footer {
-        requested_action = requested_action.with_footer(footer);
-    }
-    requested_action
-}
-
 pub struct LinkActionConstructors<A: Action> {
     pub construct_open_link_action: fn(std::ops::Range<usize>, TextLocation) -> A,
     pub construct_open_link_tooltip_action: fn(std::ops::Range<usize>, TextLocation) -> A,
@@ -1242,22 +1207,6 @@ pub struct RenderReadFileArg<'a, A: Action> {
     find_context: Option<FindContext<'a>>,
     is_selecting_text: bool,
     link_actions: LinkActionConstructors<A>,
-}
-
-impl<'a, A: Action> RenderReadFileArg<'a, A> {
-    pub fn new(
-        render_context: RenderContext<'a>,
-        find_context: Option<FindContext<'a>>,
-        is_selecting_text: bool,
-        link_actions: LinkActionConstructors<A>,
-    ) -> Self {
-        Self {
-            render_context,
-            find_context,
-            is_selecting_text,
-            link_actions,
-        }
-    }
 }
 
 impl<'a> From<Props<'a>> for RenderReadFileArg<'a, AIBlockAction> {

@@ -7,15 +7,13 @@ use warpui::r#async::{SpawnedFutureHandle, Timer};
 use warpui::{Entity, EntityId, ModelContext, SingletonEntity};
 
 use crate::ai::agent::conversation::AIConversationId;
-use crate::ai::agent_conversations_model::AgentConversationsModel;
-use crate::ai::ambient_agents::spawn::{spawn_task, AmbientAgentEvent};
+use crate::ai::ambient_agents::spawn::spawn_task;
 use crate::ai::ambient_agents::task::HarnessConfig;
 use crate::ai::ambient_agents::{
-    AgentConfigSnapshot, AmbientAgentTaskId, AmbientAgentTaskState, AttachmentInput,
-    SpawnAgentRequest, SERVER_OVERLOADED_TASK_FAILURE_MESSAGE, USAGE_LIMIT_TASK_FAILURE_MESSAGE,
+    AgentConfigSnapshot, AmbientAgentTaskId, AttachmentInput, SpawnAgentRequest,
+    SERVER_OVERLOADED_TASK_FAILURE_MESSAGE, USAGE_LIMIT_TASK_FAILURE_MESSAGE,
 };
 use crate::ai::api_error::AIApiError;
-use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::ai::blocklist::BlocklistAIPermissions;
 use crate::ai::llms::{LLMId, LLMPreferences};
 use crate::workspace::ActiveSession;
@@ -97,10 +95,6 @@ pub struct AmbientAgentViewModel {
     harness: Harness,
     /// Whether the optimistic InitialUserQuery block has been inserted for the current run.
     has_inserted_ambient_agent_user_query_block: bool,
-    /// Whether the harness CLI (e.g. `claude`, `gemini`) has started running for a non-oz run.
-    /// Used to transition the ambient-agent setup UI out of the pre-first-exchange phase when
-    /// there is no oz `AppendedExchange` to key off of.
-    harness_command_started: bool,
 }
 
 impl AmbientAgentViewModel {
@@ -122,7 +116,6 @@ impl AmbientAgentViewModel {
             conversation_id: None,
             harness: Harness::default(),
             has_inserted_ambient_agent_user_query_block: false,
-            harness_command_started: false,
         }
     }
 
@@ -158,25 +151,6 @@ impl AmbientAgentViewModel {
     /// required feature flags are enabled.
     pub(super) fn is_third_party_harness(&self) -> bool {
         FeatureFlag::AgentHarness.is_enabled() && self.harness != Harness::Oz
-    }
-
-    /// Whether the harness CLI has started running. Only meaningful for non-oz runs.
-    pub(super) fn harness_command_started(&self) -> bool {
-        self.harness_command_started
-    }
-
-    /// Marks the harness CLI as started and emits `HarnessCommandStarted`.
-    /// Idempotent: subsequent calls after the first are no-ops and do not re-emit.
-    pub(super) fn mark_harness_command_started(&mut self, ctx: &mut ModelContext<Self>) {
-        debug_assert!(
-            self.harness != Harness::Oz,
-            "harness_command_started is only meaningful for non-oz runs"
-        );
-        if self.harness_command_started {
-            return;
-        }
-        self.harness_command_started = true;
-        ctx.emit(AmbientAgentViewModelEvent::HarnessCommandStarted);
     }
 
     /// Whether or not this terminal session is for an ambient agent.
@@ -315,7 +289,6 @@ impl AmbientAgentViewModel {
         self.task_id = None;
         self.conversation_id = None;
         self.has_inserted_ambient_agent_user_query_block = false;
-        self.harness_command_started = false;
         self.stop_progress_timer();
         ctx.notify();
     }
@@ -417,110 +390,7 @@ impl AmbientAgentViewModel {
                     matches!(me.status, Status::Cancelled { .. } | Status::Failed { .. });
 
                 match event_result {
-                    Ok(event) => match event {
-                        AmbientAgentEvent::TaskSpawned { task_id, run_id } => {
-                            // Store the task ID for later use (e.g., populating details panel)
-                            me.task_id = Some(task_id);
-
-                            // If we already transitioned to Cancelled state, stop processing the
-                            // stale spawn event.
-                            if matches!(me.status, Status::Cancelled { .. }) {
-                                return;
-                            }
-
-                            // Wire the run_id to the associated conversation so parent/child
-                            // links can resolve after restore.
-                            if let Some(conversation_id) = me.conversation_id {
-                                let terminal_view_id = me.terminal_view_id;
-                                let spawned_task_id = Some(task_id);
-                                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
-                                    history.assign_run_id_for_conversation(
-                                        conversation_id,
-                                        run_id,
-                                        spawned_task_id,
-                                        terminal_view_id,
-                                        ctx,
-                                    );
-                                });
-                            }
-
-                            // Mark the task as manually opened so it appears in Session Navigator
-                            // even though its server-side source may not be user-initiated.
-                            AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
-                                model.mark_task_as_manually_opened(task_id, ctx);
-                            });
-
-                            // Emit event so terminal view knows to show the info button
-                            ctx.emit(AmbientAgentViewModelEvent::ProgressUpdated);
-                        }
-                        AmbientAgentEvent::StateChanged {
-                            state,
-                            status_message,
-                        } => {
-                            // Ignore state changes if we're already in a terminal state
-                            if ignore_events {
-                                return;
-                            }
-
-                            if let Status::WaitingForSession { progress } = &mut me.status {
-                                match state {
-                                    AmbientAgentTaskState::Cancelled => {
-                                        me.handle_cancellation(ctx);
-                                    }
-                                    AmbientAgentTaskState::Queued
-                                    | AmbientAgentTaskState::Pending => {
-                                        // Clear later states in case the agent failed to start and was retried.
-                                        progress.claimed_at = None;
-                                        progress.harness_started_at = None;
-                                        ctx.emit(AmbientAgentViewModelEvent::ProgressUpdated);
-                                    }
-                                    AmbientAgentTaskState::Claimed => {
-                                        if progress.claimed_at.is_none() {
-                                            progress.claimed_at = Some(Instant::now());
-                                            progress.harness_started_at = None;
-                                            ctx.emit(AmbientAgentViewModelEvent::ProgressUpdated);
-                                        }
-                                    }
-                                    AmbientAgentTaskState::InProgress => {
-                                        if progress.harness_started_at.is_none() {
-                                            progress.harness_started_at = Some(Instant::now());
-                                            ctx.emit(AmbientAgentViewModelEvent::ProgressUpdated);
-                                        }
-                                    }
-                                    AmbientAgentTaskState::Succeeded => {}
-                                    AmbientAgentTaskState::Failed
-                                    | AmbientAgentTaskState::Error
-                                    | AmbientAgentTaskState::Blocked
-                                    | AmbientAgentTaskState::Unknown => {
-                                        let error = status_message
-                                            .map(|msg| msg.message)
-                                            .unwrap_or_else(|| "Agent failed".to_string());
-                                        me.handle_spawn_error(error, ctx);
-                                    }
-                                }
-                            }
-                        }
-                        AmbientAgentEvent::SessionStarted { .. } => {
-                            // Ignore session started if we're already in a terminal state
-                            if ignore_events {
-                                return;
-                            }
-
-                            me.stop_progress_timer();
-                            me.status = Status::AgentRunning;
-                            ctx.emit(AmbientAgentViewModelEvent::SessionReady);
-                        }
-                        AmbientAgentEvent::AtCapacity => {
-                            if ignore_events {
-                                return;
-                            }
-
-                            if matches!(me.status, Status::WaitingForSession { .. }) {
-                                // 去云端分支:不再展示 agent capacity 模态
-                            }
-                        }
-                        AmbientAgentEvent::TimedOut => {}
-                    },
+                    Ok(event) => match event {},
                     Err(err) => {
                         // Ignore errors if we're already in a terminal state
                         if ignore_events {

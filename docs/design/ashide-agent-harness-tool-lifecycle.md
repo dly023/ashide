@@ -1,25 +1,38 @@
 # Ashide Agent Harness 工具调用连续性重构
 
-> 状态：协作设计稿 / 评审 brief  
-> 日期：2026-07-02  
+> 状态：进行中实现 / 评审 brief
+> 日期：2026-07-03
 > 背景：用户反馈内置 Ashide Agent 连续性差，尤其“经常调用着就可能是工具调用的原因挂掉”。本文件用于给多个 AI / reviewer 并行看背景、计划和取舍。
 
 ## 0. 当前交接快照
 
-截至 2026-07-02，本轮已经落地 **阶段 B 的第一刀**：
+截至 2026-07-03，本轮已经落地 **阶段 B/C/D 的第一批收敛**：
 
 - controller preflight 遇到 `MissingResultWithoutRepairSource { reason: NoResult }` 时，不再直接 blocked。
 - 新增 `ByopToolResultRepair`，为确认已经没有 live executor / finished result / persisted result 的悬挂 tool call 合成一条 diagnostic cancellation `ToolCallResult`。
 - synthetic payload 明确带 `synthetic=true` 和 `repair_source=byop_missing_tool_result`，避免调试时误判成真实工具返回。
+- 已补 controller/history 级测试：真实 history 中 assistant `ToolCall` 无 `ToolCallResult` 时，repair 会追加 synthetic `ToolCallResult`；二次调用不重复追加；如果该 tool call 仍有 live action，则 readiness 保持 `PendingToolResults`，不会提前合成 cancellation。
+- MCP `call_tool` 已有内部 failure classification seam，区分工具返回错误、server error、transport closed、timeout、cancelled 等。
+- `ReconnectingPeer` 对 `TransportClosed` / `TransportSend` 强制 reconnect 并 retry once，避免再次复用“看起来还 connected”的旧 peer。
+- 已补 fake peer / fake manager-source 级 retry seam 测试：dead transport 会强制 reconnect 后第二次调用；retry 只发生一次；MCP server error 和工具自身 error result 不 retry。
+- `TemplatableMCPServerManager` 的 pending reconnect waiters 已收敛成 `PendingReconnections` 状态机，并覆盖同 installation 合并、通知后可重新发起、不同 installation 互不影响。
+- reconnect cooldown 已接入 manager：同一 installation 的新 reconnect attempt 在上一轮开始后 2 秒内会被拒绝并返回模型可见错误；已经 pending 的 waiter 仍优先合并到同一次 reconnect，不受 cooldown 拦截。
+- 已补真实 stdio MCP server / manager 集成级测试：fixture 第一次 `tools/call` 主动退出，`ReconnectingPeer` 通过 manager 重连并成功重试同一次 tool call。
+- action result continuation 已硬切为 `continuation_decision() -> ActionResultContinuationDecision`。
 - 已跑验证：
-  - `cargo test -p warp tool_lifecycle --lib`
-  - `cargo check`
+  - `MACOSX_DEPLOYMENT_TARGET=10.14 cargo test -p warp reconnecting_peer_recovers_real_stdio_server_after_dead_transport --lib`
+  - `MACOSX_DEPLOYMENT_TARGET=10.14 cargo test -p warp reconnect_retry --lib`
+  - `MACOSX_DEPLOYMENT_TARGET=10.14 cargo test -p warp pending_reconnections --lib`
+  - `MACOSX_DEPLOYMENT_TARGET=10.14 cargo test -p warp classify_mcp --lib`
+  - `MACOSX_DEPLOYMENT_TARGET=10.14 cargo test -p warp missing_result_repair --lib`
+  - `MACOSX_DEPLOYMENT_TARGET=10.14 cargo test -p ai continuation_decision`
+  - `MACOSX_DEPLOYMENT_TARGET=10.14 cargo check`
 
 仍未完成：
 
-- controller 级集成测试还需要补：真实 history 中 assistant `ToolCall` 无 `ToolCallResult`，preflight 后应落地 synthetic result 并继续。
-- MCP dead transport retry-once 还没开始实现。
-- `AIAgentActionResultType::should_trigger_request_upon_completion()` 仍是 bool，后续应改成集中 continuation decision。
+- continuation decision 目前只表达“是否发送 follow-up request”；后续如果要覆盖 driver/run 终态，还需要扩展为更完整的 lifecycle decision。
+- MCP retry / reconnect / cooldown 主路径已有 fake seam、manager 状态机、真实 stdio fixture 覆盖；后续主要是补更高层 run/preflight 端到端验证。
+- pending live action 目前覆盖的是 controller/history 窄测试；如果后续要继续加严，可以再补完整 `run_byop_request_preflight` end-to-end 测试。
 
 ## 1. 一句话目标
 
@@ -70,7 +83,7 @@ Ashide Agent 的优势不应该只是“一个 agent CLI 内嵌在终端里”�
 - `app/src/ai/blocklist/action_model/execute/call_mcp_tool.rs`
   - MCP tool 调用执行器
   - 当前失败会被压成 `CallMCPToolResult::Error(String)`
-  - 死连接 / server missing / 工具自身错误 / JSON schema 错误没有统一分类。
+  - 当前已有内部 classification seam，能区分工具返回错误、server error、dead transport、timeout、cancelled 等。
 
 ### Action result 类型层
 
@@ -79,8 +92,8 @@ Ashide Agent 的优势不应该只是“一个 agent CLI 内嵌在终端里”�
   - `is_successful()`
   - `is_failed()`
   - `is_cancelled()`
-  - `should_trigger_request_upon_completion()`
-  - 当前问题：这些方法只描述“结果长什么样”，缺少“结果对 conversation lifecycle 意味着什么”的统一策略。
+  - `continuation_decision()`
+  - 当前问题：`continuation_decision()` 只覆盖“是否自动 follow-up”，还没覆盖完整 run / conversation lifecycle 终态。
 
 ### Controller / BYOP readiness 层
 
@@ -301,26 +314,38 @@ enum ToolFailureKind {
 - [x] 补 pure repair helper 测试：
   - synthetic message 保持 `(task_id, tool_call_id)` 配对。
   - synthetic payload 带 `status/reason/synthetic/repair_source`。
-- [ ] 补 controller/history 级测试：
-  - 有 tool_call，无 live action，无 result → 合成 cancellation result。
-  - 有 live action → pending request 等待 finished action，不合成。
-  - 重复 preflight 不重复合成。
+- [x] 补 controller/history 级测试：
+  - [x] 有 tool_call，无 result → 合成 cancellation result 并写入 history。
+  - [x] 重复 repair 不重复 append，保持幂等。
+  - [x] 有 live action → readiness 保持 `PendingToolResults`，不提前合成 cancellation。
 
 ### 阶段 C：MCP tool recovery
 
-- [ ] 给 MCP 调用结果分类。
-- [ ] 对 dead transport 做 reconnect/restart + retry once。
-- [ ] retry failed 后写模型可见 error result。
-- [ ] 补测试：
-  - 工具自身 error 不 retry，直接 result。
+- [x] 给 MCP 调用结果分类。
+- [x] 对 dead transport 做 reconnect/restart + retry once。
+- [x] retry failed 后仍走模型可见 error result 路径，不把工具失败提升为 harness fatal。
+- [x] 补 fake peer / manager-source seam 测试：
+  - 工具自身 error result 不 retry，直接 result。
   - dead connection retry success。
-  - dead connection retry failed → result error，不 fatal。
-  - cooldown / concurrent restart coalescing。
+  - dead connection retry failed 只重试一次。
+  - MCP server error 不 retry。
+- [x] 补 manager pending reconnect coalescing 状态机测试：
+  - 同 installation 的多个 waiter 合并到同一次 reconnect。
+  - notify 后允许下一次 reconnect 重新发起。
+  - 不同 installation 的 pending reconnect 互不影响。
+- [x] 补真实 MCP server / manager 集成级测试：
+  - 真实 stdio fixture 完成 initialize / tools/list。
+  - 首次 `tools/call(mode=crash_once)` 主动退出模拟 dead transport。
+  - manager reconnect 后同一次 tool call retry 成功，且 fixture 只 crash 一次。
+- [x] reconnect cooldown：
+  - cooldown 固定为 2 秒，按 installation 维度记录上一轮 reconnect 开始时间。
+  - 已经 pending 的 waiter 优先合并到同一次 reconnect，不被 cooldown 拦截。
+  - notify 后 cooldown 窗口内的新 attempt 会收到明确错误；cooldown 结束后允许重新发起。
 
 ### 阶段 D：统一 action result continuation
 
-- [ ] 新增集中函数判断 result 完成后是否要 follow-up request。
-- [ ] 避免各处直接用 `is_failed()` / `is_cancelled()` 推导 run 终态。
+- [x] 新增集中 enum decision 判断 result 完成后是否要 follow-up request。
+- [ ] 将 `ActionResultContinuationDecision` 扩展为完整 lifecycle decision，避免各处直接用 `is_failed()` / `is_cancelled()` 推导 run 终态。
 - [ ] CLI/current-app 和 GUI agent view 共用策略。
 
 ### 阶段 E：本地/远程一致性
@@ -396,7 +421,7 @@ executor 应该返回：
    - `blocklist` 更贴近 history/controller，但会继续加重旧模块。
 2. 缺失 tool result 合成 cancellation 是否足够安全？
 3. MCP restart 应放在 `TemplatableMCPServerManager`、`ReconnectingPeer` 还是 `CallMCPToolExecutor`？
-4. `AIAgentActionResultType::should_trigger_request_upon_completion()` 是否应该改成返回 enum，而不是 bool？
+4. `ActionResultContinuationDecision` 是否应该继续扩展为完整 lifecycle decision，而不只是 follow-up decision？
 5. `AgentDriver::execute_run` 对 `Blocked` 的处理是否应该区分：
    - waiting for permission
    - unrecoverable policy block
@@ -412,14 +437,14 @@ executor 应该返回：
 
 - action result classification
 - readiness repair
-- MCP dead connection retry
+- MCP dead connection retry / retry-once fake peer seam
 - no duplicate synthetic result
 - no infinite auto-resume
 
 ### 集成/模型前测试
 
 - 构造一段历史：assistant tool_call 无 tool_result，下一轮用户输入应自动补 cancellation 并继续。
-- 构造 MCP server 第一次调用断开、重启后成功，模型应收到 success。
+- 构造 MCP server 第一次调用断开、重启后成功，模型应收到 success（当前已用 fake peer seam 覆盖，manager pending coalescing 已有状态机级覆盖，仍需真实 server 集成覆盖）。
 - 构造 MCP server 工具自身 error，模型应收到 error result，harness 不退出。
 
 ### GUI/CLI 行为验证
@@ -501,12 +526,25 @@ MCP dead connection recovery 仍然重要，但它属于 executor/transport 层�
 - `app/src/ai/blocklist/controller.rs`
   - `run_byop_request_preflight` 对 `MissingResultWithoutRepairSource { reason: NoResult }` 不再直接 blocked。
   - 新增 `synthesize_byop_missing_cancellation_results`，追加 synthetic cancellation `ToolCallResult` 后 rebuild request。
+- `app/src/ai/blocklist/controller_tests.rs`
+  - controller/history 级测试覆盖 append、幂等、live action pending 不提前合成。
+- `app/src/ai/blocklist/action_model/execute/call_mcp_tool.rs`
+  - MCP tool result / service error 分类，工具返回 error 降为 debug，transport/server 等执行错误保留 warn。
+- `app/src/ai/mcp/reconnecting_peer.rs`
+  - dead transport 强制 reconnect 后 retry once。
+  - 抽出 fake peer-source seam，测试 retry success / retry once / no retry server error / no retry tool error result。
+- `app/src/ai/mcp/templatable_manager.rs`
+  - 新增 `PendingReconnections` 状态机，统一处理 pending waiter coalescing 与 per-installation reconnect cooldown。
+- `app/src/ai/mcp/templatable_manager/native.rs`
+  - `reconnect_server` 接入 `PendingReconnections`，registration 失败时会通知 waiter，避免 oneshot 永久等待。
+  - 补真实 stdio MCP fixture 集成测试，覆盖 server 在 `tools/call` 中退出后 manager 重连并 retry 成功。
+- `crates/ai/src/agent/action_result/mod.rs`
+  - `should_trigger_request_upon_completion()` 硬切为 `continuation_decision() -> ActionResultContinuationDecision`。
 
 还需要补强：
 
-- controller 级测试：构造 history 中 assistant tool_call 无 result，preflight 后应落地 synthetic result。
-- pending live action 测试：有 live action 时仍走 `PendingToolResults`，不能提前合成 cancellation。
-- duplicate 防护测试：已有 persisted result 时不重复 append。
+- 完整 preflight end-to-end 测试：当前 pending live action 已有 controller/history 窄测试，后续可再覆盖 `run_byop_request_preflight` 对 pending request 的暂存/flush。
+- continuation decision 目前仍只是 follow-up request decision；后续可扩成更完整的 run/conversation lifecycle decision。
 
 ## 13. 多 AI 并行 review 建议
 
@@ -533,6 +571,7 @@ MCP dead connection recovery 仍然重要，但它属于 executor/transport 层�
 AGENTS.md
 docs/design/ashide-agent-harness-tool-lifecycle.md
 app/src/ai/blocklist/controller.rs
+app/src/ai/blocklist/controller_tests.rs
 app/src/ai/blocklist/controller/tool_lifecycle.rs
 ```
 
@@ -580,29 +619,47 @@ message::Message::ToolCallResult(message::ToolCallResult {
 ### 14.3 本轮验证结果
 
 ```text
-$ cargo test -p warp tool_lifecycle --lib
-running 2 tests
-test ...missing_result_cancellation_payload_is_diagnostic_and_model_visible ... ok
-test ...missing_result_cancellation_message_preserves_tool_call_pairing ... ok
+$ MACOSX_DEPLOYMENT_TARGET=10.14 cargo test -p ai continuation_decision --lib
 test result: ok. 2 passed
 
-$ cargo check
-Finished `dev` profile [unoptimized + debuginfo] target(s) in 41.60s
+$ MACOSX_DEPLOYMENT_TARGET=10.14 cargo test -p warp call_mcp_tool --lib
+test result: ok. 5 passed
+
+$ MACOSX_DEPLOYMENT_TARGET=10.14 cargo test -p warp reconnecting_peer --lib
+test result: ok. 5 passed
+
+$ MACOSX_DEPLOYMENT_TARGET=10.14 cargo test -p warp reconnecting_peer_recovers_real_stdio_server_after_dead_transport --lib
+test result: ok. 1 passed
+
+$ MACOSX_DEPLOYMENT_TARGET=10.14 cargo test -p warp pending_reconnections --lib
+test result: ok. 6 passed
+
+$ MACOSX_DEPLOYMENT_TARGET=10.14 cargo test -p warp missing_result_repair --lib
+test result: ok. 3 passed
+
+$ MACOSX_DEPLOYMENT_TARGET=10.14 cargo test -p warp tool_lifecycle --lib
+test result: ok. 2 passed
+
+$ MACOSX_DEPLOYMENT_TARGET=10.14 cargo check
+Finished `dev` profile [unoptimized + debuginfo] target(s)
+
+$ git diff --check
+# no output
 ```
 
-`cargo check` 输出大量既有 `dead_code` / macOS deprecated API warning；本轮没有引入编译错误。
+`cargo check` 仍输出大量既有 `dead_code` warning，以及 macOS Obj-C availability warning；本轮没有引入编译错误。
 
 ### 14.4 下一轮建议顺序
 
-1. **补 controller/history 级测试**
-   - 目标是证明真实 preflight loop 会把 missing result append 到 history，而不仅是 helper 能构造 message。
-   - 优先搜索/复用 `BlocklistAIHistoryModel` 现有测试 helper，避免为了测试手搭太多 UI entity。
-2. **MCP failure classification**
-   - 从 `app/src/ai/blocklist/action_model/execute/call_mcp_tool.rs` 开始。
-   - 先把失败拆成 `ToolReturnedError / ToolUnavailable / ToolTransportDead / ModelInvalidArguments`。
-3. **MCP retry once**
-   - 借鉴 `refs/deepx-code-main/mcp/manager.go` 的 `callToolWithRestart`。
-   - 只对 dead transport retry；工具自身 error 不 retry。
-4. **action result continuation enum**
-   - 把 `should_trigger_request_upon_completion() -> bool` 升级成 decision enum。
-   - controller / driver 都消费同一套 decision，避免工具失败到处各自推导 run 终态。
+1. **补完整 BYOP preflight end-to-end 测试**
+   - 当前已有 controller/history 窄测试；如果继续加严，下一刀应覆盖 `PendingToolResults` 时 pending request 暂存，并在 `FinishedAction` 后 flush。
+2. **扩展 continuation decision**
+   - 现在已从 bool 硬切为 enum；下一步把 enum 从“是否 follow-up”扩展到更完整的 run/conversation lifecycle decision。
+3. **做一轮 MCP failure UX/log review**
+   - 主路径已经能恢复或返回模型可见错误；下一步只需要确认日志等级、用户可见错误文本和 telemetry 粒度是否足够区分 transport dead / server error / tool error result。
+
+### 14.5 2026-07-04 运行态附带发现
+
+- **终端颜色默认应启用**：本地会话无颜色的根因不是 `TERM=xterm-256color` 设置错，而是 Ashide 进程继承了 `NO_COLOR`。修复方向是 PTY spawn 统一移除禁色变量，同时保留 `TERM=xterm-256color` / `COLORTERM=truecolor`。
+- **warning 清理单独处理**：当前 `cargo check` 主要是既有 `dead_code` warning，另有 macOS Obj-C availability warning；这不是 agent harness 主路径问题，后续应单独开 warning cleanup。
+- **symlink 不应写成 remote-only bug**：File Browser 需要统一 FS metadata 抽象。本地 terminal root 和 remote environment root 的 UI 可以有不同 backend，但 list/resolve 后必须产出同一套 symlink 身份 + target kind 语义。具体计划见 `docs/design/local-remote-fix-plan.md` 的 Step 2.4。

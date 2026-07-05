@@ -152,7 +152,6 @@ pub struct AIDocumentView {
     original_terminal_view: Option<ViewHandle<TerminalView>>,
     // Version menu state
     version_menu: ViewHandle<Menu<AIDocumentAction>>,
-    sync_button_mouse_state: MouseStateHandle,
     update_plan_button: ViewHandle<ActionButton>,
     restore_button: ViewHandle<ActionButton>,
     is_version_menu_open: bool,
@@ -356,9 +355,6 @@ impl AIDocumentView {
             pane_config.refresh_pane_header_overflow_menu_items(ctx)
         });
 
-        // Create sync button mouse state (for Ashide Drive syncing)
-        let sync_button_mouse_state = MouseStateHandle::default();
-
         // Create Update Agent button
         // Read the actual configured keybinding for the save action
         let save_action = keybinding_name_to_keystroke(SAVE_FILE_BINDING_NAME, ctx)
@@ -404,7 +400,6 @@ impl AIDocumentView {
             focus_handle: None,
             original_terminal_view: None,
             version_menu,
-            sync_button_mouse_state,
             update_plan_button,
             restore_button,
             is_version_menu_open: false,

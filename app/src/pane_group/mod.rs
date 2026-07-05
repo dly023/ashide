@@ -37,7 +37,6 @@ use crate::terminal::available_shells::{AvailableShell, AvailableShells};
 use crate::terminal::cli_agent_sessions::plugin_manager::PluginModalKind;
 #[cfg(feature = "local_tty")]
 use crate::terminal::local_tty::shell::{DirectShellStarter, ShellStarter};
-use crate::terminal::view::inline_banner::ZeroStatePromptSuggestionType;
 use crate::terminal::view::load_ai_conversation::RestoredAIConversation;
 use crate::undo_close::UndoCloseStack;
 use crate::undo_close::UndoCloseStackEvent;
@@ -65,9 +64,7 @@ use parking_lot::FairMutex;
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::{vec2f, Vector2F};
 use serde::{Deserialize, Serialize};
-use tree::DEFAULT_FLEX_VALUE;
 use typed_path::TypedPath;
-use url::Url;
 use uuid::Uuid;
 use warp_cli::agent::Harness;
 use warp_core::command::ExitCode;
@@ -3690,47 +3687,6 @@ impl PaneGroup {
 
         new_pane_id
     }
-
-    /// Creates a cloud-mode pane that is immediately hidden as a child agent pane.
-    /// Unlike `create_ambient_agent_pane`, this leaves the new terminal view
-    /// uninitialized so callers can create and select the child conversation
-    /// explicitly before the deferred shared-session viewer binds to it.
-    fn insert_ambient_agent_pane_hidden_for_child_agent(
-        &mut self,
-        base_pane_id: PaneId,
-        ctx: &mut ViewContext<Self>,
-    ) -> TerminalPaneId {
-        let uuid = Uuid::new_v4();
-        let resources = TerminalViewResources {
-            tips_completed: self.tips_completed.clone(),
-            model_event_sender: self.model_event_sender.clone(),
-        };
-        let view_bounds = Self::estimated_view_bounds(ctx);
-        let (view, terminal_manager) =
-            Self::create_ambient_agent_terminal(resources, view_bounds.size(), ctx);
-        let pane_data = TerminalPane::new(
-            uuid.as_bytes().to_vec(),
-            terminal_manager,
-            view,
-            self.model_event_sender.clone(),
-            ctx,
-        );
-        let new_pane_id = pane_data.terminal_pane_id();
-        let _ = self.add_pane_with_options(
-            Box::new(pane_data),
-            AddPaneOptions {
-                direction: Direction::Right,
-                base_pane_id: Some(base_pane_id),
-                focus_new_pane: false,
-                visibility: NewPaneVisibility::HiddenForChildAgent,
-                emit_app_state_changed: false,
-            },
-            ctx,
-        );
-
-        new_pane_id
-    }
-
     /// Get the [`PaneView<TerminalView>`] for the pane at `pane_index`, if that pane is:
     /// 1. In bounds
     /// 2. A terminal pane
@@ -5965,17 +5921,6 @@ impl PaneGroup {
             }
         }
     }
-
-    fn handle_pane_link_updated(&self, pane_id: PaneId, url: Option<Url>, ctx: &AppContext) {
-        log::debug!("Url for pane should be updated pane_id: {pane_id:?}, url: {url:?}");
-        #[cfg(target_family = "wasm")]
-        if pane_id == self.focused_pane_id(ctx) {
-            update_browser_url(url, false);
-        }
-
-        let _ = ctx;
-    }
-
     #[cfg(target_family = "wasm")]
     fn update_browser_url(&self, ctx: &mut ViewContext<Self>) {
         // We need to wait for the app to be loaded before we attempt to get the
@@ -6357,131 +6302,6 @@ impl PaneGroup {
                 (id, current_app_path)
             })
     }
-
-    pub(crate) fn start_agent_mode_in_new_pane(
-        &mut self,
-        initial_query: Option<&str>,
-        zero_state_prompt_suggestion_type: Option<ZeroStatePromptSuggestionType>,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        if let Some(terminal_view) = self.focused_session_view(ctx) {
-            terminal_view.update(ctx, |terminal_view, terminal_view_ctx| {
-                terminal_view.enter_agent_view_for_new_conversation(
-                    None,
-                    // TODO(zachbai): This is just a placeholder origin - I'm not even sure
-                    // if this is called in live codepaths beyond the create-environment deep
-                    // link flow.
-                    AgentViewEntryOrigin::Input {
-                        was_prompt_autodetected: false,
-                    },
-                    terminal_view_ctx,
-                );
-
-                if let Some(initial_query) = initial_query {
-                    terminal_view
-                        .input()
-                        .update(terminal_view_ctx, |input, ctx| {
-                            input.replace_buffer_content(initial_query, ctx);
-                            input.focus_input_box(ctx);
-                        });
-                }
-                if let Some(zero_state_prompt_suggestion_type) = zero_state_prompt_suggestion_type {
-                    terminal_view
-                        .input()
-                        .update(terminal_view_ctx, |input, ctx| {
-                            input.insert_zero_state_prompt_suggestion(
-                                zero_state_prompt_suggestion_type,
-                                ctx,
-                            );
-                        });
-                }
-            });
-        }
-    }
-
-    /// Add and focus a terminal pane in AI mode. Adds the pane to the right of all other panes as
-    /// a split on the root node. If `initial_query` is `Some` pre-fill the input with its value.
-    pub(crate) fn add_terminal_pane_in_agent_mode(
-        &mut self,
-        initial_query: Option<&str>,
-        zero_state_prompt_suggestion_type: Option<ZeroStatePromptSuggestionType>,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        // We can only control the size of a pane that hasn't been laid out by setting `PaneFlex`
-        // ratios because we don't have element sizes until we lay out the view. Here we make sure
-        // the Agent Mode pane will have at least the desired minimum width by checking the size of
-        // the already laid out panes.
-        let root_pane_width = self.panes.root.pane_size(ctx).x();
-        // The Agent Mode pane should take up no more than 50% of the root pane's width.
-        let new_pane_min_width = AGENT_MODE_PANE_DEFAULT_MINIMUM_WIDTH.min(root_pane_width / 2.);
-
-        let flex_for_min_width = {
-            let root_horizontal_flex_values_sum = self
-                .panes
-                .root
-                .pane_flex_sum_along_axis(SplitDirection::Horizontal);
-            let default_new_pane_width =
-                root_pane_width / (root_horizontal_flex_values_sum + DEFAULT_FLEX_VALUE);
-
-            let remaining_width_for_existing_panes = root_pane_width - new_pane_min_width;
-            let ratio = new_pane_min_width / remaining_width_for_existing_panes;
-
-            if default_new_pane_width < new_pane_min_width && ratio.is_normal() && ratio > 0. {
-                Some(PaneFlex(root_horizontal_flex_values_sum * ratio))
-            } else {
-                None
-            }
-        };
-
-        self.add_terminal_bootstrap_session_with_default_session_mode_behavior(
-            Direction::Right,
-            None,
-            self.focused_pane_id(ctx).as_terminal_pane_id(),
-            None, /* chosen_shell */
-            None, /* conversation_restoration */
-            DefaultSessionModeBehavior::Ignore,
-            ctx,
-        );
-
-        // Now that the Agent Mode pane has been inserted into the pane tree, we can update its
-        // `PaneFlex` value.
-        if let Some(custom_flex) = flex_for_min_width {
-            if let PaneNode::Branch(ref mut root_branch) = self.panes.root {
-                if let Some((agent_mode_pane_flex, PaneNode::Leaf(_))) =
-                    root_branch.nodes.last_mut()
-                {
-                    *agent_mode_pane_flex = custom_flex;
-                }
-            }
-        }
-
-        ctx.emit(Event::AppStateChanged);
-
-        self.start_agent_mode_in_new_pane(initial_query, zero_state_prompt_suggestion_type, ctx);
-    }
-
-    /// Creates an ambient agent pane with the given initial prompt.
-    fn create_ambient_agent_pane(&self, ctx: &mut ViewContext<Self>) -> TerminalPane {
-        let uuid = Uuid::new_v4();
-        let resources = TerminalViewResources {
-            tips_completed: self.tips_completed.clone(),
-            model_event_sender: self.model_event_sender.clone(),
-        };
-
-        let view_bounds = Self::estimated_view_bounds(ctx);
-
-        let (terminal_view, terminal_manager) =
-            Self::create_ambient_agent_terminal(resources, view_bounds.size(), ctx);
-
-        TerminalPane::new(
-            uuid.into_bytes().to_vec(),
-            terminal_manager,
-            terminal_view,
-            self.model_event_sender.clone(),
-            ctx,
-        )
-    }
-
     /// Close overlays whose state is managed by this pane group or its terminal panes. Does not
     /// change what element is focused.
     pub fn close_overlays(&mut self, ctx: &mut ViewContext<Self>) {

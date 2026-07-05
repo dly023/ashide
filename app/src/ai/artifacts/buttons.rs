@@ -19,7 +19,6 @@ const BUTTON_MAX_TEXT_WIDTH: f32 = 200.;
 /// A view that renders a set of artifact buttons (plans, branches, PRs)
 pub struct ArtifactButtonsRow {
     buttons: Vec<ViewHandle<ActionButton>>,
-    theme: Arc<dyn ActionButtonTheme>,
 }
 
 impl ArtifactButtonsRow {
@@ -27,7 +26,6 @@ impl ArtifactButtonsRow {
         let theme: Arc<dyn ActionButtonTheme> = Arc::new(SecondaryTheme);
         Self {
             buttons: collect_buttons(artifacts, &theme, ctx),
-            theme,
         }
     }
 
@@ -38,17 +36,7 @@ impl ArtifactButtonsRow {
     ) -> Self {
         Self {
             buttons: collect_buttons(artifacts, &theme, ctx),
-            theme,
         }
-    }
-
-    pub fn update_artifacts(&mut self, artifacts: &[Artifact], ctx: &mut ViewContext<Self>) {
-        self.buttons = collect_buttons(artifacts, &self.theme, ctx);
-        ctx.notify();
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.buttons.is_empty()
     }
 }
 

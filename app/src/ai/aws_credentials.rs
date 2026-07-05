@@ -171,15 +171,12 @@ impl AwsCredentialRefresher for ApiKeyManager {
     fn subscribe_to_settings_changes(&mut self, ctx: &mut ModelContext<Self>) {
         // Subscribe to UserWorkspaces events to refresh AWS credentials when workspace settings change
         // (this also initializes AWS credentials on app startup via TeamsChanged)
-        ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), |manager, event, ctx| {
-            if matches!(
-                event,
-                UserWorkspacesEvent::UpdateWorkspaceSettingsSuccess
-                    | UserWorkspacesEvent::TeamsChanged
-            ) {
-                drop(refresh_aws_credentials(manager, ctx));
-            }
-        });
+        ctx.subscribe_to_model(
+            &UserWorkspaces::handle(ctx),
+            |manager, event, ctx| match event {
+                UserWorkspacesEvent::TeamsChanged => drop(refresh_aws_credentials(manager, ctx)),
+            },
+        );
 
         // Subscribe to AISettings changes to refresh AWS credentials when AWS Bedrock settings change
         ctx.subscribe_to_model(&AISettings::handle(ctx), |manager, event, ctx| {

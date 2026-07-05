@@ -766,44 +766,6 @@ fn test_confirm_new_folder_no_connection_with_dialog() {
     });
 }
 
-/// 验证 ConfirmMove 无 dialog、无连接时不 panic
-#[test]
-fn test_confirm_move_no_connection_no_dialog() {
-    warpui::App::test((), |mut app| async move {
-        initialize_app(&mut app);
-        let (_, view) = create_view(&mut app);
-
-        view.update(&mut app, |view, ctx| {
-            view.handle_action(&SftpBrowserAction::ConfirmMove, ctx);
-        });
-
-        view.read(&app, |view, _| {
-            assert!(view.dialog.is_none());
-        });
-    });
-}
-
-/// 验证 ConfirmMove 有 dialog 但无连接时提示错误并关闭 dialog
-#[test]
-fn test_confirm_move_no_connection_with_dialog() {
-    warpui::App::test((), |mut app| async move {
-        initialize_app(&mut app);
-        let (_, view) = create_view(&mut app);
-
-        view.update(&mut app, |view, ctx| {
-            view.dialog = Some(Dialog::Move {
-                source: PathBuf::from("/home/file.txt"),
-                target_dir: PathBuf::from("/home/backup"),
-            });
-            view.handle_action(&SftpBrowserAction::ConfirmMove, ctx);
-        });
-
-        view.read(&app, |view, _| {
-            assert!(view.dialog.is_none());
-        });
-    });
-}
-
 // ============================================================
 // Category 2: 导航边界测试
 // ============================================================

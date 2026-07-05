@@ -1,4 +1,6 @@
 use crate::ai::agent::conversation::AIConversationId;
+#[cfg(all(test, not(target_family = "wasm")))]
+use crate::ai::ambient_agents::task::AmbientAgentTaskState;
 use crate::ai::ambient_agents::{
     conversation_output_status_from_conversation, AmbientAgentTaskId, AmbientConversationStatus,
 };
@@ -17,6 +19,7 @@ use warp_cli::agent::Harness;
 use warp_core::paths::home_relative_path;
 
 #[cfg(not(target_family = "wasm"))]
+#[cfg(all(test, not(target_family = "wasm")))]
 use crate::ai::ambient_agents::AmbientAgentTask;
 use warp_core::ui::icons::Icon;
 use warp_core::ui::theme::{AnsiColorIdentifier, Fill};
@@ -113,7 +116,7 @@ impl TombstoneDisplayData {
     }
 
     /// 用 AmbientAgentTask 的数据补充展示信息。
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(all(test, not(target_family = "wasm")))]
     fn enrich_from_task(&mut self, task: AmbientAgentTask) {
         // Use task title if we don't have a conversation title.
         if self.title.is_none() {
@@ -135,7 +138,13 @@ impl TombstoneDisplayData {
             );
         }
 
-        if task.state.is_failure_like() {
+        if matches!(
+            task.state,
+            AmbientAgentTaskState::Failed
+                | AmbientAgentTaskState::Error
+                | AmbientAgentTaskState::Blocked
+                | AmbientAgentTaskState::Unknown
+        ) {
             self.is_error = true;
             if let Some(status_message) = &task.status_message {
                 self.error_message = Some(status_message.message.clone());
@@ -145,11 +154,17 @@ impl TombstoneDisplayData {
         // We update to use the task values when we have them, which includes
         // the full usage cost (inference + compute). This matches what we show in
         // the details panel.
-        if let Some(run_time) = task.run_time() {
-            self.run_time = Some(human_readable_precise_duration(run_time));
+        if let Some(started_at) = task.started_at {
+            let duration = task.updated_at.signed_duration_since(started_at);
+            if duration.num_seconds() >= 0 {
+                self.run_time = Some(human_readable_precise_duration(duration));
+            }
         }
-        if let Some(usage_units) = task.usage_units() {
-            self.usage = Some(format_usage_units(usage_units));
+        if let Some(request_usage) = &task.request_usage {
+            self.usage = Some(format_usage_units(
+                (request_usage.inference_cost.unwrap_or(0.0)
+                    + request_usage.compute_cost.unwrap_or(0.0)) as f32,
+            ));
         }
 
         // Surface task artifacts (plans, PRs, files, screenshots) for third-party

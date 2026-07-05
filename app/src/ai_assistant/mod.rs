@@ -1,9 +1,7 @@
 //! AI Assistant has since been renamed to "Ashide AI" in the product.
 use std::{collections::HashSet, sync::Arc};
 
-use crate::{
-    app_interaction::OpenedAiAssistantSource, terminal::model::terminal_model::BlockIndex,
-};
+use crate::terminal::model::terminal_model::BlockIndex;
 use lazy_static::lazy_static;
 use pathfinder_color::ColorU;
 use warp_core::command::ExitCode;
@@ -55,16 +53,4 @@ pub enum AskAIType {
     FromAICommandSearch {
         query: Arc<String>,
     },
-}
-
-impl From<&AskAIType> for OpenedAiAssistantSource {
-    fn from(value: &AskAIType) -> Self {
-        match value {
-            AskAIType::FromAICommandSearch { .. } => OpenedAiAssistantSource::FromAICommandSearch,
-            AskAIType::FromBlock { .. } | AskAIType::FromBlocks { .. } => {
-                OpenedAiAssistantSource::HelpWithBlock
-            }
-            AskAIType::FromTextSelection { .. } => OpenedAiAssistantSource::HelpWithTextSelection,
-        }
-    }
 }

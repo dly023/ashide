@@ -1,9 +1,6 @@
 use crate::ai::execution_profiles::AIExecutionProfileObject;
 use crate::drive::folders::{FolderObject, FolderObjectModel};
-use crate::drive::{
-    should_auto_open_welcome_folder, write_has_auto_opened_welcome_folder_to_user_defaults,
-    DriveIndexVariant, ObjectTypeAndId,
-};
+use crate::drive::{DriveIndexVariant, ObjectTypeAndId};
 use crate::env_vars::{EnvVarCollection, EnvVarCollectionObject, EnvVarCollectionObjectModel};
 use crate::notebooks::NotebookObject;
 use crate::object_store::ids::{HashableId, ObjectStoreId, ObjectUid, ToStableObjectId};
@@ -1249,26 +1246,6 @@ impl ObjectStoreModel {
     #[cfg(test)]
     pub fn mock(_ctx: &mut ModelContext<Self>) -> Self {
         Self::new(None, Vec::new(), None)
-    }
-
-    // If the object is a folder and a welcome object, open it if we haven't opened a welcome folder before.
-    fn maybe_open_welcome_folder(
-        &mut self,
-        object_id: &ObjectStoreId,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        if let Some(object) = self.get_by_uid(&object_id.uid()) {
-            let folder: Option<&FolderObject> = object.into();
-            if let Some(folder) = folder {
-                if folder.metadata().is_welcome_object {
-                    // Doing this as a nested check as a slight optimization
-                    if should_auto_open_welcome_folder(ctx) {
-                        self.set_folder_open_state(folder.id, FolderOpenState::Open, ctx);
-                        write_has_auto_opened_welcome_folder_to_user_defaults(ctx);
-                    }
-                }
-            }
-        }
     }
 
     /// 下一次本地 object-store refresh 是否需要强制全量遍历对象。

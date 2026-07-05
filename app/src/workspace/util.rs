@@ -44,8 +44,6 @@ pub(super) struct WorkspaceMouseStates {
     pub(super) left_panel_icon: MouseStateHandle,
     pub(super) settings_icon: MouseStateHandle,
     pub(super) dismiss_banner_button: MouseStateHandle,
-    pub(super) sign_in_button: MouseStateHandle,
-    pub(super) sign_up_button: MouseStateHandle,
     pub(super) offline_icon: MouseStateHandle,
     pub(super) avatar_icon: MouseStateHandle,
     pub(super) header_dimming: MouseStateHandle,
@@ -54,12 +52,9 @@ pub(super) struct WorkspaceMouseStates {
     pub(super) session_config_tab_config_chip_close: MouseStateHandle,
     pub(super) tools_panel_icon: MouseStateHandle,
     pub(super) title_bar_search_bar: MouseStateHandle,
-    pub(super) environment_strip_chip: MouseStateHandle,
     pub(super) environment_strip_add_provider_chip: MouseStateHandle,
     pub(super) environment_provider_picker_config_button: MouseStateHandle,
     pub(super) environment_provider_picker_scroll_state: ClippedScrollStateHandle,
-    pub(super) workspace_session_restore_chip: MouseStateHandle,
-    pub(super) workspace_session_restore_popover: MouseStateHandle,
     #[cfg(target_family = "wasm")]
     pub(super) warp_logo: MouseStateHandle,
 }
@@ -118,7 +113,6 @@ pub struct WorkspaceState {
     pub is_local_drive_open: bool,
     pub is_ai_assistant_panel_open: bool,
     pub is_auth_override_modal_open: bool,
-    pub is_require_login_modal_open: bool,
     pub is_workflow_modal_open: bool,
     pub is_prompt_editor_open: bool,
     pub is_agent_toolbar_editor_open: bool,
@@ -205,7 +199,6 @@ impl WorkspaceState {
         self.is_header_toolbar_editor_open = false;
         self.is_import_modal_open = false;
         self.is_auth_override_modal_open = false;
-        self.is_require_login_modal_open = false;
         self.is_suggested_rule_modal_open = false;
         self.is_suggested_agent_mode_workflow_modal_open = false;
         self.is_codex_modal_open = false;

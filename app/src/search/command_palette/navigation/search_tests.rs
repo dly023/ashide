@@ -182,6 +182,7 @@ fn restored_session_snapshot_yields_searchable_prompt_and_restore_target() {
         is_active: false,
         is_pinned: false,
         updated_at_unix_ms: Some(1_700_000_000_000),
+        is_live_container: false,
     };
 
     let window_id = WindowId::new();

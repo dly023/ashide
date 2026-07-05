@@ -187,6 +187,38 @@ fn render_transfer_row(task: &TransferTask, appearance: &Appearance) -> Box<dyn 
         .with_spacing(4.0)
         .with_child(top_row.finish());
 
+    let target_text = task.target_path.to_string_lossy().to_string();
+    if !target_text.is_empty() {
+        col.add_child(
+            Text::new_inline(
+                target_text,
+                appearance.ui_font_family(),
+                appearance.ui_font_size() - 1.0,
+            )
+            .with_color(
+                appearance
+                    .theme()
+                    .sub_text_color(appearance.theme().background())
+                    .into(),
+            )
+            .finish(),
+        );
+    }
+
+    if let TransferState::Failed(message) = &task.state {
+        if !message.is_empty() {
+            col.add_child(
+                Text::new_inline(
+                    message.clone(),
+                    appearance.ui_font_family(),
+                    appearance.ui_font_size() - 1.0,
+                )
+                .with_color(appearance.theme().ui_error_color())
+                .finish(),
+            );
+        }
+    }
+
     // 进度条（仅传输中显示）
     if matches!(task.state, TransferState::InProgress) {
         let bar = render_progress_bar(task.progress_percent(), appearance);

@@ -155,7 +155,6 @@ pub fn render_context_menu(state: &ContextMenuState, appearance: &Appearance) ->
             | SftpBrowserAction::DragAndDropFiles(_)
             | SftpBrowserAction::ExecuteUpload(_)
             | SftpBrowserAction::DownloadSaveAs { .. }
-            | SftpBrowserAction::ConfirmMove
             | SftpBrowserAction::CancelTransfer(_)
             | SftpBrowserAction::ToggleTransferPanel
             | SftpBrowserAction::ConfirmCloseTransferPanel => "sftp_ctx:unknown",

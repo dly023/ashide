@@ -27,8 +27,6 @@ use read_documents::ReadDocumentsExecutor;
 pub(super) use read_files::ReadFilesExecutor;
 use read_mcp_resource::ReadMCPResourceExecutor;
 use read_skill::ReadSkillExecutor;
-pub(crate) use request_file_edits::apply_edits;
-pub(crate) use request_file_edits::FileReadResult;
 pub use request_file_edits::RequestFileEditsExecutor;
 use serde::{Deserialize, Serialize};
 pub use shell_command::{ShellCommandExecutor, ShellCommandExecutorEvent};
@@ -67,7 +65,7 @@ use crate::{
         agent::{
             conversation::AIConversationId, AIAgentAction, AIAgentActionId, AIAgentActionResult,
             AIAgentActionResultType, AIAgentActionType, CancellationReason, FileContext,
-            FileLocations, ServerOutputId,
+            FileLocations,
         },
         ambient_agents::AmbientAgentTaskId,
     },
@@ -77,7 +75,6 @@ use crate::{
         shell::ShellType,
         ShellLaunchData, TerminalModel,
     },
-    BlocklistAIHistoryModel,
 };
 
 /// Types of actions that can be executed in parallel.
@@ -106,7 +103,6 @@ struct ExecuteActionInput<'a> {
 #[derive(Debug, Clone, Copy)]
 struct PreprocessActionInput<'a> {
     action: &'a AIAgentAction,
-    conversation_id: AIConversationId,
 }
 
 type AsyncExecuteActionFn<T> = Pin<Box<dyn Spawnable<Output = T>>>;
@@ -364,7 +360,6 @@ impl BlocklistAIActionExecutor {
     pub fn preprocess_action(
         &self,
         action: &AIAgentAction,
-        conversation_id: AIConversationId,
         ctx: &mut ModelContext<Self>,
     ) -> BoxFuture<'static, ()> {
         // In view-only mode, we do not need to perform any preprocessing work.
@@ -372,10 +367,7 @@ impl BlocklistAIActionExecutor {
             return futures::future::ready(()).boxed();
         }
 
-        let input = PreprocessActionInput {
-            action,
-            conversation_id,
-        };
+        let input = PreprocessActionInput { action };
 
         match &action.action {
             AIAgentActionType::RequestCommandOutput { .. }
@@ -1095,17 +1087,6 @@ async fn is_git_repository(absolute_path: &str, session: &Session) -> anyhow::Re
         )
         .await?;
     Ok(command_output.success())
-}
-
-fn get_server_output_id(
-    conversation_id: AIConversationId,
-    ctx: &mut AppContext,
-) -> Option<ServerOutputId> {
-    BlocklistAIHistoryModel::as_ref(ctx)
-        .conversation(&conversation_id)?
-        .latest_exchange()?
-        .output_status
-        .server_output_id()
 }
 
 #[cfg(feature = "local_fs")]

@@ -1,5 +1,3 @@
-use std::{cell::RefCell, collections::HashMap};
-
 use settings::{Setting, ToggleableSetting};
 use warp_core::features::FeatureFlag;
 use warpui::{
@@ -41,7 +39,6 @@ pub struct ExternalEditorView {
     tabbed_editor_view_mouse_state: SwitchStateHandle,
     prefer_markdown_viewer_switch: SwitchStateHandle,
     markdown_viewer_mouse_state: MouseStateHandle,
-    local_only_icon_states: RefCell<HashMap<String, MouseStateHandle>>,
 }
 
 impl ExternalEditorView {
@@ -108,7 +105,6 @@ impl ExternalEditorView {
             tabbed_editor_view_mouse_state: Default::default(),
             prefer_markdown_viewer_switch: Default::default(),
             markdown_viewer_mouse_state: Default::default(),
-            local_only_icon_states: Default::default(),
         }
     }
 

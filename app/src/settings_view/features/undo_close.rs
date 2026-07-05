@@ -1,11 +1,8 @@
-use std::{cell::RefCell, collections::HashMap, time::Duration};
+use std::time::Duration;
 
 use settings::{Setting, ToggleableSetting};
 use warpui::{
-    elements::{
-        Container, CrossAxisAlignment, Flex, MainAxisAlignment, MouseStateHandle, ParentElement,
-        Text,
-    },
+    elements::{Container, CrossAxisAlignment, Flex, MainAxisAlignment, ParentElement, Text},
     ui_components::{
         components::{Coords, UiComponent, UiComponentStyles},
         switch::SwitchStateHandle,
@@ -38,8 +35,6 @@ pub struct UndoCloseView {
     grace_period_editor: ViewHandle<EditorView>,
     /// Whether or not the grace period value is valid.
     is_grace_period_valid: bool,
-    /// State for the local only icon tooltip.
-    local_only_icon_states: RefCell<HashMap<String, MouseStateHandle>>,
 }
 
 impl UndoCloseView {
@@ -81,7 +76,6 @@ impl UndoCloseView {
         });
         Self {
             switch_state: Default::default(),
-            local_only_icon_states: Default::default(),
             grace_period_editor,
             is_grace_period_valid: true,
         }

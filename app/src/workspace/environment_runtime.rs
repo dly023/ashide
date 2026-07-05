@@ -46,14 +46,12 @@ pub(crate) use crate::environment_runtime_transport::auth_context::server_api_au
 pub(crate) use crate::environment_runtime_transport::client::ClientError as EnvironmentRuntimeClientError;
 pub(crate) use crate::environment_runtime_transport::client::RemoteServerClient as EnvironmentRuntimeClient;
 pub(crate) use crate::environment_runtime_transport::manager::RemoteServerErrorKind as EnvironmentRuntimeErrorKind;
-pub(crate) use crate::environment_runtime_transport::manager::RemoteServerInitPhase as EnvironmentRuntimeInitPhase;
 pub(crate) use crate::environment_runtime_transport::manager::RemoteServerManager as EnvironmentRuntimeTransportManager;
 #[cfg(feature = "local_fs")]
 pub(crate) use crate::environment_runtime_transport::manager::RemoteServerManagerEvent as EnvironmentRuntimeTransportEvent;
 pub(crate) use crate::environment_runtime_transport::manager::RemoteServerOperation as EnvironmentRuntimeOperation;
 pub(crate) use crate::environment_runtime_transport::setup::PreinstallCheckResult as EnvironmentRuntimePreinstallCheckResult;
 pub(crate) use crate::environment_runtime_transport::setup::PreinstallStatus as EnvironmentRuntimePreinstallStatus;
-pub(crate) use crate::environment_runtime_transport::setup::RemotePlatform as EnvironmentRuntimePlatform;
 #[cfg(not(target_family = "wasm"))]
 pub(crate) use crate::environment_runtime_transport::ssh_transport::SshTransport as EnvironmentRuntimeTransport;
 
@@ -112,6 +110,7 @@ pub(crate) enum EnvironmentRuntimeFileKind {
     Directory,
     Symlink,
     Other,
+    Missing,
 }
 
 fn file_kind_from_proto(kind: i32) -> EnvironmentRuntimeFileKind {
@@ -128,6 +127,9 @@ fn file_kind_from_proto(kind: i32) -> EnvironmentRuntimeFileKind {
         Ok(crate::environment_runtime_transport::proto::FileSystemEntryKind::Symlink) => {
             EnvironmentRuntimeFileKind::Symlink
         }
+        Ok(crate::environment_runtime_transport::proto::FileSystemEntryKind::Missing) => {
+            EnvironmentRuntimeFileKind::Missing
+        }
         Ok(crate::environment_runtime_transport::proto::FileSystemEntryKind::Other) | Err(_) => {
             EnvironmentRuntimeFileKind::Other
         }
@@ -138,6 +140,9 @@ fn file_kind_from_proto(kind: i32) -> EnvironmentRuntimeFileKind {
 pub(crate) struct EnvironmentRuntimeResolvedPath {
     pub(crate) canonical_path: String,
     pub(crate) kind: EnvironmentRuntimeFileKind,
+    /// For symlink entries, the kind of the resolved target.
+    /// `Unspecified` for non-symlink entries.
+    pub(crate) target_kind: EnvironmentRuntimeFileKind,
     pub(crate) size_bytes: Option<u64>,
 }
 
@@ -146,6 +151,9 @@ pub(crate) struct EnvironmentRuntimeDirectoryEntry {
     pub(crate) name: String,
     pub(crate) is_dir: bool,
     pub(crate) kind: EnvironmentRuntimeFileKind,
+    /// For symlink entries, the kind of the resolved target.
+    /// `Unspecified` for non-symlink entries.
+    pub(crate) target_kind: EnvironmentRuntimeFileKind,
     pub(crate) size_bytes: Option<u64>,
     pub(crate) modified_epoch_millis: Option<u64>,
 }
@@ -220,7 +228,6 @@ pub(crate) enum EnvironmentRuntimeSetupEvent {
     BinaryCheckComplete {
         session_id: SessionId,
         result: Result<bool, String>,
-        remote_platform: Option<EnvironmentRuntimePlatform>,
         preinstall_check: Option<EnvironmentRuntimePreinstallCheckResult>,
         has_old_binary: bool,
     },
@@ -237,40 +244,19 @@ pub(crate) enum EnvironmentRuntimeSetupEvent {
 }
 
 #[cfg(feature = "local_tty")]
-#[derive(Clone, Debug)]
-pub(crate) struct EnvironmentRuntimePlatformInfo {
-    pub(crate) environment_os: Option<String>,
-    pub(crate) environment_arch: Option<String>,
-}
-
-#[cfg(feature = "local_tty")]
-impl EnvironmentRuntimePlatformInfo {
-    pub(crate) fn empty() -> Self {
-        Self {
-            environment_os: None,
-            environment_arch: None,
-        }
-    }
-}
-
-#[cfg(feature = "local_tty")]
 pub(crate) enum EnvironmentRuntimeTerminalEvent {
     SetupStateChanged {
         session_id: SessionId,
     },
     SessionConnected {
         session_id: SessionId,
-        platform: EnvironmentRuntimePlatformInfo,
     },
     SessionConnectionFailed {
         session_id: SessionId,
-        phase: EnvironmentRuntimeInitPhase,
         error: String,
-        platform: EnvironmentRuntimePlatformInfo,
     },
     SessionDisconnected {
         session_id: SessionId,
-        platform: EnvironmentRuntimePlatformInfo,
     },
     SessionDeregistered {
         session_id: SessionId,
@@ -278,22 +264,16 @@ pub(crate) enum EnvironmentRuntimeTerminalEvent {
     BinaryInstallComplete {
         session_id: SessionId,
         result: Result<(), String>,
-        platform: EnvironmentRuntimePlatformInfo,
     },
     BinaryCheckComplete {
         session_id: SessionId,
         result: Result<bool, String>,
-        platform: EnvironmentRuntimePlatformInfo,
     },
     ClientRequestFailed {
         session_id: SessionId,
-        operation: EnvironmentRuntimeOperation,
-        error_kind: EnvironmentRuntimeErrorKind,
-        platform: EnvironmentRuntimePlatformInfo,
     },
     ServerMessageDecodingError {
         session_id: SessionId,
-        platform: EnvironmentRuntimePlatformInfo,
     },
     NavigatedToDirectory {
         session_id: SessionId,
@@ -408,16 +388,12 @@ fn capabilities_for_environment(
     capabilities_for_kind(&environment.kind)
 }
 
-fn uses_terminal_bootstrap(environment: &EnvironmentSnapshot) -> bool {
+pub(crate) fn uses_terminal_bootstrap(environment: &EnvironmentSnapshot) -> bool {
     capabilities_for_environment(environment).uses_terminal_bootstrap
 }
 
 fn uses_environment_runtime(environment: &EnvironmentSnapshot) -> bool {
     capabilities_for_environment(environment).uses_runtime_entry
-}
-
-fn kind_uses_environment_runtime(kind: &EnvironmentKind) -> bool {
-    capabilities_for_kind(kind).uses_runtime_entry
 }
 
 pub(crate) fn supports_runtime_entry(environment: &EnvironmentSnapshot) -> bool {
@@ -727,9 +703,6 @@ pub(crate) fn environment_tooltip_label(environment: &EnvironmentSnapshot) -> St
             EnvironmentLifecycleState::Installing => {
                 crate::t!("workspace-environment-tooltip-runtime-installing")
             }
-            EnvironmentLifecycleState::Reconnecting => {
-                crate::t!("workspace-environment-tooltip-runtime-reconnecting")
-            }
             EnvironmentLifecycleState::Error => {
                 crate::t!("workspace-environment-tooltip-runtime-error")
             }
@@ -952,6 +925,7 @@ pub(crate) async fn resolve_path(
         ) => Ok(EnvironmentRuntimeResolvedPath {
             canonical_path: success.canonical_path,
             kind: file_kind_from_proto(success.kind),
+            target_kind: file_kind_from_proto(success.target_kind),
             size_bytes: success.size_bytes,
         }),
         Some(
@@ -979,6 +953,7 @@ pub(crate) async fn try_resolve_path(
         ) => Ok(Some(EnvironmentRuntimeResolvedPath {
             canonical_path: success.canonical_path,
             kind: file_kind_from_proto(success.kind),
+            target_kind: file_kind_from_proto(success.target_kind),
             size_bytes: success.size_bytes,
         })),
         Some(
@@ -1009,6 +984,7 @@ pub(crate) async fn list_directory(
                     name: entry.name,
                     is_dir: entry.is_dir,
                     kind: file_kind_from_proto(entry.kind),
+                    target_kind: file_kind_from_proto(entry.target_kind),
                     size_bytes: entry.size_bytes,
                     modified_epoch_millis: entry.modified_epoch_millis,
                 })
@@ -1050,6 +1026,7 @@ pub(crate) async fn create_directory(
     }
 }
 
+#[cfg(not(any(test, feature = "integration_tests")))]
 pub(crate) async fn rename_file(
     client: &EnvironmentRuntimeClient,
     from: String,
@@ -1451,7 +1428,6 @@ fn environment_cli_agent_session_user_state_from_proto(
 #[derive(Clone, Debug)]
 pub(crate) struct EnvironmentCliAgentSessionSourceBytes {
     pub(crate) reference: String,
-    pub(crate) sha256: String,
     pub(crate) bytes: Vec<u8>,
 }
 
@@ -1473,7 +1449,6 @@ pub(crate) async fn read_environment_cli_agent_session_source(
             ),
         ) => Ok(EnvironmentCliAgentSessionSourceBytes {
             reference: success.reference,
-            sha256: success.sha256,
             bytes: success.content,
         }),
         Some(
@@ -1737,16 +1712,6 @@ pub(crate) fn hex_encode_for_session_id(_bytes: &[u8]) -> String {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct EnvironmentRuntime {
-    pub(crate) environment: EnvironmentSnapshot,
-    pub(crate) status: EnvironmentRuntimeStatus,
-    pub(crate) synthetic_session_id: Option<SessionId>,
-    pub(crate) host_id: Option<HostId>,
-    pub(crate) control_path: Option<PathBuf>,
-    pub(crate) last_error: Option<String>,
-}
-
-#[derive(Clone, Debug)]
 pub(crate) struct EnvironmentRuntimeTarget {
     pub(crate) authority: String,
     pub(crate) session_id: SessionId,
@@ -1868,6 +1833,7 @@ pub(crate) enum EnvironmentCliAgentSessionSourceAction {
     Delete,
 }
 
+#[cfg(all(test, not(target_family = "wasm")))]
 impl EnvironmentCliAgentSessionSourceAction {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
@@ -1912,20 +1878,6 @@ pub(crate) fn terminal_bootstrap_options(
         hide_homepage,
         ..Default::default()
     }
-}
-
-pub(crate) fn terminal_bootstrap_options_for_spawn(
-    spawn: TerminalBootstrapSpawn,
-    shell: Option<AvailableShell>,
-    conversation_restoration: Option<ConversationRestorationInNewPaneType>,
-    hide_homepage: bool,
-) -> NewTerminalOptions {
-    terminal_bootstrap_options(
-        spawn.initial_directory,
-        shell,
-        conversation_restoration,
-        hide_homepage,
-    )
 }
 
 pub(crate) fn terminal_session_tab_bootstrap(
@@ -2218,13 +2170,12 @@ where
             EnvironmentRuntimeTransportEvent::BinaryCheckComplete {
                 session_id,
                 result,
-                remote_platform,
                 preinstall_check,
                 has_old_binary,
+                ..
             } => EnvironmentRuntimeSetupEvent::BinaryCheckComplete {
                 session_id: *session_id,
                 result: result.clone(),
-                remote_platform: remote_platform.clone(),
                 preinstall_check: preinstall_check.clone(),
                 has_old_binary: *has_old_binary,
             },
@@ -2266,27 +2217,6 @@ where
 }
 
 #[cfg(feature = "local_tty")]
-fn platform_info_from_platform(
-    platform: Option<&EnvironmentRuntimePlatform>,
-) -> EnvironmentRuntimePlatformInfo {
-    platform
-        .map(|platform| EnvironmentRuntimePlatformInfo {
-            environment_os: Some(platform.os.as_str().to_owned()),
-            environment_arch: Some(platform.arch.as_str().to_owned()),
-        })
-        .unwrap_or_else(EnvironmentRuntimePlatformInfo::empty)
-}
-
-#[cfg(feature = "local_tty")]
-fn platform_info_for_session<T: View>(
-    session_id: SessionId,
-    ctx: &ViewContext<T>,
-) -> EnvironmentRuntimePlatformInfo {
-    let manager = EnvironmentRuntimeTransportManager::handle(ctx);
-    platform_info_from_platform(manager.as_ref(ctx).platform_for_session(session_id))
-}
-
-#[cfg(feature = "local_tty")]
 pub(crate) fn subscribe_to_terminal_events<T, F>(ctx: &mut ViewContext<T>, mut callback: F)
 where
     T: View,
@@ -2303,23 +2233,17 @@ where
             EnvironmentRuntimeTransportEvent::SessionConnected { session_id, .. } => {
                 EnvironmentRuntimeTerminalEvent::SessionConnected {
                     session_id: *session_id,
-                    platform: platform_info_for_session(*session_id, ctx),
                 }
             }
             EnvironmentRuntimeTransportEvent::SessionConnectionFailed {
-                session_id,
-                phase,
-                error,
+                session_id, error, ..
             } => EnvironmentRuntimeTerminalEvent::SessionConnectionFailed {
                 session_id: *session_id,
-                phase: *phase,
                 error: error.clone(),
-                platform: platform_info_for_session(*session_id, ctx),
             },
             EnvironmentRuntimeTransportEvent::SessionDisconnected { session_id, .. } => {
                 EnvironmentRuntimeTerminalEvent::SessionDisconnected {
                     session_id: *session_id,
-                    platform: platform_info_for_session(*session_id, ctx),
                 }
             }
             EnvironmentRuntimeTransportEvent::SessionDeregistered { session_id } => {
@@ -2331,33 +2255,22 @@ where
                 EnvironmentRuntimeTerminalEvent::BinaryInstallComplete {
                     session_id: *session_id,
                     result: result.clone(),
-                    platform: platform_info_for_session(*session_id, ctx),
                 }
             }
             EnvironmentRuntimeTransportEvent::BinaryCheckComplete {
-                session_id,
-                result,
-                remote_platform,
-                ..
+                session_id, result, ..
             } => EnvironmentRuntimeTerminalEvent::BinaryCheckComplete {
                 session_id: *session_id,
                 result: result.clone(),
-                platform: platform_info_from_platform(remote_platform.as_ref()),
             },
-            EnvironmentRuntimeTransportEvent::ClientRequestFailed {
-                session_id,
-                operation,
-                error_kind,
-            } => EnvironmentRuntimeTerminalEvent::ClientRequestFailed {
-                session_id: *session_id,
-                operation: *operation,
-                error_kind: *error_kind,
-                platform: platform_info_for_session(*session_id, ctx),
-            },
+            EnvironmentRuntimeTransportEvent::ClientRequestFailed { session_id, .. } => {
+                EnvironmentRuntimeTerminalEvent::ClientRequestFailed {
+                    session_id: *session_id,
+                }
+            }
             EnvironmentRuntimeTransportEvent::ServerMessageDecodingError { session_id } => {
                 EnvironmentRuntimeTerminalEvent::ServerMessageDecodingError {
                     session_id: *session_id,
-                    platform: platform_info_for_session(*session_id, ctx),
                 }
             }
             EnvironmentRuntimeTransportEvent::NavigatedToDirectory {
@@ -2619,311 +2532,9 @@ pub(crate) fn connect_session_transport<T: Entity>(
     });
 }
 
-impl EnvironmentRuntime {
-    fn dormant(environment: EnvironmentSnapshot) -> Self {
-        Self {
-            environment,
-            status: EnvironmentRuntimeStatus::Dormant,
-            synthetic_session_id: None,
-            host_id: None,
-            control_path: None,
-            last_error: None,
-        }
-    }
-}
-
-#[derive(Default)]
-pub(crate) struct EnvironmentRuntimeRegistry {
-    runtimes: HashMap<String, EnvironmentRuntime>,
-    session_to_authority: HashMap<SessionId, String>,
-}
-
-impl EnvironmentRuntimeRegistry {
-    pub(crate) fn upsert_environment(&mut self, environment: EnvironmentSnapshot) {
-        let authority = environment.authority_key.clone();
-        self.runtimes
-            .entry(authority)
-            .and_modify(|runtime| runtime.environment = environment.clone())
-            .or_insert_with(|| EnvironmentRuntime::dormant(environment));
-    }
-
-    pub(crate) fn mark_connecting(
-        &mut self,
-        mut environment: EnvironmentSnapshot,
-        session_id: SessionId,
-        control_path: PathBuf,
-    ) {
-        environment.lifecycle_state = EnvironmentLifecycleState::Connecting;
-        let authority = environment.authority_key.clone();
-        if let Some(previous_session_id) = self
-            .runtimes
-            .get(&authority)
-            .and_then(|runtime| runtime.synthetic_session_id)
-        {
-            self.session_to_authority.remove(&previous_session_id);
-        }
-        self.session_to_authority
-            .insert(session_id, authority.clone());
-        self.runtimes.insert(
-            authority,
-            EnvironmentRuntime {
-                environment,
-                status: EnvironmentRuntimeStatus::Connecting,
-                synthetic_session_id: Some(session_id),
-                host_id: None,
-                control_path: Some(control_path),
-                last_error: None,
-            },
-        );
-    }
-
-    pub(crate) fn mark_installing_session(&mut self, session_id: SessionId) -> Option<String> {
-        let authority = self.current_authority_for_session(session_id)?.to_owned();
-        let runtime = self.runtimes.get_mut(&authority)?;
-        runtime.status = EnvironmentRuntimeStatus::Installing;
-        runtime.environment.lifecycle_state = EnvironmentLifecycleState::Installing;
-        self.session_to_authority
-            .insert(session_id, authority.clone());
-        Some(authority)
-    }
-
-    pub(crate) fn mark_connected_session(
-        &mut self,
-        session_id: SessionId,
-        host_id: HostId,
-    ) -> Option<String> {
-        let authority = self.current_authority_for_session(session_id)?.to_owned();
-        let runtime = self.runtimes.get_mut(&authority)?;
-        runtime.status = EnvironmentRuntimeStatus::Connected;
-        runtime.host_id = Some(host_id);
-        runtime.last_error = None;
-        runtime.environment.lifecycle_state = EnvironmentLifecycleState::Connected;
-        self.session_to_authority
-            .insert(session_id, authority.clone());
-        Some(authority)
-    }
-
-    pub(crate) fn mark_error_for_session(
-        &mut self,
-        session_id: SessionId,
-        error: String,
-    ) -> Option<String> {
-        let authority = self.current_authority_for_session(session_id)?.to_owned();
-        self.mark_error_for_authority(&authority, error);
-        self.session_to_authority
-            .insert(session_id, authority.clone());
-        Some(authority)
-    }
-
-    pub(crate) fn mark_error_for_authority(&mut self, authority: &str, error: String) {
-        if let Some(runtime) = self.runtimes.get_mut(authority) {
-            runtime.status = EnvironmentRuntimeStatus::Error;
-            runtime.last_error = Some(error);
-            runtime.environment.lifecycle_state = EnvironmentLifecycleState::Error;
-        }
-    }
-
-    pub(crate) fn authority_for_session(&self, session_id: SessionId) -> Option<&str> {
-        self.session_to_authority
-            .get(&session_id)
-            .map(String::as_str)
-    }
-
-    pub(crate) fn authority_for_session_or_synthetic(&self, session_id: SessionId) -> Option<&str> {
-        self.authority_for_session(session_id).or_else(|| {
-            self.runtimes
-                .iter()
-                .find_map(|(authority, runtime)| {
-                    (runtime.synthetic_session_id == Some(session_id)).then_some(authority)
-                })
-                .map(String::as_str)
-        })
-    }
-
-    pub(crate) fn current_authority_for_session(&self, session_id: SessionId) -> Option<&str> {
-        let authority = self.authority_for_session_or_synthetic(session_id)?;
-        let runtime = self.runtimes.get(authority)?;
-        (runtime.synthetic_session_id == Some(session_id)).then_some(authority)
-    }
-
-    pub(crate) fn runtime_for_authority(&self, authority: &str) -> Option<&EnvironmentRuntime> {
-        self.runtimes.get(authority)
-    }
-
-    pub(crate) fn snapshot_for_authority(&self, authority: &str) -> Option<EnvironmentSnapshot> {
-        self.runtimes
-            .get(authority)
-            .map(|runtime| runtime.environment.clone())
-    }
-
-    pub(crate) fn environment_snapshots(&self) -> Vec<EnvironmentSnapshot> {
-        let mut environments = self
-            .runtimes
-            .values()
-            .map(|runtime| runtime.environment.clone())
-            .collect::<Vec<_>>();
-        environments.sort_by(|left, right| {
-            left.label
-                .to_lowercase()
-                .cmp(&right.label.to_lowercase())
-                .then_with(|| left.authority_key.cmp(&right.authority_key))
-        });
-        environments
-    }
-
-    pub(crate) fn session_for_authority(&self, authority: &str) -> Option<SessionId> {
-        self.runtimes.get(authority)?.synthetic_session_id
-    }
-
-    pub(crate) fn has_bootstrap_session(&self, authority: &str) -> bool {
-        let Some(runtime) = self.runtimes.get(authority) else {
-            return false;
-        };
-        match runtime.status {
-            EnvironmentRuntimeStatus::Connecting | EnvironmentRuntimeStatus::Installing => {
-                runtime.synthetic_session_id.is_some()
-            }
-            EnvironmentRuntimeStatus::Dormant
-            | EnvironmentRuntimeStatus::Connected
-            | EnvironmentRuntimeStatus::Error => false,
-        }
-    }
-
-    pub(crate) fn connected_session_for_authority(
-        &self,
-        authority: &str,
-    ) -> Option<(SessionId, HostId)> {
-        let runtime = self.runtimes.get(authority)?;
-        if runtime.status != EnvironmentRuntimeStatus::Connected {
-            return None;
-        }
-        Some((runtime.synthetic_session_id?, runtime.host_id.clone()?))
-    }
-
-    pub(crate) fn connected_target_for_authority(
-        &self,
-        authority: &str,
-    ) -> Option<EnvironmentRuntimeTarget> {
-        let runtime = self.runtimes.get(authority)?;
-        if runtime.status != EnvironmentRuntimeStatus::Connected {
-            return None;
-        }
-        Some(EnvironmentRuntimeTarget {
-            authority: authority.to_owned(),
-            session_id: runtime.synthetic_session_id?,
-            host_id: runtime.host_id.clone()?,
-            root: runtime.environment.active_workspace_root.clone(),
-        })
-    }
-
-    pub(crate) fn connected_session_for_host(
-        &self,
-        host_id: &HostId,
-    ) -> Option<(String, SessionId)> {
-        self.runtimes.iter().find_map(|(authority, runtime)| {
-            if runtime.status == EnvironmentRuntimeStatus::Connected
-                && runtime.host_id.as_ref() == Some(host_id)
-            {
-                Some((authority.clone(), runtime.synthetic_session_id?))
-            } else {
-                None
-            }
-        })
-    }
-
-    pub(crate) fn remove_authority(&mut self, authority: &str) -> Option<EnvironmentRuntime> {
-        let runtime = self.runtimes.remove(authority)?;
-        self.session_to_authority
-            .retain(|_, session_authority| session_authority != authority);
-        Some(runtime)
-    }
-
-    pub(crate) fn control_path_for_session(&self, session_id: SessionId) -> Option<PathBuf> {
-        let authority = self.current_authority_for_session(session_id)?;
-        self.runtimes.get(authority)?.control_path.clone()
-    }
-
-    pub(crate) fn lifecycle_for_authority(
-        &self,
-        authority: &str,
-    ) -> Option<EnvironmentLifecycleState> {
-        self.runtimes
-            .get(authority)
-            .map(|runtime| runtime.status.lifecycle_state())
-    }
-
-    pub(crate) fn terminal_spawn_for_target(
-        &self,
-        target: EnvironmentRuntimeTarget,
-        root: impl Into<String>,
-    ) -> EnvironmentRuntimeTerminalSpawn {
-        EnvironmentRuntimeTerminalSpawn {
-            target,
-            root: root.into(),
-        }
-    }
-
-    pub(crate) fn terminal_bootstrap_target_for_environment(
-        &self,
-        environment: &EnvironmentSnapshot,
-    ) -> Option<TerminalBootstrapTarget> {
-        if !uses_terminal_bootstrap(environment) {
-            return None;
-        }
-        Some(TerminalBootstrapTarget {
-            authority: environment.authority_key.clone(),
-            root: environment.active_workspace_root.clone(),
-        })
-    }
-
-    pub(crate) fn terminal_bootstrap_spawn_for_target(
-        &self,
-        target: TerminalBootstrapTarget,
-    ) -> TerminalBootstrapSpawn {
-        let initial_directory = target
-            .root
-            .as_ref()
-            .filter(|root| !root.trim().is_empty())
-            .map(PathBuf::from);
-        TerminalBootstrapSpawn {
-            target,
-            initial_directory,
-        }
-    }
-
-    pub(crate) fn spawn_plan_for_environment(
-        &self,
-        environment: &EnvironmentSnapshot,
-    ) -> EnvironmentRuntimeSpawnPlan {
-        if let Some(target) = self.terminal_bootstrap_target_for_environment(environment) {
-            return EnvironmentRuntimeSpawnPlan::TerminalBootstrap(target);
-        }
-
-        self.connected_target_for_authority(&environment.authority_key)
-            .map(|mut target| {
-                target.root = environment.active_workspace_root.clone();
-                EnvironmentRuntimeSpawnPlan::RuntimeTarget(target)
-            })
-            .unwrap_or(EnvironmentRuntimeSpawnPlan::RuntimeBootstrap)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
-    use warp_core::{HostId, SessionId};
-
     use super::*;
-
-    fn ssh_environment(authority_key: &str) -> EnvironmentSnapshot {
-        runtime_transport_error_snapshot(
-            authority_key.to_owned(),
-            authority_key.to_owned(),
-            Some(authority_key.to_owned()),
-            Some("/".to_owned()),
-        )
-    }
 
     #[test]
     fn terminal_bootstrap_environment_display_has_label_like_runtime_environments() {
@@ -3013,75 +2624,6 @@ mod tests {
             workspace_root_candidate_for_authority("ssh:ssh-config:test", "   ".to_owned()),
             None,
             "empty roots are still ignored"
-        );
-    }
-
-    #[test]
-    fn registry_rejects_stale_session_transitions_after_reconnect() {
-        let mut registry = EnvironmentRuntimeRegistry::default();
-        let first_session = SessionId::from(1);
-        let second_session = SessionId::from(2);
-
-        registry.mark_connecting(
-            ssh_environment("ssh:example"),
-            first_session,
-            PathBuf::from("/tmp/first.sock"),
-        );
-        registry.mark_connecting(
-            ssh_environment("ssh:example"),
-            second_session,
-            PathBuf::from("/tmp/second.sock"),
-        );
-
-        assert_eq!(
-            registry.authority_for_session(first_session),
-            None,
-            "reconnect should remove the previous session mapping for this authority"
-        );
-        assert_eq!(
-            registry.current_authority_for_session(first_session),
-            None,
-            "old bootstrap events must not be able to mutate the replacement runtime"
-        );
-        assert_eq!(
-            registry.control_path_for_session(first_session),
-            None,
-            "old bootstrap events must not reuse the replacement runtime socket"
-        );
-        assert_eq!(
-            registry.mark_installing_session(first_session),
-            None,
-            "old binary-check completion must not move the new runtime to installing"
-        );
-        assert_eq!(
-            registry.mark_connected_session(first_session, HostId::new("old-host".to_owned())),
-            None,
-            "old connected event must not mark the new runtime connected"
-        );
-        assert_eq!(
-            registry.mark_error_for_session(first_session, "old failure".to_owned()),
-            None,
-            "old failure must not put the new runtime in error state"
-        );
-
-        assert_eq!(
-            registry.current_authority_for_session(second_session),
-            Some("ssh:example")
-        );
-        assert_eq!(
-            registry.control_path_for_session(second_session),
-            Some(PathBuf::from("/tmp/second.sock"))
-        );
-        assert_eq!(
-            registry.lifecycle_for_authority("ssh:example"),
-            Some(EnvironmentLifecycleState::Connecting)
-        );
-
-        registry.remove_authority("ssh:example");
-        assert_eq!(
-            registry.authority_for_session(second_session),
-            None,
-            "disconnect should remove all session mappings for this authority"
         );
     }
 }

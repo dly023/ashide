@@ -20,7 +20,6 @@ use warpui::{
 };
 
 use crate::{
-    ai::agent::conversation::AIConversationId,
     appearance::Appearance,
     editor::{
         EditorOptions, EditorView, EnterAction, EnterSettings, Event as EditorEvent,
@@ -80,7 +79,6 @@ pub fn init(app: &mut AppContext) {
 
 #[derive(Clone)]
 pub struct SessionBridgeEditDialogSource {
-    pub conversation_id: Option<AIConversationId>,
     pub source_environment_authority_key: Option<String>,
     pub conversation_title: String,
     pub available_fork_targets: Vec<SessionBridgeForkTarget>,
@@ -90,7 +88,6 @@ pub struct SessionBridgeEditDialogSource {
 
 #[derive(Debug, Clone)]
 pub struct SessionBridgeEditRequest {
-    pub conversation_id: Option<AIConversationId>,
     pub source_environment_authority_key: Option<String>,
     pub fork_target: SessionBridgeForkTarget,
     pub source_session: SessionIr,
@@ -306,7 +303,6 @@ impl SessionBridgeEditDialog {
         }
 
         Ok(SessionBridgeEditRequest {
-            conversation_id: source.conversation_id,
             source_environment_authority_key: source.source_environment_authority_key.clone(),
             fork_target,
             source_session: source.source_session.clone(),
@@ -764,7 +760,6 @@ mod tests {
             dialog.update(&mut app, |dialog, ctx| {
                 dialog.set_source(
                     SessionBridgeEditDialogSource {
-                        conversation_id: None,
                         source_environment_authority_key: Some("ssh:dnyx216".to_owned()),
                         conversation_title: "Editable source".to_owned(),
                         available_fork_targets: vec![
@@ -816,7 +811,6 @@ mod tests {
             dialog.update(&mut app, |dialog, ctx| {
                 dialog.set_source(
                     SessionBridgeEditDialogSource {
-                        conversation_id: None,
                         source_environment_authority_key: None,
                         conversation_title: "Editable source".to_owned(),
                         available_fork_targets: vec![SessionBridgeForkTarget::Ashide],

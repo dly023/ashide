@@ -689,7 +689,6 @@ impl RepositoryState {
 
 struct RelocateCommentsResult {
     comments: Vec<AttachedReviewComment>,
-    fallback_count: usize,
 }
 
 /// State shared among the entire code review view.
@@ -3488,7 +3487,6 @@ impl CodeReviewView {
         repo_path: &Path,
         ctx: &mut ViewContext<Self>,
     ) -> RelocateCommentsResult {
-        let mut fallback_count = 0;
         let editor_file_paths = state.editor_absolute_file_paths(repo_path);
 
         let relocated_comments = comments
@@ -3539,7 +3537,6 @@ impl CodeReviewView {
                     });
 
                 if used_fallback {
-                    fallback_count += 1;
                     if FeatureFlag::PRCommentsSlashCommand.is_enabled() {
                         comment.outdated = true;
                     }
@@ -3558,7 +3555,6 @@ impl CodeReviewView {
 
         RelocateCommentsResult {
             comments: relocated_comments,
-            fallback_count,
         }
     }
 

@@ -30,7 +30,7 @@ use crate::{
 
 use ai::diff_validation::DiffDelta;
 use itertools::Itertools;
-use languages::{language_by_filename, language_by_name, Language};
+use languages::{language_by_filename, Language};
 use line_ending::LineEnding;
 use string_offset::CharOffset;
 use syntax_tree::{ColorMap, DecorationStateEvent, SyntaxTreeState};
@@ -173,18 +173,6 @@ pub struct HoverableLink {
 }
 
 impl HoverableLink {
-    pub fn new(range: Range<CharOffset>) -> Self {
-        Self {
-            range,
-            on_click: None,
-        }
-    }
-
-    pub fn with_on_click(mut self, on_click: Box<dyn Fn(&mut AppContext)>) -> Self {
-        self.on_click = Some(on_click);
-        self
-    }
-
     pub fn range(&self) -> &Range<CharOffset> {
         &self.range
     }
@@ -516,14 +504,6 @@ impl CodeEditorModel {
 
     pub fn hovered_symbol_range(&self) -> Option<&HoverableLink> {
         self.hovered_symbol_range.as_ref()
-    }
-
-    pub fn set_hovered_symbol_range(&mut self, range: Option<HoverableLink>) -> bool {
-        if self.hovered_symbol_range.is_none() && range.is_none() {
-            return false;
-        }
-        self.hovered_symbol_range = range;
-        true
     }
 
     pub fn maybe_click_on_hovered_link(&self, offset: &CharOffset, ctx: &mut ModelContext<Self>) {
@@ -903,10 +883,6 @@ impl CodeEditorModel {
     }
 
     /// Returns the character at the given offset in the buffer, if it exists.
-    pub fn char_at(&self, offset: CharOffset, ctx: &AppContext) -> Option<char> {
-        self.content.as_ref(ctx).char_at(offset)
-    }
-
     pub fn buffer_selection_model(&self) -> &ModelHandle<BufferSelectionModel> {
         &self.selection_model
     }
@@ -1152,13 +1128,6 @@ impl CodeEditorModel {
     pub fn set_language_with_path(&mut self, path: &Path, ctx: &mut ModelContext<Self>) {
         let language = language_by_filename(path);
 
-        if let Some(language) = language {
-            self.set_language(language, ctx);
-        }
-    }
-
-    pub fn set_language_with_name(&mut self, name: &str, ctx: &mut ModelContext<Self>) {
-        let language = language_by_name(name);
         if let Some(language) = language {
             self.set_language(language, ctx);
         }
@@ -1694,14 +1663,6 @@ impl CodeEditorModel {
 
         get_word_range_at_offset(buffer, cursor_offset, None)
             .map(|range| buffer.text_in_range(range).into_string())
-    }
-
-    pub fn word_range_at_offset(
-        &self,
-        offset: CharOffset,
-        app: &AppContext,
-    ) -> Option<Range<CharOffset>> {
-        get_word_range_at_offset(self.content().as_ref(app), offset, None)
     }
 
     pub fn run_search(

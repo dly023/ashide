@@ -4,47 +4,9 @@
 //! dropdown, the conversation details sidebar, etc. — should source its label,
 //! icon, and brand color from here so the two surfaces cannot drift.
 
-use pathfinder_color::ColorU;
 use warp_cli::agent::Harness;
 
 use crate::ai::agent::conversation::AIAgentHarness;
-use crate::ai::blocklist::CLAUDE_ORANGE;
-use crate::terminal::cli_agent::GEMINI_BLUE;
-use crate::ui_components::icons::Icon;
-
-/// User-visible display name for a [`Harness`].
-pub fn display_name(harness: Harness) -> &'static str {
-    match harness {
-        Harness::Oz => "Ashide Agent",
-        Harness::Claude => "Claude Code",
-        Harness::OpenCode => "OpenCode",
-        Harness::Gemini => "Gemini CLI",
-        Harness::Unknown => "Unknown",
-    }
-}
-
-/// Leading icon for a [`Harness`].
-pub fn icon_for(harness: Harness) -> Icon {
-    match harness {
-        Harness::Oz => Icon::Zap,
-        Harness::Claude => Icon::ClaudeLogo,
-        Harness::OpenCode => Icon::OpenCodeLogo,
-        Harness::Gemini => Icon::GeminiLogo,
-        Harness::Unknown => Icon::HelpCircle,
-    }
-}
-
-/// Brand tint for a [`Harness`]'s icon. `None` means "use the surface's
-/// default foreground color".
-pub fn brand_color(harness: Harness) -> Option<ColorU> {
-    match harness {
-        Harness::Oz => None,
-        Harness::Claude => Some(CLAUDE_ORANGE),
-        Harness::OpenCode => None,
-        Harness::Gemini => Some(GEMINI_BLUE),
-        Harness::Unknown => None,
-    }
-}
 
 /// Map [`AIAgentHarness`] (from `ServerAIConversationMetadata`) to the
 /// canonical [`Harness`].

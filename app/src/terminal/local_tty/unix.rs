@@ -1,6 +1,8 @@
 //! TTY related functionality.
 use crate::terminal::bootstrap::raw_init_shell_script_for_shell;
-use crate::terminal::capability_environment::terminal_capability_environment_variables;
+use crate::terminal::capability_environment::{
+    terminal_capability_environment_variables, terminal_capability_environment_variables_to_remove,
+};
 use crate::terminal::local_tty::docker_sandbox::{
     DockerSandboxShellStarter, DOCKER_SANDBOX_HOME_DIR,
 };
@@ -260,6 +262,9 @@ fn build_host_shell_command(
 
     for (key, value) in terminal_capability_environment_variables() {
         builder.env(key, value);
+    }
+    for key in terminal_capability_environment_variables_to_remove() {
+        builder.env_remove(*key);
     }
 
     // Prevent child processes from inheriting startup notification env.
@@ -743,6 +748,9 @@ fn build_docker_sandbox_command(
     builder.env("HOME", &home_dir);
     for (key, value) in terminal_capability_environment_variables() {
         builder.env(key, value);
+    }
+    for key in terminal_capability_environment_variables_to_remove() {
+        builder.env_remove(*key);
     }
     builder.env_remove("DESKTOP_STARTUP_ID");
     builder.env("SHELL", docker_starter.logical_shell_path());

@@ -258,13 +258,6 @@ pub(crate) fn skill_descriptor_for_path(
     skill_descriptor_for_reference(&SkillReference::Path(path.to_path_buf()), app)
 }
 
-pub(crate) fn skill_name_for_reference(
-    reference: &SkillReference,
-    app: &AppContext,
-) -> Option<String> {
-    skill_descriptor_for_reference(reference, app).map(|skill| skill.name)
-}
-
 pub(crate) fn inventory_items_from_skill_descriptors(
     skills: Vec<SkillDescriptor>,
 ) -> Vec<SkillInventoryItem> {

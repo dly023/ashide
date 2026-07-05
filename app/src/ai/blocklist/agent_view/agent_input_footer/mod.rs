@@ -176,7 +176,6 @@ pub struct AgentInputFooter {
     // Ashide Wave 7-3:`environment_selector` field was removed with the hosted-mode footer.
     reasoning_depth_selector: ViewHandle<ReasoningDepthSelector>,
     prompt_alert: ViewHandle<PromptAlertView>,
-    ambient_agent_view_model: ModelHandle<AmbientAgentViewModel>,
     left_display_chips: Vec<ViewHandle<DisplayChip>>,
     right_display_chips: Vec<ViewHandle<DisplayChip>>,
     // Separate set of display chips for the CLI agent footer.
@@ -665,7 +664,6 @@ impl AgentInputFooter {
 
         let mut me = Self {
             terminal_view_id,
-            ambient_agent_view_model,
             nld_button,
             mic_button,
             file_button,

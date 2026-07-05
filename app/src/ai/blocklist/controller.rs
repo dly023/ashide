@@ -45,9 +45,9 @@ use crate::ai::llms::LLMId;
 use crate::ai::{
     agent::{
         conversation::AIConversationId, AIAgentActionResultType, AIAgentAttachment, AIAgentContext,
-        AIAgentExchangeId, AIAgentInput, AIAgentOutputStatus, AIIdentifiers, EntrypointType,
-        FinishedAIAgentOutput, MessageId, RenderableAIError, RequestCost, RequestMetadata,
-        StaticQueryType, UserQueryMode,
+        AIAgentExchangeId, AIAgentInput, AIAgentOutputStatus, AIIdentifiers,
+        ActionResultContinuationDecision, EntrypointType, FinishedAIAgentOutput, MessageId,
+        RenderableAIError, RequestCost, RequestMetadata, StaticQueryType, UserQueryMode,
     },
     llms::LLMPreferences,
 };
@@ -502,9 +502,12 @@ impl BlocklistAIController {
                 cancellation_reason.is_some_and(|reason| reason.is_lrc_command_completed());
             let should_trigger_follow_up_request = (!is_passive_code_diff
                 && !is_lrc_command_completed
-                && finished_action_results
-                    .iter()
-                    .any(|result| result.result.should_trigger_request_upon_completion()))
+                && finished_action_results.iter().any(|result| {
+                    matches!(
+                        result.result.continuation_decision(),
+                        ActionResultContinuationDecision::SendFollowUpRequest
+                    )
+                }))
                 || has_manual_follow_up;
             if !should_trigger_follow_up_request {
                 // We also check if there's an in-flight req, because it's possible that this
@@ -2200,7 +2203,7 @@ impl BlocklistAIController {
                         &diagnostic_context,
                         ReadinessDiagnosticLevel::Debug,
                     );
-                    let progress = self.synthesize_byop_missing_cancellation_results(
+                    let progress = Self::synthesize_byop_missing_cancellation_results(
                         conversation_data.id,
                         &tool_calls,
                         ctx,
@@ -2343,7 +2346,7 @@ impl BlocklistAIController {
                 };
                 let task_id = result.task_id.to_string();
                 let tool_call_id = result.id.to_string();
-                self.has_persisted_tool_result(conversation_id, &task_id, &tool_call_id, ctx)
+                Self::has_persisted_tool_result(conversation_id, &task_id, &tool_call_id, ctx)
                     .then_some((task_id, tool_call_id))
             })
             .collect::<HashSet<_>>();
@@ -2409,7 +2412,7 @@ impl BlocklistAIController {
         for result in results {
             let task_id = result.task_id.to_string();
             let tool_call_id = result.id.to_string();
-            if self.has_persisted_tool_result(conversation_id, &task_id, &tool_call_id, ctx) {
+            if Self::has_persisted_tool_result(conversation_id, &task_id, &tool_call_id, ctx) {
                 continue;
             }
             grouped_messages
@@ -2418,19 +2421,7 @@ impl BlocklistAIController {
                 .push(Self::byop_action_result_message(&request_id, result));
         }
 
-        let mut appended = 0;
-        for (task_id, messages) in grouped_messages {
-            appended +=
-                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, ctx| {
-                    history_model.append_byop_preflight_messages_to_task(
-                        conversation_id,
-                        task_id,
-                        messages,
-                        ctx,
-                    )
-                })?;
-        }
-        Ok(appended)
+        Self::append_grouped_byop_preflight_messages(conversation_id, grouped_messages, ctx)
     }
 
     fn byop_unfinished_live_tool_calls(
@@ -2438,6 +2429,17 @@ impl BlocklistAIController {
         conversation_id: AIConversationId,
         request_params: &api::RequestParams,
         ctx: &mut ModelContext<Self>,
+    ) -> Vec<crate::ai::byop_readiness::LiveToolCall> {
+        Self::collect_byop_unfinished_live_tool_calls(request_params, |task_id, tool_call_id| {
+            self.action_model
+                .as_ref(ctx)
+                .has_unfinished_action_for_tool_call(conversation_id, task_id, tool_call_id, ctx)
+        })
+    }
+
+    fn collect_byop_unfinished_live_tool_calls(
+        request_params: &api::RequestParams,
+        mut has_unfinished_action_for_tool_call: impl FnMut(&str, &str) -> bool,
     ) -> Vec<crate::ai::byop_readiness::LiveToolCall> {
         use crate::ai::agent::task::helper::{ToolCallExt, ToolExt};
 
@@ -2450,15 +2452,7 @@ impl BlocklistAIController {
                     return None;
                 };
                 if tool_call.subagent().is_some()
-                    || !self
-                        .action_model
-                        .as_ref(ctx)
-                        .has_unfinished_action_for_tool_call(
-                            conversation_id,
-                            &msg.task_id,
-                            &tool_call.tool_call_id,
-                            ctx,
-                        )
+                    || !has_unfinished_action_for_tool_call(&msg.task_id, &tool_call.tool_call_id)
                 {
                     return None;
                 }
@@ -2569,7 +2563,7 @@ impl BlocklistAIController {
             }
 
             keys_to_remove.insert(key.clone());
-            if self.has_persisted_tool_result(conversation_id, &task_id, &tool_call_id, ctx) {
+            if Self::has_persisted_tool_result(conversation_id, &task_id, &tool_call_id, ctx) {
                 already_persisted += 1;
                 continue;
             }
@@ -2580,21 +2574,17 @@ impl BlocklistAIController {
                 .push(Self::byop_action_result_message(&request_id, result));
         }
 
-        let appended = self.append_grouped_byop_preflight_messages(
-            conversation_id,
-            grouped_messages,
-            ctx,
-        )?;
+        let appended =
+            Self::append_grouped_byop_preflight_messages(conversation_id, grouped_messages, ctx)?;
 
         let removed = request_input.remove_action_results_by_tool_call_id(&keys_to_remove);
         Ok(appended + removed + already_persisted)
     }
 
     fn append_grouped_byop_preflight_messages(
-        &self,
         conversation_id: AIConversationId,
         grouped_messages: HashMap<TaskId, Vec<warp_multi_agent_api::Message>>,
-        ctx: &mut ModelContext<Self>,
+        ctx: &mut AppContext,
     ) -> anyhow::Result<usize> {
         let mut appended = 0;
         for (task_id, messages) in grouped_messages {
@@ -2612,10 +2602,9 @@ impl BlocklistAIController {
     }
 
     fn synthesize_byop_missing_cancellation_results(
-        &self,
         conversation_id: AIConversationId,
         tool_calls: &[crate::ai::byop_readiness::ToolCallRef],
-        ctx: &mut ModelContext<Self>,
+        ctx: &mut AppContext,
     ) -> anyhow::Result<usize> {
         let request_id = format!("byop-preflight:{}", uuid::Uuid::new_v4());
         let mut grouped_messages: HashMap<TaskId, Vec<warp_multi_agent_api::Message>> =
@@ -2625,7 +2614,7 @@ impl BlocklistAIController {
         for tool_call in tool_calls {
             let task_id = &tool_call.key.task_id;
             let tool_call_id = &tool_call.key.tool_call_id;
-            if self.has_persisted_tool_result(conversation_id, task_id, tool_call_id, ctx) {
+            if Self::has_persisted_tool_result(conversation_id, task_id, tool_call_id, ctx) {
                 already_persisted += 1;
                 continue;
             }
@@ -2638,20 +2627,16 @@ impl BlocklistAIController {
                 ));
         }
 
-        let appended = self.append_grouped_byop_preflight_messages(
-            conversation_id,
-            grouped_messages,
-            ctx,
-        )?;
+        let appended =
+            Self::append_grouped_byop_preflight_messages(conversation_id, grouped_messages, ctx)?;
         Ok(appended + already_persisted)
     }
 
     fn has_persisted_tool_result(
-        &self,
         conversation_id: AIConversationId,
         task_id: &str,
         tool_call_id: &str,
-        ctx: &mut ModelContext<Self>,
+        ctx: &AppContext,
     ) -> bool {
         // 持久化 protobuf `ToolCallResult` 协议只携带 `tool_call_id`,没有 assistant_message_id 反向引用,
         // 因此最严格的匹配只能做到 (task_id, tool_call_id) 二元组。外层 `get_task(&task_id)` 已经
@@ -3828,6 +3813,10 @@ impl BlocklistAIController {
 impl Entity for BlocklistAIController {
     type Event = BlocklistAIControllerEvent;
 }
+
+#[cfg(test)]
+#[path = "controller_tests.rs"]
+mod tests;
 
 #[derive(Clone)]
 pub struct ClientIdentifiers {

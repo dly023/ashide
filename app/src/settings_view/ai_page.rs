@@ -107,7 +107,7 @@ impl AISubpage {
         }
     }
 }
-use crate::ai::{AIRequestUsageModel, AIRequestUsageModelEvent};
+use crate::ai::AIRequestUsageModel;
 use crate::menu::{MenuItem, MenuItemFields};
 use crate::ui_components::icons::Icon;
 use crate::view_components::dropdown::DropdownAction;
@@ -377,8 +377,8 @@ impl AISettingsPageView {
 
         let workspace = UserWorkspaces::handle(ctx);
         let ai_autonomy_settings = workspace.as_ref(ctx).ai_autonomy_settings();
-        ctx.subscribe_to_model(&workspace, |me, workspace, event, ctx| {
-            if let UserWorkspacesEvent::TeamsChanged = event {
+        ctx.subscribe_to_model(&workspace, |me, workspace, event, ctx| match event {
+            UserWorkspacesEvent::TeamsChanged => {
                 me.refresh_all_execution_profile_ui(ctx);
                 me.reset_execution_profile_mouse_state_handles(ctx);
 
@@ -1228,16 +1228,6 @@ impl AISettingsPageView {
                 });
                 ctx.notify();
             }
-        });
-
-        let ai_request_model = AIRequestUsageModel::handle(ctx);
-        ctx.subscribe_to_model(&ai_request_model, |me, _, event, ctx| {
-            match event {
-                AIRequestUsageModelEvent::RequestUsageUpdated => ctx.notify(),
-                AIRequestUsageModelEvent::RequestBonusRefunded { .. } => ctx.notify(),
-            }
-            Self::refresh_base_model_menu(&me.base_model_dropdown, ctx);
-            Self::refresh_coding_model_menu(&me.coding_model_dropdown, ctx);
         });
 
         let profile_views = Self::create_profile_views(ctx);
@@ -3280,8 +3270,15 @@ impl TypedActionView for AISettingsPageView {
                     ctx.spawn(
                         async move { models_dev::fetch_and_cache(client).await },
                         |view, result, ctx| match result {
-                            Ok(()) => view.rebuild_current_page(ctx),
-                            Err(e) => log::warn!("[models.dev] 拉取失败: {e}"),
+                            Ok(()) => {
+                                models_dev::set_fetch_failed(false);
+                                view.rebuild_current_page(ctx);
+                            }
+                            Err(e) => {
+                                models_dev::set_fetch_failed(true);
+                                log::warn!("[models.dev] 拉取失败: {e}");
+                                ctx.notify();
+                            }
                         },
                     );
                 } else {
@@ -3294,8 +3291,15 @@ impl TypedActionView for AISettingsPageView {
                 ctx.spawn(
                     async move { models_dev::fetch_and_cache(client).await },
                     |view, result, ctx| match result {
-                        Ok(()) => view.rebuild_current_page(ctx),
-                        Err(e) => log::warn!("[models.dev] 刷新失败: {e}"),
+                        Ok(()) => {
+                            models_dev::set_fetch_failed(false);
+                            view.rebuild_current_page(ctx);
+                        }
+                        Err(e) => {
+                            models_dev::set_fetch_failed(true);
+                            log::warn!("[models.dev] 刷新失败: {e}");
+                            ctx.notify();
+                        }
                     },
                 );
             }
@@ -3771,9 +3775,7 @@ impl SettingsWidget for WarpAgentHeaderWidget {
 }
 
 #[derive(Default)]
-struct UsageWidget {
-    requests_highlight_index: HighlightedHyperlink,
-}
+struct UsageWidget {}
 
 impl UsageWidget {
     fn render_request_usage_count(
@@ -6311,8 +6313,8 @@ impl AwsBedrockWidget {
         let refresh_credentials_button_clone = refresh_credentials_button.clone();
         ctx.subscribe_to_model(
             &UserWorkspaces::handle(ctx),
-            move |_, workspace, event, ctx| {
-                if let UserWorkspacesEvent::TeamsChanged = event {
+            move |_, workspace, event, ctx| match event {
+                UserWorkspacesEvent::TeamsChanged => {
                     let is_any_ai_enabled = AISettings::as_ref(ctx).is_any_ai_enabled(ctx);
                     let is_usage_enabled = is_any_ai_enabled
                         && workspace

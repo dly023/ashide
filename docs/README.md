@@ -13,6 +13,8 @@ recovery, and local/remote separation.
 - [Development guide](DEVELOPMENT.md)
 - [Roadmap](roadmap.md)
 - [Local / remote capability matrix](design/local-remote-capability-matrix.md) — audit CSV for env routing parity
+- [Local / remote fix plan](design/local-remote-fix-plan.md) — staged plan for Environment/File Browser behavior parity
+- [Agent harness tool lifecycle](design/ashide-agent-harness-tool-lifecycle.md) — tool-call continuity, MCP recovery, and BYOP repair plan
 
 ## Maintenance scripts
 

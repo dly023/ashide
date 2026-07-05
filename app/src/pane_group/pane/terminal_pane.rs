@@ -3,15 +3,12 @@
 use crate::pane_group::CodeSource;
 use std::sync::mpsc::SyncSender;
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use warp_multi_agent_api as multi_agent_api;
-
 use warpui::{
     AppContext, EntityId, ModelHandle, SingletonEntity, ViewContext, ViewHandle, WindowId,
 };
 
 use crate::{
-    ai::{blocklist::BlocklistAIHistoryModel, llms::LLMPreferences, skills::SkillManager},
+    ai::{blocklist::BlocklistAIHistoryModel, llms::LLMPreferences},
     app_state::{
         AmbientAgentPaneSnapshot, CliAgentSessionOrigin, LeafContents, TerminalPaneSnapshot,
     },
@@ -55,35 +52,6 @@ pub struct TerminalPane {
     /// by the `PaneStack`, since the terminal manager is the associated data for
     /// the backing pane view.
     view: ViewHandle<TerminalPaneView>,
-}
-
-fn resolve_runtime_skills(
-    skill_references: &[ai::skills::SkillReference],
-    ctx: &AppContext,
-) -> Result<Vec<String>, Vec<String>> {
-    let skill_manager = SkillManager::as_ref(ctx);
-    let mut runtime_skills = Vec::with_capacity(skill_references.len());
-    let mut unresolved_references = Vec::new();
-
-    for reference in skill_references {
-        let Some(skill) = skill_manager.skill_by_reference(reference) else {
-            unresolved_references.push(reference.to_string());
-            continue;
-        };
-        runtime_skills.push(serialize_proto_to_base64(&multi_agent_api::Skill::from(
-            skill.clone(),
-        )));
-    }
-
-    if unresolved_references.is_empty() {
-        Ok(runtime_skills)
-    } else {
-        Err(unresolved_references)
-    }
-}
-
-fn serialize_proto_to_base64<M: prost::Message>(message: &M) -> String {
-    BASE64_STANDARD.encode(message.encode_to_vec())
 }
 
 impl TerminalPane {
@@ -330,12 +298,9 @@ impl PaneContent for TerminalPane {
         let cli_agent_session_resume_session_id = cli_agent_session
             .as_ref()
             .and_then(|session| view.detected_cli_agent_resume_session_id(app, session.agent));
-        let detected_cli_agent_resume_session_id =
-            detected_cli_agent_session
-                .as_ref()
-                .and_then(|(agent, _)| {
-                    view.detected_cli_agent_resume_session_id(app, *agent)
-                });
+        let detected_cli_agent_resume_session_id = detected_cli_agent_session
+            .as_ref()
+            .and_then(|(agent, _)| view.detected_cli_agent_resume_session_id(app, *agent));
         let cli_agent = cli_agent_session
             .as_ref()
             .map(|session| session.agent.to_serialized_name())
