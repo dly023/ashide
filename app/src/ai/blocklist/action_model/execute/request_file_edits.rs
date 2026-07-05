@@ -13,9 +13,7 @@ use vec1::{vec1, Vec1};
 use warpui::{Entity, EntityId, ModelContext, ModelHandle, SingletonEntity as _, ViewHandle};
 
 use apply_diff_model::ApplyDiffModel;
-pub(crate) use diff_application::apply_edits;
 use diff_application::DiffApplicationError;
-pub(crate) use diff_application::FileReadResult;
 
 use crate::{
     ai::{

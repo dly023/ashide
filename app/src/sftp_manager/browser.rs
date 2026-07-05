@@ -125,8 +125,6 @@ pub enum SftpBrowserAction {
     ExecuteUpload(String),
     /// 执行保存下载（用户已选择路径）
     DownloadSaveAs { index: usize, local_path: String },
-    /// 确认移动
-    ConfirmMove,
     /// 取消传输任务
     CancelTransfer(usize),
     /// 切换传输面板可见性
@@ -238,7 +236,7 @@ impl SftpBrowserView {
             node_id,
             pane_configuration,
             focus_handle: None,
-            connection: ConnectionState::Disconnected,
+            connection: ConnectionState::Connecting,
             sftp: None,
             current_path: PathBuf::from("/"),
             entries: Vec::new(),
@@ -791,7 +789,6 @@ impl SftpBrowserView {
             Some(Dialog::DeleteConfirm { paths, is_dirs }) => (paths.clone(), is_dirs.clone()),
             Some(Dialog::Rename { .. })
             | Some(Dialog::CreateFolder { .. })
-            | Some(Dialog::Move { .. })
             | Some(Dialog::OverwriteConfirm { .. })
             | Some(Dialog::FileDetails { .. })
             | Some(Dialog::CloseTransferPanelConfirm)
@@ -1764,7 +1761,6 @@ impl TypedActionView for SftpBrowserView {
                     Some(Dialog::DeleteConfirm { .. })
                     | Some(Dialog::Rename { .. })
                     | Some(Dialog::CreateFolder { .. })
-                    | Some(Dialog::Move { .. })
                     | Some(Dialog::FileDetails { .. })
                     | Some(Dialog::CloseTransferPanelConfirm)
                     | None => {
@@ -1836,52 +1832,6 @@ impl TypedActionView for SftpBrowserView {
             }
             SftpBrowserAction::CreateFolder => {
                 self.handle_action(&SftpBrowserAction::NewFolder, ctx);
-            }
-            SftpBrowserAction::ConfirmMove => {
-                if let Some(Dialog::Move { source, target_dir }) = &self.dialog {
-                    let file_name = source
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    let target_path = match safe_join_name(target_dir, &file_name) {
-                        Some(p) => normalize_remote_path(&p),
-                        None => {
-                            self.show_error_toast(crate::t!("sftp-invalid-target-path"), ctx);
-                            self.dialog = None;
-                            ctx.notify();
-                            return;
-                        }
-                    };
-
-                    if let Some(sftp) = &self.sftp {
-                        let sftp = sftp.clone();
-                        let source = source.clone();
-                        self.dialog = None;
-                        ctx.notify();
-                        self.run_blocking(
-                            ctx,
-                            move || sftp.rename(&source, &target_path),
-                            move |me, result, ctx| {
-                                match result {
-                                    Ok(Ok(())) => {
-                                        me.refresh_dir(ctx);
-                                    }
-                                    Ok(Err(e)) => {
-                                        me.show_error_toast(
-                                            crate::t!("sftp-move-failed", error = e.to_string()),
-                                            ctx,
-                                        );
-                                    }
-                                    Err(_) => {}
-                                }
-                                ctx.notify();
-                            },
-                        );
-                    } else {
-                        self.show_error_toast(crate::t!("sftp-not-connected-to-server"), ctx);
-                        self.dialog = None;
-                    }
-                }
             }
             SftpBrowserAction::CancelTransfer(task_id) => {
                 let task_id = *task_id;
@@ -2387,13 +2337,6 @@ mod tests {
     fn test_action_cancel_transfer() {
         let action = SftpBrowserAction::CancelTransfer(42);
         assert!(matches!(action, SftpBrowserAction::CancelTransfer(42)));
-    }
-
-    /// 测试 SftpBrowserAction::ConfirmMove 变体
-    #[test]
-    fn test_action_confirm_move() {
-        let action = SftpBrowserAction::ConfirmMove;
-        assert!(matches!(action, SftpBrowserAction::ConfirmMove));
     }
 
     /// 测试 SftpBrowserAction::SetSearchFilter 变体

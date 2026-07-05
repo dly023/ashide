@@ -107,6 +107,7 @@ impl TransferTask {
     }
 
     /// 检查是否已取消
+    #[cfg(any(test, feature = "integration_tests"))]
     pub fn is_cancelled(&self) -> bool {
         self.cancel_flag.load(Ordering::SeqCst)
     }
@@ -126,10 +127,6 @@ pub enum Dialog {
     },
     CreateFolder {
         parent_path: PathBuf,
-    },
-    Move {
-        source: PathBuf,
-        target_dir: PathBuf,
     },
     OverwriteConfirm {
         source: PathBuf,
@@ -374,16 +371,6 @@ mod tests {
             },
         };
         assert!(matches!(details, Dialog::FileDetails { .. }));
-    }
-
-    /// 测试 Dialog::Move 变体
-    #[test]
-    fn test_dialog_move_variant() {
-        let dialog = Dialog::Move {
-            source: PathBuf::from("/home/user/file.txt"),
-            target_dir: PathBuf::from("/home/user/backup"),
-        };
-        assert!(matches!(dialog, Dialog::Move { .. }));
     }
 
     /// 测试 Dialog::OverwriteConfirm 变体

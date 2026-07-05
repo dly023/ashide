@@ -11,10 +11,7 @@ pub mod github_auth_notifier;
 pub mod spawn;
 pub mod task;
 
-pub use task::{
-    AgentConfigSnapshot, AgentSource, AmbientAgentTask, AmbientAgentTaskState, AttachmentInput,
-    TaskStatusMessage,
-};
+pub use task::{AgentConfigSnapshot, AgentSource, AmbientAgentTask, AttachmentInput};
 pub const USAGE_LIMIT_TASK_FAILURE_MESSAGE: &str =
     "Agent usage limit reached. Please try again later.";
 pub const SERVER_OVERLOADED_TASK_FAILURE_MESSAGE: &str =

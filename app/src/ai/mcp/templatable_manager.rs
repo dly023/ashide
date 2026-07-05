@@ -8,6 +8,8 @@ mod oauth;
 mod wasm;
 
 use std::collections::{HashMap, HashSet};
+#[cfg(not(target_family = "wasm"))]
+use std::time::{Duration, Instant};
 
 #[cfg(not(target_family = "wasm"))]
 use crate::ai::mcp::templatable::TemplatableMCPServerObject;
@@ -24,6 +26,103 @@ use warpui::{Entity, SingletonEntity};
 #[cfg(not(target_family = "wasm"))]
 type ReconnectResultSender =
     tokio::sync::oneshot::Sender<Result<rmcp::Peer<rmcp::RoleClient>, String>>;
+
+#[cfg(not(target_family = "wasm"))]
+const MCP_RECONNECT_COOLDOWN: Duration = Duration::from_secs(2);
+
+#[cfg(not(target_family = "wasm"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReconnectRegistration {
+    StartReconnect,
+    AlreadyPending,
+    CooldownActive { retry_after: Duration },
+}
+
+#[cfg(not(target_family = "wasm"))]
+struct PendingReconnections {
+    waiters: HashMap<Uuid, Vec<ReconnectResultSender>>,
+    last_attempt_started_at: HashMap<Uuid, Instant>,
+    cooldown: Duration,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl Default for PendingReconnections {
+    fn default() -> Self {
+        Self::new(MCP_RECONNECT_COOLDOWN)
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl PendingReconnections {
+    fn new(cooldown: Duration) -> Self {
+        Self {
+            waiters: HashMap::new(),
+            last_attempt_started_at: HashMap::new(),
+            cooldown,
+        }
+    }
+
+    fn register(
+        &mut self,
+        installation_uuid: Uuid,
+        result_tx: ReconnectResultSender,
+        now: Instant,
+    ) -> ReconnectRegistration {
+        if let Some(waiters) = self.waiters.get_mut(&installation_uuid) {
+            waiters.push(result_tx);
+            return ReconnectRegistration::AlreadyPending;
+        }
+
+        if let Some(retry_after) = self.cooldown_remaining(installation_uuid, now) {
+            let _ = result_tx.send(Err(Self::cooldown_message(installation_uuid, retry_after)));
+            return ReconnectRegistration::CooldownActive { retry_after };
+        }
+
+        self.waiters.insert(installation_uuid, vec![result_tx]);
+        self.last_attempt_started_at.insert(installation_uuid, now);
+        ReconnectRegistration::StartReconnect
+    }
+
+    fn notify(
+        &mut self,
+        installation_uuid: Uuid,
+        result: Result<rmcp::Peer<rmcp::RoleClient>, String>,
+    ) {
+        if let Some(waiters) = self.waiters.remove(&installation_uuid) {
+            for tx in waiters {
+                let _ = tx.send(result.clone());
+            }
+        }
+    }
+
+    fn cooldown_remaining(&self, installation_uuid: Uuid, now: Instant) -> Option<Duration> {
+        let last_attempt_started_at = self.last_attempt_started_at.get(&installation_uuid)?;
+        let elapsed = now.saturating_duration_since(*last_attempt_started_at);
+        self.cooldown
+            .checked_sub(elapsed)
+            .filter(|remaining| !remaining.is_zero())
+    }
+
+    fn cooldown_message(installation_uuid: Uuid, retry_after: Duration) -> String {
+        format!(
+            "MCP server reconnect for {installation_uuid} is cooling down; retry after {}ms",
+            retry_after.as_millis().max(1)
+        )
+    }
+
+    #[cfg(test)]
+    fn waiter_count(&self, installation_uuid: Uuid) -> usize {
+        self.waiters
+            .get(&installation_uuid)
+            .map(Vec::len)
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    fn without_cooldown() -> Self {
+        Self::new(Duration::ZERO)
+    }
+}
 
 /// Singleton model to manage state of MCP server lifecycles and panes across multiple windows
 /// (where only one MCP server pane can exist per window).
@@ -65,7 +164,7 @@ pub struct TemplatableMCPServerManager {
     /// will add their result channels here instead of starting a new reconnection. When the
     /// reconnection completes, all waiters are notified with the result.
     #[cfg(not(target_family = "wasm"))]
-    pending_reconnections: HashMap<Uuid, Vec<ReconnectResultSender>>,
+    pending_reconnections: PendingReconnections,
     /// Maps the OAuth CSRF `state` token to the installation UUID of the server whose
     /// authorization flow is in progress.
     ///
@@ -205,40 +304,6 @@ impl TemplatableMCPServerManager {
         self.server_error_messages
             .get(&installation_uuid)
             .map(|s| s.as_str())
-    }
-
-    pub fn resources(&self) -> impl Iterator<Item = &rmcp::model::Resource> {
-        self.active_servers
-            .values()
-            .flat_map(|server| server.resources.iter())
-    }
-
-    pub fn tools(&self) -> impl Iterator<Item = &rmcp::model::Tool> {
-        self.active_servers
-            .values()
-            .flat_map(|server| server.tools.iter())
-    }
-
-    /// Returns a reconnecting peer for a server that has the given resource.
-    ///
-    /// The returned peer will automatically reconnect if the underlying transport is closed.
-    #[cfg(not(target_family = "wasm"))]
-    pub fn server_with_resource(
-        &self,
-        resource: &rmcp::model::Resource,
-    ) -> Option<super::reconnecting_peer::ReconnectingPeer> {
-        let spawner = self.spawner.as_ref()?;
-        self.active_servers
-            .iter()
-            .find(|(_, server)| {
-                server
-                    .resources
-                    .iter()
-                    .any(|other_resource| resource.uri == other_resource.uri)
-            })
-            .map(|(installation_uuid, _)| {
-                super::reconnecting_peer::ReconnectingPeer::new(*installation_uuid, spawner.clone())
-            })
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -523,3 +588,181 @@ impl Entity for TemplatableMCPServerManager {
 }
 
 impl SingletonEntity for TemplatableMCPServerManager {}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests {
+    use super::*;
+
+    async fn reconnect_error(
+        rx: tokio::sync::oneshot::Receiver<Result<rmcp::Peer<rmcp::RoleClient>, String>>,
+    ) -> String {
+        rx.await
+            .expect("reconnect sender should notify waiter")
+            .err()
+            .expect("reconnect should fail in this test")
+    }
+
+    #[tokio::test]
+    async fn pending_reconnections_coalesce_waiters_for_same_installation() {
+        let installation_uuid = Uuid::new_v4();
+        let mut pending = PendingReconnections::without_cooldown();
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+        let (second_tx, second_rx) = tokio::sync::oneshot::channel();
+
+        assert_eq!(
+            pending.register(installation_uuid, first_tx, Instant::now()),
+            ReconnectRegistration::StartReconnect
+        );
+        assert_eq!(pending.waiter_count(installation_uuid), 1);
+        assert_eq!(
+            pending.register(installation_uuid, second_tx, Instant::now()),
+            ReconnectRegistration::AlreadyPending
+        );
+        assert_eq!(pending.waiter_count(installation_uuid), 2);
+
+        pending.notify(installation_uuid, Err("restart failed".to_owned()));
+
+        assert_eq!(pending.waiter_count(installation_uuid), 0);
+        assert_eq!(reconnect_error(first_rx).await, "restart failed");
+        assert_eq!(reconnect_error(second_rx).await, "restart failed");
+    }
+
+    #[tokio::test]
+    async fn pending_reconnections_allow_new_attempt_after_notification() {
+        let installation_uuid = Uuid::new_v4();
+        let mut pending = PendingReconnections::without_cooldown();
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+
+        assert_eq!(
+            pending.register(installation_uuid, first_tx, Instant::now()),
+            ReconnectRegistration::StartReconnect
+        );
+        pending.notify(installation_uuid, Err("first restart failed".to_owned()));
+        assert_eq!(reconnect_error(first_rx).await, "first restart failed");
+
+        let (second_tx, second_rx) = tokio::sync::oneshot::channel();
+        assert_eq!(
+            pending.register(installation_uuid, second_tx, Instant::now()),
+            ReconnectRegistration::StartReconnect
+        );
+        pending.notify(installation_uuid, Err("second restart failed".to_owned()));
+        assert_eq!(reconnect_error(second_rx).await, "second restart failed");
+    }
+
+    #[tokio::test]
+    async fn pending_reconnections_keep_installations_independent() {
+        let first_installation_uuid = Uuid::new_v4();
+        let second_installation_uuid = Uuid::new_v4();
+        let mut pending = PendingReconnections::without_cooldown();
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+        let (second_tx, second_rx) = tokio::sync::oneshot::channel();
+
+        assert_eq!(
+            pending.register(first_installation_uuid, first_tx, Instant::now()),
+            ReconnectRegistration::StartReconnect
+        );
+        assert_eq!(
+            pending.register(second_installation_uuid, second_tx, Instant::now()),
+            ReconnectRegistration::StartReconnect
+        );
+
+        pending.notify(
+            first_installation_uuid,
+            Err("first restart failed".to_owned()),
+        );
+
+        assert_eq!(pending.waiter_count(first_installation_uuid), 0);
+        assert_eq!(pending.waiter_count(second_installation_uuid), 1);
+        assert_eq!(reconnect_error(first_rx).await, "first restart failed");
+
+        pending.notify(
+            second_installation_uuid,
+            Err("second restart failed".to_owned()),
+        );
+        assert_eq!(pending.waiter_count(second_installation_uuid), 0);
+        assert_eq!(reconnect_error(second_rx).await, "second restart failed");
+    }
+
+    #[tokio::test]
+    async fn pending_reconnections_coalesce_waiters_even_during_cooldown_window() {
+        let installation_uuid = Uuid::new_v4();
+        let started_at = Instant::now();
+        let mut pending = PendingReconnections::new(Duration::from_secs(2));
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+        let (second_tx, second_rx) = tokio::sync::oneshot::channel();
+
+        assert_eq!(
+            pending.register(installation_uuid, first_tx, started_at),
+            ReconnectRegistration::StartReconnect
+        );
+        assert_eq!(
+            pending.register(
+                installation_uuid,
+                second_tx,
+                started_at + Duration::from_millis(100),
+            ),
+            ReconnectRegistration::AlreadyPending
+        );
+
+        pending.notify(installation_uuid, Err("restart failed".to_owned()));
+        assert_eq!(reconnect_error(first_rx).await, "restart failed");
+        assert_eq!(reconnect_error(second_rx).await, "restart failed");
+    }
+
+    #[tokio::test]
+    async fn pending_reconnections_reject_new_attempt_during_cooldown_after_notification() {
+        let installation_uuid = Uuid::new_v4();
+        let started_at = Instant::now();
+        let cooldown = Duration::from_secs(2);
+        let mut pending = PendingReconnections::new(cooldown);
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+
+        assert_eq!(
+            pending.register(installation_uuid, first_tx, started_at),
+            ReconnectRegistration::StartReconnect
+        );
+        pending.notify(installation_uuid, Err("restart failed".to_owned()));
+        assert_eq!(reconnect_error(first_rx).await, "restart failed");
+
+        let (second_tx, second_rx) = tokio::sync::oneshot::channel();
+        assert_eq!(
+            pending.register(
+                installation_uuid,
+                second_tx,
+                started_at + Duration::from_millis(500),
+            ),
+            ReconnectRegistration::CooldownActive {
+                retry_after: Duration::from_millis(1500),
+            }
+        );
+        assert_eq!(pending.waiter_count(installation_uuid), 0);
+        assert!(
+            reconnect_error(second_rx).await.contains("cooling down"),
+            "cooldown should be reported to reconnect waiter"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_reconnections_allow_new_attempt_after_cooldown() {
+        let installation_uuid = Uuid::new_v4();
+        let started_at = Instant::now();
+        let cooldown = Duration::from_secs(2);
+        let mut pending = PendingReconnections::new(cooldown);
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+
+        assert_eq!(
+            pending.register(installation_uuid, first_tx, started_at),
+            ReconnectRegistration::StartReconnect
+        );
+        pending.notify(installation_uuid, Err("restart failed".to_owned()));
+        assert_eq!(reconnect_error(first_rx).await, "restart failed");
+
+        let (second_tx, second_rx) = tokio::sync::oneshot::channel();
+        assert_eq!(
+            pending.register(installation_uuid, second_tx, started_at + cooldown),
+            ReconnectRegistration::StartReconnect
+        );
+        pending.notify(installation_uuid, Err("second restart failed".to_owned()));
+        assert_eq!(reconnect_error(second_rx).await, "second restart failed");
+    }
+}

@@ -275,6 +275,7 @@ async fn resolve_path_round_trip() {
             result: Some(resolve_path_response::Result::Success(ResolvePathSuccess {
                 canonical_path: "/home/me/project".to_string(),
                 kind: FileSystemEntryKind::Directory as i32,
+                target_kind: FileSystemEntryKind::Directory as i32,
                 size_bytes: None,
             })),
         })

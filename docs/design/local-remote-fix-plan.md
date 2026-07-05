@@ -25,6 +25,7 @@
 | 菜单修复 | ✅ 已修 | "终端"单元素子菜单、"其他"子菜单拍平为一级菜单项；"上传/新建"多项子菜单保留 |
 | tab 激活 lifecycle | ✅ 已修 / 待跑测 | 用户可见的 tab 激活入口统一走 `activate_tab`；切换/聚焦到 dormant runtime placeholder 时会 queue terminal intent、ensure transport、materialize pending terminal |
 | Session Navigator user-state 归属 | ✅ 已修 / 待跑测 | 远程会话 alias / pin 改为 environment-owned store；本地写本机 `session_state.json`，远程通过 remote_server 写远端 `session_state.json`；deleted tombstone 设计已删除，扫描结果是 source of truth |
+| File Browser symlink 语义 | 🔎 已定位 / 待修 | 这不是“远程 symlink 识别”单点 bug，而是 File Browser 缺统一 FS metadata 抽象；本地 terminal root 与 remote environment root 应返回同一套 symlink 身份 + target kind 语义 |
 
 阶段 3（Environment table / RuntimeBackend trait 数据模型收敛）为高风险大重构，单独 milestone，不在本轮落地。
 
@@ -249,6 +250,57 @@ pub(crate) fn terminal_capability_environment_variables() -> HashMap<String, Str
 
 **建议**：先 B（在文档承认），等阶段 3 Environment table 落地时再评估要不要 A。不要为单独这一项提前做本地 error lifecycle。
 
+### Step 2.4 — File Browser FS metadata 抽象 + symlink 统一
+
+**结论**：需要抽象好，并且应该变成同一套 UI 语义。不要把问题写成“远程服务器软链接识别不了”，也不要只在 remote daemon 上补一个 `is_symlink` 判断。用户面对的是同一个 File Browser；本地 terminal root 和 remote environment root 的差异应该只存在于 backend adapter。
+
+当前代码已经有一个雏形：
+
+- `ServerFileBrowserView` 用 `FileBrowserRootKind::Terminal / Environment` 区分根来源。
+- `DirectoryListingSource::Terminal / RuntimeClient` 已把 list directory 分成两个 backend。
+- 但 list/resolve 之后的 metadata 语义没有统一：
+  - terminal path：`list_terminal_directory` 使用 `entry.metadata().await`，会跟随 symlink；随后再判断 `metadata.file_type().is_symlink()` 基本拿不到 symlink 身份。
+  - environment path：daemon `ListDirectory` 可以返回 `FileSystemEntryKind::SYMLINK`，但 proto 只有 entry kind，没有 target kind / link target；UI 看到 symlink 时仍无法在列表阶段知道它能不能当目录展开。
+  - UI 多处直接判断 `entry.kind == Directory` 决定排序、chevron、context menu、上传目标、cd target；因此 symlink-to-dir 即使能被 resolve，也不能像目录一样自然参与 File Browser 交互。
+
+目标抽象：
+
+```text
+FileBrowserFsBackend
+  ├─ LocalTerminalFsBackend
+  └─ EnvironmentRuntimeFsBackend
+
+FileBrowserEntryMetadata
+  path
+  name
+  entry_kind: File / Directory / Symlink / Other
+  target_kind: None / File / Directory / Other / Missing
+  canonical_path
+  size
+  modified_time
+```
+
+规则：
+
+1. UI 渲染保留 symlink 身份：icon / label 可显示 symlink overlay。
+2. UI 行为按 target kind 判断可导航性：
+   - `Directory` 或 `Symlink -> Directory`：可展开、可进入、可作为 upload/cd/new-file 目标。
+   - `File` 或 `Symlink -> File`：可打开文件。
+   - `Symlink -> Missing/Other`：显示 symlink，但打开时给明确错误。
+3. `list_directory` 和 `resolve_path` 必须通过同一转换函数产出 `FileBrowserEntryMetadata`，不要让 terminal/backend 各自散落判断。
+4. remote proto 可以 hard-cut 扩字段：`DirEntry` / `ResolvePathSuccess` 增 `target_kind`（必要时再增 `link_target`）；仓库未发布，不为旧 daemon 保留兼容路径。
+5. 先收口 list/resolve/symlink，再把 delete/rename/new/upload/download 的目标判断接到同一个 `is_directory_like()` / `is_file_like()` helper。
+
+第一刀建议：
+
+1. 在 File Browser 模块内新增统一 metadata helper，而不是直接改 UI 各处 `entry.kind == Directory`。
+2. 本地 terminal backend 改用 symlink-aware metadata：先读 `symlink_metadata` 保留 link 身份，再按需 follow target metadata 得到 `target_kind`。
+3. remote daemon list/resolve 同样返回 symlink 身份和 target kind；broken symlink 要能表示为 `target_kind=Missing/Other`。
+4. 补 Unix symlink 测试：
+   - symlink-to-dir 在本地 terminal root 和 remote environment root 都可展开。
+   - symlink-to-file 在两种 root 下都可打开。
+   - broken symlink 两种 root 下都不 crash，并显示明确错误。
+
 ---
 
 ## 阶段 3：数据模型收口（设计文档 P0/P1，高风险，长周期）
@@ -406,7 +458,8 @@ remote_server 新增专门的 user-state RPC，不复用 `MutateCliAgentSession`
 阶段 2（细节一致）
   ├─ 2.2 env builder 合并 ── 纯重构，随时插入（建议夹在阶段 1 中间）
   ├─ 2.1 session 标签 ── 1.x 之后
-  └─ 2.3 本地 error lifecycle ── 先文档承认，阶段 3 再评估
+  ├─ 2.3 本地 error lifecycle ── 先文档承认，阶段 3 再评估
+  └─ 2.4 File Browser FS metadata ── 先统一 symlink/list/resolve，再审 delete/rename/new/upload/download
 
 阶段 3（数据模型，大改）
   3.1 Environment table → 3.2 RuntimeBackend trait → 3.3 状态机 → 3.4 local roots
@@ -423,6 +476,7 @@ remote_server 新增专门的 user-state RPC，不复用 `MutateCliAgentSession`
 | 2.1 | 本地 authority 返回 "Local" | session navigator 本地/远程 subtitle 一致 |
 | 2.2 | 现有 capability env 测试仍通过 | 颜色/terminal identity 不变 |
 | 2.3 | — | 文档更新 |
+| 2.4 | 本地 + remote symlink-to-dir / symlink-to-file / broken symlink metadata 测试 | 同一个 File Browser 里 symlink-to-dir 可展开，symlink-to-file 可打开，broken symlink 不 crash |
 | 3.x | 见设计文档 | 大规模 GUI 回归 |
 
 ## 风险与回退

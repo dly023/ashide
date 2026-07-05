@@ -820,25 +820,6 @@ impl AIExecutionProfilesModel {
         );
     }
 
-    pub fn set_auto_save_plans_to_local_drive(
-        &mut self,
-        profile_id: ClientProfileId,
-        enabled: bool,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        self.edit_profile_internal(
-            profile_id,
-            |profile| {
-                if profile.auto_save_plans_to_local_drive != enabled {
-                    profile.auto_save_plans_to_local_drive = enabled;
-                    return true;
-                }
-                false
-            },
-            ctx,
-        );
-    }
-
     pub fn set_profile_name(
         &mut self,
         profile_id: ClientProfileId,
@@ -1408,21 +1389,6 @@ impl AIExecutionProfilesModel {
                 },
                 ctx,
             );
-        }
-    }
-
-    // We don't want stale client ids in our map. We won't be able to find the backing object-store object when
-    // an edit occurs.
-    pub fn replace_client_id_with_server_id(
-        &mut self,
-        server_id: ObjectStoreId,
-        client_id: ObjectStoreId,
-    ) {
-        for (_, object_store_id) in self.profile_id_to_object_store_id.iter_mut() {
-            if *object_store_id == client_id {
-                *object_store_id = server_id;
-                log::info!("Updated profile id mapping after creating a new execution profile");
-            }
         }
     }
 

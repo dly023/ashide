@@ -49,8 +49,8 @@ use warpui::{windowing::WindowManager, ModelContext, SingletonEntity};
 
 use super::{
     oauth::{self, AuthContext, FileBasedPersistedCredentialsMap, PersistedCredentialsMap},
-    MCPServerState, SpawnedServerInfo, TemplatableMCPServerInfo, TemplatableMCPServerManager,
-    TemplatableMCPServerManagerEvent,
+    MCPServerState, ReconnectRegistration, SpawnedServerInfo, TemplatableMCPServerInfo,
+    TemplatableMCPServerManager, TemplatableMCPServerManagerEvent,
 };
 
 /// Controls the behavior of `spawn_server_impl`.
@@ -313,13 +313,6 @@ impl TemplatableMCPServerManager {
         self.templatable_mcp_server_objects.get(&template_uuid)
     }
 
-    pub fn is_server_installation_shared(&self, installation_uuid: Uuid, app: &AppContext) -> bool {
-        match self.get_installed_server(&installation_uuid) {
-            Some(installation) => self.is_server_template_shared(installation.template_uuid(), app),
-            None => false,
-        }
-    }
-
     pub fn change_server_state(
         &mut self,
         installation_uuid: Uuid,
@@ -344,12 +337,6 @@ impl TemplatableMCPServerManager {
     pub fn is_server_template_shared(&self, template_uuid: Uuid, app: &AppContext) -> bool {
         let _ = (template_uuid, app);
         false
-    }
-
-    fn get_space(&self, template_uuid: Uuid, app: &AppContext) -> Option<Space> {
-        self.templatable_mcp_server_objects
-            .get(&template_uuid)
-            .map(|template| template.space(app))
     }
 
     /// Gets a TemplatableMCPServerObject by its UUID.
@@ -716,6 +703,12 @@ impl TemplatableMCPServerManager {
                     safe: ("Failed to register MCP log file: {}", e.safe_message()),
                     full: ("Failed to register MCP log file for {template_uuid}: {e}")
                 );
+                if mode.is_reconnect() {
+                    self.notify_reconnect_waiters(
+                        installation_uuid,
+                        Err(format!("Failed to register MCP log file: {e:#}")),
+                    );
+                }
                 return;
             }
         };
@@ -1218,38 +1211,6 @@ impl TemplatableMCPServerManager {
         }
     }
 
-    pub fn share_templatable_mcp_server(
-        &mut self,
-        template_uuid: Uuid,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        let _ = (template_uuid, ctx);
-    }
-
-    pub fn share_templatable_mcp_server_installation(
-        &mut self,
-        installation_uuid: Uuid,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        let _ = (installation_uuid, ctx);
-    }
-
-    pub fn unshare_templatable_mcp_server(
-        &mut self,
-        template_uuid: Uuid,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        let _ = (template_uuid, ctx);
-    }
-
-    pub fn unshare_templatable_mcp_server_installation(
-        &mut self,
-        installation_uuid: Uuid,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        let _ = (installation_uuid, ctx);
-    }
-
     pub fn has_oauth_credentials_for_server(&self, template_uuid: Uuid) -> bool {
         self.server_credentials.contains_key(&template_uuid)
     }
@@ -1285,18 +1246,26 @@ impl TemplatableMCPServerManager {
     ) {
         log::debug!("Reconnecting MCP server with installation uuid {installation_uuid}");
 
-        // If a reconnection is already in progress, add this caller to the waiting list.
-        if let Some(waiters) = self.pending_reconnections.get_mut(&installation_uuid) {
-            log::debug!(
-                "Reconnection already in progress for {installation_uuid}, adding to waiters"
-            );
-            waiters.push(result_tx);
-            return;
+        match self.pending_reconnections.register(
+            installation_uuid,
+            result_tx,
+            std::time::Instant::now(),
+        ) {
+            ReconnectRegistration::StartReconnect => {}
+            ReconnectRegistration::AlreadyPending => {
+                log::debug!(
+                    "Reconnection already in progress for {installation_uuid}, adding to waiters"
+                );
+                return;
+            }
+            ReconnectRegistration::CooldownActive { retry_after } => {
+                log::debug!(
+                    "Skipping MCP reconnect for {installation_uuid}; cooldown active for {}ms",
+                    retry_after.as_millis().max(1)
+                );
+                return;
+            }
         }
-
-        // Start tracking this reconnection with this caller as the first waiter.
-        self.pending_reconnections
-            .insert(installation_uuid, vec![result_tx]);
 
         // Remove the old server from active_servers if it exists.
         self.active_servers.remove(&installation_uuid);
@@ -1332,32 +1301,7 @@ impl TemplatableMCPServerManager {
         installation_uuid: Uuid,
         result: Result<rmcp::Peer<rmcp::RoleClient>, String>,
     ) {
-        if let Some(waiters) = self.pending_reconnections.remove(&installation_uuid) {
-            for tx in waiters {
-                // Clone the result for each waiter. For Ok, we clone the peer.
-                // For Err, we clone the error message.
-                let _ = tx.send(result.clone());
-            }
-        }
-    }
-
-    /// Returns a reconnecting peer for a server that has the given tool.
-    ///
-    /// The returned peer will automatically reconnect if the underlying transport is closed.
-    pub fn server_with_tool_name(
-        &self,
-        tool_name: String,
-    ) -> Option<crate::ai::mcp::reconnecting_peer::ReconnectingPeer> {
-        let spawner = self.spawner.as_ref()?;
-        self.active_servers
-            .iter()
-            .find(|(_, server)| server.tools.iter().any(|t| t.name == tool_name))
-            .map(|(installation_uuid, _)| {
-                crate::ai::mcp::reconnecting_peer::ReconnectingPeer::new(
-                    *installation_uuid,
-                    spawner.clone(),
-                )
-            })
+        self.pending_reconnections.notify(installation_uuid, result);
     }
 
     /// Returns a reconnecting peer for a server with the given installation ID and tool.
@@ -1834,6 +1778,358 @@ fn make_client_info() -> rmcp::model::ClientInfo {
             icons: None,
             website_url: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::FocusedTerminalInfo;
+    use rmcp::model::{CallToolRequestParam, CallToolResult};
+    use serde_json::json;
+    use std::borrow::Cow;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+    use warp_core::execution_mode::ExecutionMode;
+    use warpui::r#async::Timer;
+    use warpui::{App, ModelHandle};
+
+    const MCP_STDIO_FIXTURE: &str = r#"
+import json
+import os
+import sys
+import traceback
+
+state_path = sys.argv[1]
+
+def record(event):
+    with open(state_path, "a", encoding="utf-8") as state_file:
+        state_file.write(event + "\n")
+        state_file.flush()
+
+def read_message():
+    line = sys.stdin.buffer.readline()
+    if line == b"":
+        return None
+    return json.loads(line.decode("utf-8"))
+
+def write_message(message):
+    body = json.dumps(message, separators=(",", ":")) + "\n"
+    sys.stdout.buffer.write(body.encode("utf-8"))
+    sys.stdout.buffer.flush()
+
+def success(request_id, result):
+    write_message({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": result,
+    })
+
+record(f"start:{os.getpid()}")
+
+try:
+    while True:
+        message = read_message()
+        if message is None:
+            record("stdin_eof")
+            break
+
+        method = message.get("method")
+        if "id" not in message:
+            record(f"notification:{method}")
+            continue
+
+        request_id = message["id"]
+        if method == "initialize":
+            record("initialize")
+            success(request_id, {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {"tools": {}},
+                "serverInfo": {
+                    "name": "ashide-test-mcp-fixture",
+                    "version": "1.0.0",
+                },
+            })
+        elif method == "tools/list":
+            record("tools/list")
+            success(request_id, {
+                "tools": [{
+                    "name": "echo",
+                    "description": "Echoes text and can crash once for reconnect tests.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string"},
+                            "mode": {"type": "string"},
+                        },
+                    },
+                }],
+            })
+        elif method == "tools/call":
+            params = message.get("params") or {}
+            args = params.get("arguments") or {}
+            mode = args.get("mode")
+            text = args.get("text", "")
+            record(f"tools/call:{mode or 'echo'}:{text}")
+
+            if mode == "crash_once":
+                marker_path = state_path + ".crashed"
+                if not os.path.exists(marker_path):
+                    with open(marker_path, "w", encoding="utf-8") as marker:
+                        marker.write("crashed\n")
+                    record("crash_once_exit")
+                    sys.exit(23)
+
+            success(request_id, {
+                "content": [{
+                    "type": "text",
+                    "text": f"echo:{text}",
+                }],
+                "isError": False,
+            })
+        else:
+            write_message({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {
+                    "code": -32601,
+                    "message": f"unknown method: {method}",
+                },
+            })
+except Exception:
+    record("exception:" + traceback.format_exc().replace("\n", "\\n"))
+    raise
+"#;
+
+    struct FixtureProcess {
+        command: String,
+        args: Vec<String>,
+        state_path: PathBuf,
+        _temp_dir: tempfile::TempDir,
+    }
+
+    fn executable_exists(command: &str) -> bool {
+        let command_path = Path::new(command);
+        if command_path.components().count() > 1 {
+            return command_path.is_file();
+        }
+
+        let Some(path_var) = std::env::var_os("PATH").or_else(|| std::env::var_os("Path")) else {
+            return false;
+        };
+
+        #[cfg(windows)]
+        let extensions = std::env::var_os("PATHEXT")
+            .map(|value| {
+                value
+                    .to_string_lossy()
+                    .split(';')
+                    .map(|extension| extension.trim().to_owned())
+                    .filter(|extension| !extension.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| vec![".COM".to_owned(), ".EXE".to_owned(), ".BAT".to_owned()]);
+
+        for directory in std::env::split_paths(&path_var) {
+            let candidate = directory.join(command);
+            if candidate.is_file() {
+                return true;
+            }
+
+            #[cfg(windows)]
+            {
+                for extension in &extensions {
+                    if directory.join(format!("{command}{extension}")).is_file() {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    fn write_fixture_process() -> FixtureProcess {
+        let temp_dir = tempfile::tempdir().expect("fixture temp dir should be created");
+        let script_path = temp_dir.path().join("mcp_stdio_fixture.py");
+        let state_path = temp_dir.path().join("mcp_stdio_fixture.state");
+        std::fs::write(&script_path, MCP_STDIO_FIXTURE).expect("fixture script should be written");
+
+        let (command, mut args) = [
+            ("python3", Vec::<String>::new()),
+            ("python", Vec::<String>::new()),
+            ("py", vec!["-3".to_owned()]),
+        ]
+        .into_iter()
+        .find(|(command, _)| executable_exists(command))
+        .unwrap_or_else(|| panic!("MCP stdio fixture requires python3, python, or py on PATH"));
+
+        args.push(script_path.to_string_lossy().into_owned());
+        args.push(state_path.to_string_lossy().into_owned());
+
+        FixtureProcess {
+            command: command.to_owned(),
+            args,
+            state_path,
+            _temp_dir: temp_dir,
+        }
+    }
+
+    fn fixture_installation(process: &FixtureProcess) -> TemplatableMCPServerInstallation {
+        let template_json = json!({
+            "ashide-test-mcp-fixture": {
+                "command": process.command,
+                "args": process.args,
+            },
+        })
+        .to_string();
+
+        let templatable_server = TemplatableMCPServer {
+            uuid: Uuid::new_v4(),
+            name: "ashide-test-mcp-fixture".to_owned(),
+            description: Some("Test-only stdio MCP fixture".to_owned()),
+            template: JsonTemplate {
+                json: template_json,
+                variables: Vec::new(),
+            },
+            version: 1,
+            gallery_data: None,
+        };
+
+        TemplatableMCPServerInstallation::new(Uuid::new_v4(), templatable_server, HashMap::new())
+    }
+
+    fn setup_test_app(
+        app: &mut App,
+        installation: TemplatableMCPServerInstallation,
+    ) -> ModelHandle<TemplatableMCPServerManager> {
+        app.add_singleton_model(|ctx| AppExecutionMode::new(ExecutionMode::App, false, ctx));
+        app.add_singleton_model(AISettings::new_with_defaults);
+        app.add_singleton_model(FocusedTerminalInfo::new);
+        app.add_singleton_model(|_| FileBasedMCPManager::default());
+        app.add_singleton_model(|_| LogManager::new());
+
+        let execution_path = std::env::var_os("PATH")
+            .or_else(|| std::env::var_os("Path"))
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        AISettings::handle(app).update(app, |settings, ctx| {
+            settings
+                .mcp_execution_path
+                .load_value(Some(execution_path), true, ctx)
+                .expect("test should set MCP execution PATH");
+        });
+
+        app.add_model(|ctx| {
+            let mut locally_installed_servers = HashMap::new();
+            locally_installed_servers.insert(installation.uuid(), installation);
+            TemplatableMCPServerManager {
+                templatable_mcp_server_objects: Default::default(),
+                locally_installed_servers,
+                server_states: Default::default(),
+                active_servers: Default::default(),
+                spawned_servers: Default::default(),
+                server_credentials: Default::default(),
+                file_based_server_credentials: Default::default(),
+                server_error_messages: Default::default(),
+                spawner: Some(ctx.spawner()),
+                pending_reconnections: Default::default(),
+                pending_oauth_csrf: Default::default(),
+                cli_spawned_server_uuids: Default::default(),
+            }
+        })
+    }
+
+    async fn wait_for_fixture_peer(
+        app: &mut App,
+        manager: &ModelHandle<TemplatableMCPServerManager>,
+        installation_uuid: Uuid,
+    ) -> crate::ai::mcp::reconnecting_peer::ReconnectingPeer {
+        for _ in 0..250 {
+            if let Some(peer) = manager.read(app, |manager, _| {
+                manager
+                    .server_with_installation_id_and_tool_name(installation_uuid, "echo".to_owned())
+            }) {
+                return peer;
+            }
+            Timer::after(Duration::from_millis(20)).await;
+        }
+
+        let state = manager.read(app, |manager, _| {
+            (
+                manager.get_server_state(installation_uuid),
+                manager
+                    .get_server_error_message(installation_uuid)
+                    .map(str::to_owned),
+            )
+        });
+        panic!("MCP fixture did not become active: {state:?}");
+    }
+
+    fn call_echo(text: &str, mode: Option<&str>) -> CallToolRequestParam {
+        let mut arguments = rmcp::model::JsonObject::new();
+        arguments.insert("text".to_owned(), json!(text));
+        if let Some(mode) = mode {
+            arguments.insert("mode".to_owned(), json!(mode));
+        }
+
+        CallToolRequestParam {
+            name: Cow::Borrowed("echo"),
+            arguments: Some(arguments),
+        }
+    }
+
+    fn first_text(result: &CallToolResult) -> &str {
+        result
+            .content
+            .first()
+            .and_then(|content| content.as_text())
+            .map(|text| text.text.as_str())
+            .expect("tool result should contain text")
+    }
+
+    fn fixture_event_count(state_path: &Path, event_prefix: &str) -> usize {
+        std::fs::read_to_string(state_path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.starts_with(event_prefix))
+            .count()
+    }
+
+    #[test]
+    fn reconnecting_peer_recovers_real_stdio_server_after_dead_transport() {
+        let process = write_fixture_process();
+        let installation = fixture_installation(&process);
+        let installation_uuid = installation.uuid();
+        let state_path = process.state_path.clone();
+
+        App::test((), |mut app| async move {
+            let manager = setup_test_app(&mut app, installation.clone());
+            manager.update(&mut app, |manager, ctx| {
+                manager.spawn_ephemeral_server(installation, ctx);
+            });
+
+            let peer = wait_for_fixture_peer(&mut app, &manager, installation_uuid).await;
+            assert_eq!(fixture_event_count(&state_path, "initialize"), 1);
+
+            let result = peer
+                .call_tool(call_echo("after-reconnect", Some("crash_once")))
+                .await
+                .expect("reconnecting peer should retry after the fixture exits once");
+
+            assert_eq!(first_text(&result), "echo:after-reconnect");
+            assert_eq!(
+                fixture_event_count(&state_path, "initialize"),
+                2,
+                "dead transport should trigger exactly one reconnect"
+            );
+            assert_eq!(
+                fixture_event_count(&state_path, "crash_once_exit"),
+                1,
+                "fixture should crash only on the first attempt"
+            );
+        });
     }
 }
 

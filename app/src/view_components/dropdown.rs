@@ -23,7 +23,6 @@ use crate::{
     menu::{Event as MenuEvent, Menu, MenuItem, MenuItemFields, MenuVariant},
 };
 
-pub const TOP_MENU_BAR_HEIGHT: f32 = 30.;
 pub const TOP_MENU_BAR_MAX_WIDTH: f32 = 190.;
 pub const DROPDOWN_PADDING: f32 = 6.;
 
@@ -36,16 +35,12 @@ pub enum DropdownStyle {
     /// No border, smaller text, smaller padding
     #[allow(dead_code)]
     Naked,
-    /// Similar to Secondary but with ActionButton-like hover behavior:
-    /// background fill on hover instead of border color change.
-    /// TODO this should probably replace the default `Secondary` theme
-    ActionButtonSecondary,
 }
 
 impl DropdownStyle {
     fn ui_component_styles(&self) -> UiComponentStyles {
         match self {
-            DropdownStyle::Secondary | DropdownStyle::ActionButtonSecondary => UiComponentStyles {
+            DropdownStyle::Secondary => UiComponentStyles {
                 padding: Some(Coords {
                     top: 5.,
                     bottom: 5.,
@@ -194,11 +189,6 @@ where
             vertical_margin: DROPDOWN_PADDING,
             top_bar_height: None,
         }
-    }
-
-    pub fn with_drop_shadow(mut self) -> Self {
-        self.use_drop_shadow = true;
-        self
     }
 
     pub fn set_font_color(&mut self, color: ColorU, ctx: &mut ViewContext<Self>) {
@@ -391,8 +381,8 @@ where
     }
 
     fn select_action_and_close(&mut self, action: &A, ctx: &mut ViewContext<Self>) {
-        ctx.dispatch_typed_action(action);
         self.close(ctx);
+        ctx.dispatch_typed_action_deferred(action.clone());
     }
 
     fn close(&mut self, ctx: &mut ViewContext<Self>) {
@@ -431,7 +421,6 @@ where
                 match self.style {
                     DropdownStyle::Secondary => ButtonVariant::Outlined,
                     DropdownStyle::Naked => ButtonVariant::Text,
-                    DropdownStyle::ActionButtonSecondary => ButtonVariant::Secondary,
                 },
                 self.top_bar_mouse_state.clone(),
             )
@@ -449,7 +438,7 @@ where
                     vec2f(15., 15.),
                 )
                 .with_inner_padding(match self.style {
-                    DropdownStyle::Secondary | DropdownStyle::ActionButtonSecondary => 10.,
+                    DropdownStyle::Secondary => 10.,
                     DropdownStyle::Naked => 6.,
                 }),
             )

@@ -28,7 +28,6 @@ use warpui::{
     ViewHandle,
 };
 
-use crate::auth::UserUid;
 use crate::{
     appearance::Appearance,
     drive::{
@@ -41,7 +40,7 @@ use crate::{
         PropagateAndNoOpNavigationKeys, TextOptions, TextStyleOperation,
     },
     menu::{Event, Menu, MenuItem, MenuItemFields},
-    object_store::ids::{ClientId, ObjectStoreId, StableObjectId},
+    object_store::ids::{ClientId, ObjectStoreId},
     object_store::{
         breadcrumbs::{ContainingObject, ContainingObjectKind},
         model::persistence::{ObjectStoreEvent, ObjectStoreModel},
@@ -179,7 +178,6 @@ pub enum WorkflowModalEvent {
     Close,
     UpdatedWorkflow(ObjectStoreId),
     AiAssistError(String),
-    AiAssistUpgradeError(Option<StableObjectId>, UserUid),
     ViewInLocalDrive(LocalDriveItemId),
 }
 

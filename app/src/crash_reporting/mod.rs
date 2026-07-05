@@ -420,7 +420,7 @@ impl ToCrashReportTags for &AntivirusInfo {
     fn to_crash_report_tags(&self) -> impl IntoIterator<Item = (&str, String)> {
         [(
             "ashide.window.antivirus.name",
-            self.get().unwrap_or("none").into(),
+            self.crash_report_name().unwrap_or("none").into(),
         )]
     }
 }

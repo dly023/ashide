@@ -2,8 +2,6 @@ use settings::{macros::define_settings_group, SupportedPlatforms};
 
 use super::DriveSortOrder;
 
-pub const HAS_AUTO_OPENED_WELCOME_FOLDER: &str = "HasAutoOpenedWelcomeFolder";
-
 define_settings_group!(LocalDriveSettings, settings: [
     sorting_choice: LocalDriveSortingChoice {
         type: DriveSortOrder,

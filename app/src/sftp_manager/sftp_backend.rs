@@ -4,16 +4,20 @@
 //! 生产实现为 `daemon_backend::DaemonSftpBackend`（远程 helper daemon 文件 RPC）；
 //! `InMemorySftpBackend` 使用本地文件系统用于测试。
 
-use std::fs;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 
+#[cfg(test)]
 use dunce;
+#[cfg(test)]
+use std::fs;
+#[cfg(test)]
+use std::io::{Read, Write};
 
 use super::sftp_ops::{ProgressCallback, SftpOpsError};
-use super::types::{FileEntry, FileEntryType};
+use super::types::FileEntry;
+#[cfg(test)]
+use super::types::FileEntryType;
 
 /// SFTP 后端操作抽象，用于解耦 UI 层与协议层
 pub trait SftpBackend: Send + Sync {
@@ -34,9 +38,6 @@ pub trait SftpBackend: Send + Sync {
 
     /// 解析真实路径
     fn realpath(&self, path: &Path) -> Result<PathBuf, SftpOpsError>;
-
-    /// 获取文件/目录详情
-    fn stat(&self, path: &Path) -> Result<FileEntry, SftpOpsError>;
 
     /// 流式上传本地文件到远程
     fn upload_file(
@@ -62,20 +63,17 @@ pub trait SftpBackend: Send + Sync {
 // ============================================================
 
 /// 基于内存（本地临时目录）的 SFTP 后端，用于测试
+#[cfg(test)]
 pub struct InMemorySftpBackend {
     /// 根目录，模拟远程文件系统的根
     root: PathBuf,
 }
 
+#[cfg(test)]
 impl InMemorySftpBackend {
     /// 创建新的内存后端，使用指定目录作为根
     pub fn new(root: PathBuf) -> Self {
         Self { root }
-    }
-
-    /// 获取根目录路径
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     /// 将"远程"路径映射到本地绝对路径
@@ -129,6 +127,7 @@ impl InMemorySftpBackend {
     }
 }
 
+#[cfg(test)]
 impl SftpBackend for InMemorySftpBackend {
     fn list_dir(&self, path: &Path) -> Result<Vec<FileEntry>, SftpOpsError> {
         let local = self.to_local(path);
@@ -194,18 +193,6 @@ impl SftpBackend for InMemorySftpBackend {
         Ok(self.to_remote(&canonical))
     }
 
-    fn stat(&self, path: &Path) -> Result<FileEntry, SftpOpsError> {
-        let local = self.to_local(path);
-        let p = path.display();
-        let meta = fs::symlink_metadata(&local)
-            .map_err(|e| SftpOpsError::Operation(format!("获取文件信息失败 {p}: {e}")))?;
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        Ok(self.metadata_to_entry(name, &local, &meta))
-    }
-
     fn upload_file(
         &self,
         local_path: &Path,
@@ -260,13 +247,5 @@ impl SftpBackend for InMemorySftpBackend {
             .flush()
             .map_err(|e| SftpOpsError::LocalIo(format!("刷新失败: {e}")))?;
         Ok(())
-    }
-}
-
-/// 创建 Arc<dyn SftpBackend> 的便捷方法
-impl InMemorySftpBackend {
-    /// 创建并包装为 Arc<dyn SftpBackend>
-    pub fn into_backend(self) -> Arc<dyn SftpBackend> {
-        Arc::new(self)
     }
 }

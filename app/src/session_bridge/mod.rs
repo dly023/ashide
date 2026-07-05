@@ -39,12 +39,6 @@ pub enum SessionBridgeError {
         #[source]
         source: serde_json::Error,
     },
-    #[error("failed to deserialize artifacts for {id}: {source}")]
-    ArtifactJson {
-        id: String,
-        #[source]
-        source: serde_json::Error,
-    },
     #[error("persistence error: {0}")]
     Persistence(String),
     #[error(transparent)]

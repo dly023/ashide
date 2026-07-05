@@ -89,7 +89,6 @@ impl<T: EventLoopSender> EnvironmentRuntimeController<T> {
             EnvironmentRuntimeSetupEvent::BinaryCheckComplete {
                 session_id,
                 result,
-                remote_platform: _,
                 preinstall_check,
                 has_old_binary,
             } => {

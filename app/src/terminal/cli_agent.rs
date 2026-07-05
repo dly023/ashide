@@ -129,6 +129,14 @@ const GOOSE_COLOR: ColorU = ColorU {
     a: 255,
 };
 
+/// omp (oh-my-pi) brand color (#9b4dff, midpoint purple of the official pink→purple→blue gradient π logo)
+const OMP_COLOR: ColorU = ColorU {
+    r: 0x9b,
+    g: 0x4d,
+    b: 0xff,
+    a: 255,
+};
+
 /// Represents a CLI agent (e.g., Claude Code, Gemini CLI, Codex, Amp, Droid, OpenCode, Copilot, Pi, Auggie, Cursor, Goose)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Sequence, Serialize, Deserialize)]
 pub enum CLIAgent {
@@ -145,6 +153,7 @@ pub enum CLIAgent {
     Goose,
     DeepSeek,
     Antigravity,
+    Omp,
     /// Represents an unknown/custom CLI agent matched by user-configured regex patterns.
     Unknown,
 }
@@ -234,6 +243,7 @@ impl CLIAgent {
             CLIAgent::Goose => "goose",
             CLIAgent::DeepSeek => "deepseek",
             CLIAgent::Antigravity => "agy",
+            CLIAgent::Omp => "omp",
             CLIAgent::Unknown => "",
         }
     }
@@ -328,6 +338,7 @@ impl CLIAgent {
             | CLIAgent::Goose
             | CLIAgent::DeepSeek
             | CLIAgent::Antigravity
+            | CLIAgent::Omp
             | CLIAgent::Unknown => None,
         }
     }
@@ -350,6 +361,7 @@ impl CLIAgent {
             | CLIAgent::CursorCli
             | CLIAgent::Goose
             | CLIAgent::DeepSeek
+            | CLIAgent::Omp
             | CLIAgent::Unknown => CLIAgentAdapterCapabilities::NONE,
         }
     }
@@ -383,6 +395,7 @@ impl CLIAgent {
             CLIAgent::Goose => "Goose",
             CLIAgent::DeepSeek => "DeepSeek",
             CLIAgent::Antigravity => "Antigravity",
+            CLIAgent::Omp => "Omp",
             CLIAgent::Unknown => "CLI Agent",
         }
     }
@@ -403,6 +416,7 @@ impl CLIAgent {
             CLIAgent::Goose => Some(Icon::GooseLogo),
             CLIAgent::DeepSeek => Some(Icon::DeepSeekLogo),
             CLIAgent::Antigravity => Some(Icon::AntigravityLogo),
+            CLIAgent::Omp => Some(Icon::OmpLogo),
             CLIAgent::Unknown => None,
         }
     }
@@ -433,6 +447,7 @@ impl CLIAgent {
             CLIAgent::Goose => &[SkillProvider::Agents],
             CLIAgent::DeepSeek => &[SkillProvider::Agents],
             CLIAgent::Antigravity => &[SkillProvider::Agents],
+            CLIAgent::Omp => &[SkillProvider::Agents],
             CLIAgent::Unknown => &[],
         }
     }
@@ -475,6 +490,7 @@ impl CLIAgent {
             CLIAgent::Goose => Some(GOOSE_COLOR),
             CLIAgent::DeepSeek => Some(DEEPSEEK_COLOR),
             CLIAgent::Antigravity => Some(ANTIGRAVITY_PURPLE),
+            CLIAgent::Omp => Some(OMP_COLOR),
             CLIAgent::Unknown => None,
         }
     }

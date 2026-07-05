@@ -9,8 +9,6 @@ pub mod onekey;
 pub mod panel;
 pub mod password_prompt;
 pub mod server_view;
-pub mod shell_prompt;
-pub mod startup_command_injector;
 
 // `CandidatesViewModel` 暂时只被 `panel.rs` 引用;`CandidateRow` 仅是 panel
 // 内部布局用的中间表示,不需要导出。需要被外部消费时再加 re-export。

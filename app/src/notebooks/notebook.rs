@@ -530,25 +530,8 @@ impl NotebookView {
                 log::info!("Edit mode stolen");
                 self.switch_to_view(ctx);
             }
-            ActiveNotebookDataEvent::SwitchedToEditMode => {
-                log::info!("Edit mode confirmed locally");
-                self.set_editor_interaction_state(InteractionState::Editable, ctx);
-            }
-            ActiveNotebookDataEvent::EditRejected => {
-                log::info!("Edit rejected, switching to view mode");
-                self.switch_to_view(ctx);
-            }
             ActiveNotebookDataEvent::BreadcrumbsChanged => {
                 self.update_breadcrumbs(ctx);
-            }
-            ActiveNotebookDataEvent::CreatedInObjectStore => {
-                ctx.emit(NotebookEvent::Pane(PaneEvent::AppStateChanged));
-            }
-            ActiveNotebookDataEvent::TrashStatusChanged
-            | ActiveNotebookDataEvent::MovedInLocalDrive => {
-                self.pane_configuration.update(ctx, |pane_config, ctx| {
-                    pane_config.refresh_pane_header_overflow_menu_items(ctx)
-                });
             }
         }
         ctx.notify();

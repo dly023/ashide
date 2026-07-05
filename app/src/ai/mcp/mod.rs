@@ -238,16 +238,20 @@ pub struct ServerSentEvents {
 /// Used for shared operations on `StaticEnvVar` and `StaticHeader`.
 #[cfg(not(target_family = "wasm"))]
 trait NameValuePair {
+    #[cfg(test)]
     fn name(&self) -> &str;
+    #[cfg(test)]
     fn value(&self) -> &str;
     fn new(name: String, value: String) -> Self;
 }
 
 #[cfg(not(target_family = "wasm"))]
 impl NameValuePair for StaticEnvVar {
+    #[cfg(test)]
     fn name(&self) -> &str {
         &self.name
     }
+    #[cfg(test)]
     fn value(&self) -> &str {
         &self.value
     }
@@ -257,9 +261,11 @@ impl NameValuePair for StaticEnvVar {
 }
 #[cfg(not(target_family = "wasm"))]
 impl NameValuePair for StaticHeader {
+    #[cfg(test)]
     fn name(&self) -> &str {
         &self.name
     }
+    #[cfg(test)]
     fn value(&self) -> &str {
         &self.value
     }
@@ -277,7 +283,7 @@ fn items_from_hashmap<T: NameValuePair>(map: &HashMap<String, String>) -> Vec<T>
 }
 
 /// Converts a slice of name/value pair items to a HashMap.
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(test, not(target_family = "wasm")))]
 fn items_to_hashmap<T: NameValuePair>(items: &[T]) -> HashMap<String, String> {
     items
         .iter()
@@ -377,6 +383,7 @@ impl MCPServer {
 
     /// Includes the environment variable values, should only be shown to users,
     /// not sent to our servers.
+    #[cfg(test)]
     pub fn to_user_json(&self) -> String {
         let transport_type = match &self.transport_type {
             TransportType::CLIServer(cli_server) => JSONTransportType::CLIServer {

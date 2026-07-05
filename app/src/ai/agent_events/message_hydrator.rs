@@ -1,4 +1,6 @@
+#[cfg(test)]
 use crate::ai::agent::ReceivedMessageInput;
+#[cfg(test)]
 use crate::ai::agent_events::AgentRunEvent;
 
 /// Ashide 本地构建不再从云端 mailbox 拉取消息正文或发送 delivered 回执。
@@ -11,6 +13,7 @@ impl MessageHydrator {
         Self
     }
 
+    #[cfg(test)]
     pub(crate) async fn hydrate_event_for_recipient(
         &self,
         event: &AgentRunEvent,

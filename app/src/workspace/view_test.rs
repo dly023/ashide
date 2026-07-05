@@ -24,7 +24,6 @@ use crate::suggestions::ignored_suggestions_model::IgnoredSuggestionsModel;
 use crate::terminal::shared_session::protocol::SessionSourceType;
 use crate::terminal::shared_session::protocol::{ParticipantId, ParticipantList};
 #[cfg(feature = "local_fs")]
-use crate::user_config::tab_configs_dir;
 use repo_metadata::repositories::DetectedRepositories;
 use repo_metadata::watcher::DirectoryWatcher;
 #[cfg(feature = "local_fs")]
@@ -356,107 +355,6 @@ fn transferred_tab_workspace(
     });
     workspace
 }
-
-#[cfg(feature = "local_fs")]
-fn open_worktree_sidecar(workspace: &ViewHandle<Workspace>, app: &mut App) {
-    workspace.update(app, |workspace, ctx| {
-        workspace.open_new_session_dropdown_menu(Vector2F::zero(), ctx);
-
-        let worktree_index = workspace
-            .new_session_dropdown_menu
-            .read(ctx, |menu, _| {
-                menu.items().iter().position(|item| {
-                    matches!(
-                        item,
-                        MenuItem::Item(fields) if fields.label() == "New worktree config"
-                    )
-                })
-            })
-            .expect("expected new worktree config item in new-session menu");
-
-        workspace
-            .new_session_dropdown_menu
-            .update(ctx, |menu, view_ctx| {
-                menu.set_selected_by_index(worktree_index, view_ctx);
-            });
-    });
-}
-
-/// RAII guard that removes tab config TOML files whose name starts with
-/// `prefix` from `~/.warp/tab_configs/` on drop. Because `Drop` runs even
-/// when a test panics, this prevents stale worktree configs from leaking
-/// into Ashide dev.
-#[cfg(feature = "local_fs")]
-struct TabConfigCleanupGuard {
-    prefix: &'static str,
-}
-
-#[cfg(feature = "local_fs")]
-impl TabConfigCleanupGuard {
-    fn new(prefix: &'static str) -> Self {
-        // Eagerly clean up leftovers from any previously-crashed run.
-        Self::clean(prefix);
-        Self { prefix }
-    }
-
-    fn clean(prefix: &str) {
-        let dir = tab_configs_dir();
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if name.starts_with(prefix) && name.ends_with(".toml") {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
-        }
-    }
-}
-
-#[cfg(feature = "local_fs")]
-impl Drop for TabConfigCleanupGuard {
-    fn drop(&mut self) {
-        Self::clean(self.prefix);
-    }
-}
-
-/// Creates a workspace with a single, shared session.
-fn mock_workspace_with_shared_session(app: &mut App) -> ViewHandle<Workspace> {
-    // Create the workspace as a session-sharing sharer.
-    let global_resource_handles = GlobalResourceHandles::mock(app);
-    let (_, workspace) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
-        Workspace::new(
-            global_resource_handles,
-            None,
-            NewWorkspaceSource::Empty {
-                previous_active_window: None,
-                shell: None,
-            },
-            ctx,
-        )
-    });
-
-    // Get the single terminal view in the workspace.
-    let terminal_view = workspace.read(app, |workspace, ctx| {
-        assert_eq!(workspace.tabs.len(), 1);
-        workspace
-            .active_tab_pane_group()
-            .as_ref(ctx)
-            .focused_session_view(ctx)
-            .unwrap()
-    });
-
-    terminal_view.update(app, |view, ctx| {
-        view.model.lock().block_list_mut().set_bootstrapped();
-        view.model
-            .lock()
-            .set_shared_session_status(SharedSessionStatus::ActiveSharer);
-        ctx.notify();
-    });
-
-    workspace
-}
-
 // Creates a workspace as a viewer of a shared session.
 fn mock_workspace_viewing_shared_session(app: &mut App) -> ViewHandle<Workspace> {
     // Create the workspace as a session-sharing sharer.
@@ -2661,6 +2559,7 @@ fn test_workspace_session_context_menu_exposes_session_bridge_actions_for_ai_ses
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             };
             let target = WorkspaceSessionActionTarget::new(
                 session.id.clone(),
@@ -2776,6 +2675,7 @@ fn test_remote_workspace_session_context_menu_carries_source_authority_for_nativ
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             };
             let target = WorkspaceSessionActionTarget::new(
                 session.id.clone(),
@@ -3094,6 +2994,7 @@ fn test_session_navigator_activation_never_reuses_current_terminal_for_resume() 
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             };
             let target = WorkspaceSessionActionTarget::new(
                 session.id.clone(),
@@ -3175,6 +3076,111 @@ fn test_session_navigator_refresh_preserves_order_when_resume_updates_timestamp(
                 test_session_navigator_displayed_order(workspace, ctx),
                 vec!["order-key-resume-a", "order-key-resume-b"],
                 "resume/status refresh must not reorder existing Session Navigator rows"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_session_navigator_refresh_preserves_order_when_restore_becomes_live_container() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let mut first = test_session_navigator_order_session("order-key-resume-a", "A", 10);
+            let second = test_session_navigator_order_session("order-key-resume-b", "B", 20);
+            workspace.restored_workspace_sessions.push(first.clone());
+            workspace.restored_workspace_sessions.push(second);
+            workspace.sync_session_navigator_sessions(ctx);
+            assert_eq!(
+                test_session_navigator_displayed_order(workspace, ctx),
+                vec!["order-key-resume-a", "order-key-resume-b"]
+            );
+
+            workspace
+                .restored_workspace_sessions
+                .retain(|session| session.id != "order-key-resume-a");
+            first.id = "tab:99:leaf:0".to_string();
+            first.is_live_container = true;
+            workspace.restored_workspace_sessions.push(first);
+            workspace.sync_session_navigator_sessions(ctx);
+
+            assert_eq!(
+                workspace
+                    .session_navigator_sessions(ctx)
+                    .iter()
+                    .filter_map(|session| match session.id.as_str() {
+                        "tab:99:leaf:0" => Some("materialized-a"),
+                        "order-key-resume-b" => Some("order-key-resume-b"),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                vec!["materialized-a", "order-key-resume-b"],
+                "clicking/restoring a row must not append it after older rows when the restored snapshot becomes a live container"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_session_navigator_sort_preserves_materialized_order_without_reconcile() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let first = test_session_navigator_order_session("order-key-resume-a", "A", 10);
+            let second = test_session_navigator_order_session("order-key-resume-b", "B", 20);
+            workspace.restored_workspace_sessions.push(first.clone());
+            workspace.restored_workspace_sessions.push(second.clone());
+            workspace.sync_session_navigator_sessions(ctx);
+            assert_eq!(
+                test_session_navigator_displayed_order(workspace, ctx),
+                vec!["order-key-resume-a", "order-key-resume-b"]
+            );
+
+            let mut materialized_first = first;
+            materialized_first.id = "tab:99:leaf:0".to_string();
+            materialized_first.is_live_container = true;
+            let mut sessions = vec![second, materialized_first];
+            workspace.sort_session_navigator_sessions_by_display_order(&mut sessions);
+
+            assert_eq!(
+                sessions
+                    .iter()
+                    .map(|session| session.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["tab:99:leaf:0", "order-key-resume-b"],
+                "a restored row that materializes into a live container must keep its old slot even when the render path sorts before display-order reconciliation"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_session_navigator_live_row_delete_keeps_materialized_backing_source() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, _| {
+            let indexed = test_session_navigator_order_session("order-key-resume-a", "A", 10);
+            let mut live = indexed.clone();
+            live.id = "tab:99:leaf:0".to_string();
+            live.is_active = true;
+            live.is_live_container = true;
+            workspace.indexed_cli_agent_sessions.push(indexed.clone());
+
+            assert!(
+                workspace
+                    .backing_sessions_for_workspace_session(&live)
+                    .iter()
+                    .any(|session| session.id == indexed.id),
+                "deleting a materialized live row must still target the indexed/restored provider source; otherwise the UI reports success but the scan brings the row back"
             );
         });
     });
@@ -3437,11 +3443,11 @@ fn test_remote_session_navigator_uses_environment_user_state() {
             session.cli_agent_session_id = Some("remote-provider-session".to_string());
             let logical_key = session.logical_key();
             workspace
-                .indexed_environment_cli_agent_sessions
-                .insert(authority.clone(), vec![session]);
+                .environments_mut()
+                .set_indexed_cli_agent_sessions(authority.clone(), vec![session]);
             workspace
-                .indexed_environment_cli_agent_session_user_states
-                .insert(
+                .environments_mut()
+                .set_cli_agent_session_user_state(
                     authority,
                     crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserState {
                         aliases: HashMap::from([(logical_key.clone(), "Remote Alias".to_string())]),
@@ -3482,11 +3488,11 @@ fn test_remote_session_navigator_scan_result_is_source_of_truth() {
                 test_environment_runtime_session_snapshot("remote:source", authority.clone());
             session.cli_agent_session_id = Some("remote-source-provider-session".to_string());
             workspace
-                .indexed_environment_cli_agent_sessions
-                .insert(authority.clone(), vec![session]);
+                .environments_mut()
+                .set_indexed_cli_agent_sessions(authority.clone(), vec![session]);
             workspace
-                .indexed_environment_cli_agent_session_user_states
-                .insert(
+                .environments_mut()
+                .set_cli_agent_session_user_state(
                     authority,
                     crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserState {
                         aliases: HashMap::new(),
@@ -3529,6 +3535,7 @@ fn test_workspace_session_context_menu_hides_session_bridge_actions_without_ai_c
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             };
             let target = WorkspaceSessionActionTarget::new(
                 session.id.clone(),
@@ -3599,6 +3606,7 @@ fn test_workspace_session_context_menu_keeps_pi_fork_blocked_until_adapter_exist
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             };
             let target = WorkspaceSessionActionTarget::new(
                 session.id.clone(),
@@ -3669,6 +3677,7 @@ fn test_workspace_session_context_menu_forks_indexed_cli_agent_session() {
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             };
             let target = WorkspaceSessionActionTarget::new(
                 session.id.clone(),
@@ -3754,6 +3763,7 @@ fn test_session_navigator_display_order_normalizes_terminal_bootstrap_authority_
         is_active: false,
         is_pinned: false,
         updated_at_unix_ms: None,
+        is_live_container: false,
     };
     let local_with_root = WorkspaceSessionSnapshot {
         environment_authority_key: Some("local:/Users/admin/ashide".to_string()),
@@ -3810,6 +3820,7 @@ fn test_workspace_session_context_menu_forks_live_cli_agent_session_with_indexed
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             };
             let live_session = WorkspaceSessionSnapshot {
                 id: "tab:99:leaf:0".to_string(),
@@ -3827,17 +3838,20 @@ fn test_workspace_session_context_menu_forks_live_cli_agent_session_with_indexed
                 is_active: true,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             };
             workspace.indexed_cli_agent_sessions.push(indexed_session.clone());
             workspace.restored_workspace_sessions.push(live_session.clone());
 
             let sessions = workspace.session_navigator_sessions(ctx);
+            // Container model: the restored "live" session and the indexed
+            // session share the same agent session id, so they merge into a
+            // single virtual container row. Find it by agent session id.
             let live_row = sessions
                 .iter()
                 .find(|session| {
-                    session.id == live_session.id
-                        && session.cli_agent_session_id.as_deref()
-                            == Some(cli_agent_session_id)
+                    session.cli_agent_session_id.as_deref() == Some(cli_agent_session_id)
+                        && session.environment_authority_key.as_deref() == Some("local")
                 })
                 .unwrap_or_else(|| {
                     panic!("live running CLI row should remain selectable; sessions={sessions:#?}")
@@ -3869,7 +3883,7 @@ fn test_workspace_session_context_menu_forks_live_cli_agent_session_with_indexed
                     WorkspaceAction::ForkSessionBridge {
                         source: SessionBridgeActionSource::WorkspaceTarget { target: action_target },
                         fork_target: SessionBridgeForkTarget::Ashide,
-                    } if action_target.session_id == live_session.id
+                    } if action_target.session_id == live_row.id
                 )),
                 "selected running CLI row must expose a real fork action via its indexed backing source"
             );
@@ -3878,7 +3892,7 @@ fn test_workspace_session_context_menu_forks_live_cli_agent_session_with_indexed
                     action,
                     WorkspaceAction::ShowSessionBridgeEditDialog {
                         source: SessionBridgeActionSource::WorkspaceTarget { target: action_target },
-                    } if action_target.session_id == live_session.id
+                    } if action_target.session_id == live_row.id
                 )),
                 "selected running CLI row must expose edit-and-fork through its indexed backing source"
             );
@@ -3887,7 +3901,7 @@ fn test_workspace_session_context_menu_forks_live_cli_agent_session_with_indexed
                     action,
                     WorkspaceAction::ExportSessionBridgeBundle {
                         source: SessionBridgeActionSource::WorkspaceTarget { target: action_target },
-                    } if action_target.session_id == live_session.id
+                    } if action_target.session_id == live_row.id
                 )),
                 "selected running CLI row must expose portable bundle export through its indexed backing source"
             );
@@ -3936,6 +3950,7 @@ fn test_remote_live_cli_agent_session_fork_uses_remote_indexed_backing_source() 
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             };
             let live_session = WorkspaceSessionSnapshot {
                 id: "tab:88:leaf:0".to_string(),
@@ -3953,6 +3968,7 @@ fn test_remote_live_cli_agent_session_fork_uses_remote_indexed_backing_source() 
                 is_active: true,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             };
             workspace.remember_indexed_environment_cli_agent_sessions(
                 authority.clone(),
@@ -3961,10 +3977,13 @@ fn test_remote_live_cli_agent_session_fork_uses_remote_indexed_backing_source() 
             workspace.restored_workspace_sessions.push(live_session.clone());
 
             let sessions = workspace.session_navigator_sessions(ctx);
+            // Container model: the restored "live" session and the indexed
+            // session share the same agent session id, so they merge into a
+            // single virtual container row. Find it by agent session id.
             let live_row = sessions
                 .iter()
                 .find(|session| {
-                    session.id == live_session.id
+                    session.cli_agent_session_id.as_deref() == Some(cli_agent_session_id)
                         && session.environment_authority_key.as_deref() == Some(authority.as_str())
                 })
                 .unwrap_or_else(|| {
@@ -3997,7 +4016,7 @@ fn test_remote_live_cli_agent_session_fork_uses_remote_indexed_backing_source() 
                     WorkspaceAction::ForkSessionBridge {
                         source: SessionBridgeActionSource::WorkspaceTarget { target: action_target },
                         fork_target: SessionBridgeForkTarget::Agent(CLIAgent::Claude),
-                    } if action_target.session_id == live_session.id
+                    } if action_target.session_id == live_row.id
                         && action_target.environment_authority_key.as_deref()
                             == Some(authority.as_str())
                 )),
@@ -4008,7 +4027,7 @@ fn test_remote_live_cli_agent_session_fork_uses_remote_indexed_backing_source() 
                     action,
                     WorkspaceAction::ShowSessionBridgeEditDialog {
                         source: SessionBridgeActionSource::WorkspaceTarget { target: action_target },
-                    } if action_target.session_id == live_session.id
+                    } if action_target.session_id == live_row.id
                         && action_target.environment_authority_key.as_deref()
                             == Some(authority.as_str())
                 )),
@@ -4019,7 +4038,7 @@ fn test_remote_live_cli_agent_session_fork_uses_remote_indexed_backing_source() 
                     action,
                     WorkspaceAction::ExportSessionBridgeBundle {
                         source: SessionBridgeActionSource::WorkspaceTarget { target: action_target },
-                    } if action_target.session_id == live_session.id
+                    } if action_target.session_id == live_row.id
                         && action_target.environment_authority_key.as_deref()
                             == Some(authority.as_str())
                 )),
@@ -4063,6 +4082,7 @@ fn test_workspace_session_context_menu_resolves_session_bridge_actions_from_cli_
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             };
             let target = WorkspaceSessionActionTarget::new(
                 session.id.clone(),
@@ -4202,9 +4222,10 @@ fn test_activate_historical_ashide_conversation_uses_conversation_restore_path()
 
         let workspace = mock_workspace(&mut app);
 
-        let (initial_tab_count, expected_active_key, expected_session_id) =
+        let (initial_tab_count, expected_session_id) =
             workspace.update(&mut app, |workspace, ctx| {
-                let expected_session_id = Workspace::ashide_conversation_session_id(conversation_id);
+                let expected_session_id =
+                    Workspace::ashide_conversation_session_id(conversation_id);
                 let session = workspace
                     .session_navigator_sessions(ctx)
                     .into_iter()
@@ -4214,24 +4235,55 @@ fn test_activate_historical_ashide_conversation_uses_conversation_restore_path()
                     session.id.clone(),
                     session.environment_authority_key.clone(),
                 );
-                let expected_active_key = Workspace::workspace_session_logical_key(&session);
                 let initial_tab_count = workspace.tab_count();
 
                 workspace.activate_restored_workspace_session(&target, ctx);
-                (
-                    initial_tab_count,
-                    expected_active_key,
-                    expected_session_id,
-                )
+                (initial_tab_count, expected_session_id)
             });
 
         futures_lite::future::yield_now().await;
 
-        workspace.update(&mut app, |workspace, _ctx| {
+        workspace.update(&mut app, |workspace, ctx| {
+            // Re-sync so the navigator picks up the newly materialized live
+            // container and reconciles the active restored key onto it.
+            workspace.sync_session_navigator_sessions(ctx);
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
             assert_eq!(workspace.tab_count(), initial_tab_count + 1);
+            // Container model: the historical Ashide conversation has been
+            // materialized into a live container. Its identity is now the
+            // live tab's `source:tab:...` key, not the virtual
+            // `source:ashide-conversation:...` key. The materialized live
+            // container is the active row; the active restored key either
+            // tracks it or is cleared (both are acceptable — the live tab is
+            // highlighted via `is_active` regardless).
+            let live_sessions = workspace.live_workspace_sessions(ctx);
+            let active_live = live_sessions
+                .iter()
+                .find(|session| session.is_active)
+                .expect("materialized historical conversation should have an active live container");
+            let live_key = Workspace::workspace_session_logical_key(active_live);
+            let active_key_ok = workspace
+                .active_restored_workspace_session_key
+                .as_deref()
+                .map(|key| key == live_key.as_str() || key.is_empty())
+                .unwrap_or(true);
+            assert!(
+                active_key_ok,
+                "active restored key should track the materialized live container or be cleared; got {:?}, live key {live_key}",
+                workspace.active_restored_workspace_session_key
+            );
+            // The historical virtual container should not also appear as a
+            // separate row — it has been consumed/represented by the live tab.
+            let sessions = workspace.session_navigator_sessions(ctx);
+            let historical_rows = sessions
+                .iter()
+                .filter(|session| session.id == expected_session_id)
+                .count();
             assert_eq!(
-                workspace.active_restored_workspace_session_key.as_deref(),
-                Some(expected_active_key.as_str())
+                historical_rows, 0,
+                "materialized historical conversation should not appear as a separate virtual row"
             );
             assert!(
                 !workspace
@@ -4242,7 +4294,7 @@ fn test_activate_historical_ashide_conversation_uses_conversation_restore_path()
             assert!(
                 !workspace
                     .restoring_workspace_session_keys
-                    .contains(&expected_active_key),
+                    .contains(&Workspace::workspace_session_logical_key(active_live)),
                 "native Ashide historical sessions should not mark their logical key as CLI restoring"
             );
         });
@@ -4312,13 +4364,13 @@ fn test_skill_manager_scope_uses_connected_runtime_placeholder() {
             let environment_tab_index = workspace
                 .tab_index_for_environment_authority(&authority)
                 .expect("test setup should create an Environment placeholder tab");
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment,
                 session_id,
                 PathBuf::from("/tmp/ashide-test-skill-manager-placeholder.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, host_id.clone());
             workspace.activate_tab_internal(environment_tab_index, ctx);
             workspace.update_active_session(ctx);
@@ -4481,6 +4533,7 @@ fn test_restored_terminal_bootstrap_startup_command_matches_current_app_restore_
         is_active: false,
         is_pinned: false,
         updated_at_unix_ms: None,
+        is_live_container: false,
     };
 
     let pending_resume = Workspace::cli_agent_from_session(&session)
@@ -4637,13 +4690,13 @@ fn test_remote_native_session_bridge_fork_keeps_remote_resume_row_visible() {
                 );
             let authority = environment.authority_key.clone();
             let session_id = CoreSessionId::from(9018);
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 session_id,
                 PathBuf::from("/tmp/ashide-test-remote-native-fork.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, HostId::new("remote-native-fork-host".to_string()));
             workspace.set_active_tab_environment(environment);
 
@@ -4695,9 +4748,7 @@ fn test_remote_native_session_bridge_fork_keeps_remote_resume_row_visible() {
                 Some(Workspace::workspace_session_logical_key(forked_session).as_str())
             );
             assert_eq!(
-                workspace
-                    .pending_environment_runtime_session_restores
-                    .get(&authority)
+                workspace.pending_session_restore_for_authority(&authority)
                     .and_then(|pending| pending.startup_command.as_deref()),
                 Some("claude --resume remote-claude-fork-session"),
                 "remote native fork must queue provider resume on the remote runtime authority"
@@ -4795,17 +4846,18 @@ fn test_ashide_session_bridge_fork_opens_focused_conversation_tab() {
 
         let workspace = mock_workspace(&mut app);
 
-        let (initial_tab_count, initial_active_tab) = workspace.update(&mut app, |workspace, ctx| {
-            let initial_tab_count = workspace.tab_count();
-            let initial_active_tab = workspace.active_tab_index();
+        let (initial_tab_count, initial_active_tab) =
+            workspace.update(&mut app, |workspace, ctx| {
+                let initial_tab_count = workspace.tab_count();
+                let initial_active_tab = workspace.active_tab_index();
 
-            workspace.finish_session_bridge_fork(
-                Ok(SessionBridgeForkWriteBack::Ashide(write_back)),
-                "Fork 会话失败".to_owned(),
-                ctx,
-            );
-            (initial_tab_count, initial_active_tab)
-        });
+                workspace.finish_session_bridge_fork(
+                    Ok(SessionBridgeForkWriteBack::Ashide(write_back)),
+                    "Fork 会话失败".to_owned(),
+                    ctx,
+                );
+                (initial_tab_count, initial_active_tab)
+            });
 
         futures_lite::future::yield_now().await;
 
@@ -4904,6 +4956,7 @@ fn test_restored_current_app_agent_resume_stays_explicit_pending_command() {
         is_active: false,
         is_pinned: false,
         updated_at_unix_ms: None,
+        is_live_container: false,
     };
 
     let pending_resume = Workspace::cli_agent_from_session(&session).and_then(|agent| {
@@ -4968,6 +5021,7 @@ fn test_environment_runtime_session_snapshot(
         is_active: false,
         is_pinned: false,
         updated_at_unix_ms: None,
+        is_live_container: false,
     }
 }
 
@@ -4993,6 +5047,7 @@ fn test_session_navigator_order_session(
         is_active: false,
         is_pinned: false,
         updated_at_unix_ms: Some(updated_at_unix_ms),
+        is_live_container: false,
     }
 }
 
@@ -5044,8 +5099,7 @@ fn test_pending_environment_runtime_agent_view_entry() -> AgentTabEntry {
     }
 }
 
-fn test_pending_environment_runtime_forked_conversation_entry(
-) -> ForkEntry {
+fn test_pending_environment_runtime_forked_conversation_entry() -> ForkEntry {
     use crate::ai::agent::conversation::AIConversation;
     ForkEntry {
         conversation: AIConversation::new(false),
@@ -5091,6 +5145,7 @@ fn test_open_environment_runtime_syncs_session_navigator_environment_cache() {
                     is_active: false,
                     is_pinned: false,
                     updated_at_unix_ms: None,
+                is_live_container: false,
                 });
 
             workspace.open_environment_runtime_from_provider(
@@ -5132,8 +5187,7 @@ fn test_open_environment_runtime_queues_startup_without_direct_process() {
 
             assert_eq!(
                 workspace
-                    .pending_environment_runtime_startup_commands
-                    .get(&authority)
+                    .pending_startup_command_for_authority(&authority)
                     .map(String::as_str),
                 Some("cd /srv && codex")
             );
@@ -5166,13 +5220,13 @@ fn test_add_terminal_tab_from_ssh_tab_inherits_ssh_environment() {
                 EnvironmentLifecycleState::Connected,
             );
             let session_id = CoreSessionId::from(9001);
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 session_id,
                 PathBuf::from("/tmp/ashide-test-ssh-control.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, HostId::new("test-host".to_string()));
             workspace.set_active_tab_environment(environment);
             let ssh_tab_index = workspace.active_tab_index();
@@ -5208,8 +5262,7 @@ fn test_add_terminal_tab_from_ssh_tab_inherits_ssh_environment() {
                 Some("/root/project")
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.kind),
                 Some(&EnvironmentKind::Ssh)
@@ -5241,7 +5294,7 @@ fn test_switching_away_from_runtime_environment_tab_retains_connected_runtime() 
                 PathBuf::from("/tmp/ashide-test-tab-switch-retain.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, HostId::new("retain-runtime-host".to_string()));
             workspace.set_active_tab_environment(environment);
             let runtime_tab_index = workspace.active_tab_index();
@@ -5258,8 +5311,7 @@ fn test_switching_away_from_runtime_environment_tab_retains_connected_runtime() 
                 "test setup must switch focus away from the runtime Environment tab"
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.kind),
                 Some(&EnvironmentKind::Local),
@@ -5305,7 +5357,7 @@ fn test_disconnect_environment_releases_retained_runtime_authority() {
                 PathBuf::from("/tmp/ashide-test-disconnect-release.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, HostId::new("release-runtime-host".to_string()));
             workspace.set_active_tab_environment(environment);
 
@@ -5348,7 +5400,7 @@ fn test_retained_runtime_environment_reconnects_after_transport_disconnect() {
                 PathBuf::from("/tmp/ashide-test-retained-disconnect.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(stale_session_id, HostId::new("disconnect-runtime-host".to_string()));
             workspace.set_active_tab_environment(environment);
 
@@ -5391,13 +5443,13 @@ fn test_add_terminal_tab_method_routes_ssh_environment_through_runtime_facade() 
             );
             let authority = environment.authority_key.clone();
             let session_id = CoreSessionId::from(9011);
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 session_id,
                 PathBuf::from("/tmp/ashide-test-ssh-control-direct-add.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, HostId::new("test-host".to_string()));
             workspace.set_active_tab_environment(environment);
 
@@ -5405,9 +5457,7 @@ fn test_add_terminal_tab_method_routes_ssh_environment_through_runtime_facade() 
 
             assert_eq!(workspace.tab_count(), 2);
             assert!(
-                workspace
-                    .pending_environment_runtime_terminal_authorities
-                    .contains(&authority),
+                workspace.has_pending_terminal_for_authority(&authority),
                 "without a test remote-server client the runtime intent should stay pending instead of falling back to a current-app terminal"
             );
             let active_tab = &workspace.tabs[workspace.active_tab_index()];
@@ -5446,13 +5496,13 @@ fn test_add_terminal_tab_from_environment_runtime_syncs_active_session_row() {
             );
             let authority = environment.authority_key.clone();
             let session_id = CoreSessionId::from(9013);
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 session_id,
                 PathBuf::from("/tmp/ashide-test-ssh-control-session-row.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, HostId::new("test-host".to_string()));
             workspace.set_active_tab_environment(environment);
 
@@ -5465,7 +5515,7 @@ fn test_add_terminal_tab_from_environment_runtime_syncs_active_session_row() {
 
             let live_sessions = workspace.live_workspace_sessions(ctx);
             let sessions = workspace.session_navigator_sessions(ctx);
-            let current_environment = workspace.current_environment.clone();
+            let current_environment = workspace.current_environment_snapshot().clone();
             let tab_environments = workspace
                 .tabs
                 .iter()
@@ -5677,13 +5727,13 @@ fn test_stale_connected_environment_without_runtime_client_reconnects() {
             );
             let authority = environment.authority_key.clone();
             let stale_session_id = CoreSessionId::from(9014);
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 stale_session_id,
                 PathBuf::from("/tmp/ashide-test-stale-connected.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(stale_session_id, HostId::new("stale-host".to_string()));
             workspace.set_active_tab_environment(environment);
 
@@ -5708,8 +5758,7 @@ fn test_stale_connected_environment_without_runtime_client_reconnects() {
                 "stale Connected Environment should move back to Connecting while the runtime proxy is restarted"
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.lifecycle_state),
                 Some(&EnvironmentLifecycleState::Connecting),
@@ -5737,13 +5786,13 @@ fn test_environment_file_browser_unavailable_event_reconnects_stale_runtime() {
             let authority = environment.authority_key.clone();
             let stale_session_id = CoreSessionId::from(9024);
             let stale_host_id = HostId::new("stale-browser-host".to_string());
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 stale_session_id,
                 PathBuf::from("/tmp/ashide-test-browser-unavailable.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(stale_session_id, stale_host_id.clone());
             workspace.set_active_tab_environment(environment);
 
@@ -5843,13 +5892,13 @@ fn test_environment_left_panel_sync_reconnects_stale_connected_runtime() {
             );
             let authority = environment.authority_key.clone();
             let stale_session_id = CoreSessionId::from(9025);
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 stale_session_id,
                 PathBuf::from("/tmp/ashide-test-left-panel-sync-stale.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(stale_session_id, HostId::new("stale-left-panel-host".to_string()));
             workspace.set_active_tab_environment(environment);
 
@@ -5909,8 +5958,7 @@ fn test_restored_preparing_environment_without_runtime_session_reconnects() {
                 Some(EnvironmentLifecycleState::Connecting)
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.lifecycle_state),
                 Some(&EnvironmentLifecycleState::Connecting)
@@ -5948,8 +5996,7 @@ fn test_restored_environment_runtime_tab_normalizes_stale_preparing_state() {
                 "persisted preparing state has no live runtime task after restore and must not remain active"
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.lifecycle_state),
                 Some(&EnvironmentLifecycleState::Dormant),
@@ -6009,8 +6056,7 @@ fn test_environment_runtime_connecting_lifecycle_syncs_non_active_restored_tab()
                 "starting a fresh runtime bootstrap must update restored tabs that are not active"
             );
             assert_ne!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| environment.authority_key.as_str()),
                 Some(authority.as_str()),
@@ -6089,8 +6135,7 @@ fn test_error_environment_runtime_blocks_implicit_transport_ensure() {
                 "implicit ensure must not allocate a new runtime session for Error environments"
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.lifecycle_state),
                 Some(&EnvironmentLifecycleState::Error),
@@ -6158,8 +6203,7 @@ fn test_activate_dormant_environment_runtime_tab_starts_transport() {
                 "activating an Environment placeholder tab must enqueue a runtime terminal intent"
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| environment.authority_key.as_str()),
                 Some(authority.as_str())
@@ -6221,7 +6265,7 @@ fn assert_active_background_environment_runtime_started(workspace: &Workspace, a
     );
     assert_eq!(
         workspace
-            .current_environment
+            .current_environment_snapshot()
             .as_ref()
             .map(|environment| environment.authority_key.as_str()),
         Some(authority)
@@ -6459,21 +6503,19 @@ fn test_environment_runtime_pending_intents_are_single_slot_hard_cut() {
                 EnvironmentRuntimeEntryIntent::Terminal,
                 ctx,
             );
-            assert!(workspace
-                .pending_environment_runtime_terminal_authorities
-                .contains(&authority));
+            assert!(workspace.has_pending_terminal_for_authority(&authority));
             assert!(!workspace
-                .pending_environment_runtime_startup_commands
-                .contains_key(&authority));
+                .pending_startup_command_for_authority(&authority)
+                .is_some());
             assert!(!workspace
-                .pending_environment_runtime_agent_view_entries
-                .contains_key(&authority));
+                .pending_agent_view_for_authority(&authority)
+                .is_some());
             assert!(!workspace
-                .pending_environment_runtime_forked_conversation_entries
-                .contains_key(&authority));
+                .pending_forked_conversation_for_authority(&authority)
+                .is_some());
             assert!(!workspace
-                .pending_environment_runtime_session_restores
-                .contains_key(&authority));
+                .pending_session_restore_for_authority(&authority)
+                .is_some());
 
             workspace.queue_environment_runtime_intent(
                 &authority,
@@ -6482,23 +6524,20 @@ fn test_environment_runtime_pending_intents_are_single_slot_hard_cut() {
             );
             assert_eq!(
                 workspace
-                    .pending_environment_runtime_startup_commands
-                    .get(&authority)
+                    .pending_startup_command_for_authority(&authority)
                     .map(String::as_str),
                 Some("codex resume hard-cut")
             );
+            assert!(!workspace.has_pending_terminal_for_authority(&authority));
             assert!(!workspace
-                .pending_environment_runtime_terminal_authorities
-                .contains(&authority));
+                .pending_agent_view_for_authority(&authority)
+                .is_some());
             assert!(!workspace
-                .pending_environment_runtime_agent_view_entries
-                .contains_key(&authority));
+                .pending_forked_conversation_for_authority(&authority)
+                .is_some());
             assert!(!workspace
-                .pending_environment_runtime_forked_conversation_entries
-                .contains_key(&authority));
-            assert!(!workspace
-                .pending_environment_runtime_session_restores
-                .contains_key(&authority));
+                .pending_session_restore_for_authority(&authority)
+                .is_some());
 
             workspace.queue_environment_runtime_intent(
                 &authority,
@@ -6508,20 +6547,18 @@ fn test_environment_runtime_pending_intents_are_single_slot_hard_cut() {
                 ctx,
             );
             assert!(workspace
-                .pending_environment_runtime_agent_view_entries
-                .contains_key(&authority));
+                .pending_agent_view_for_authority(&authority)
+                .is_some());
             assert!(!workspace
-                .pending_environment_runtime_startup_commands
-                .contains_key(&authority));
+                .pending_startup_command_for_authority(&authority)
+                .is_some());
+            assert!(!workspace.has_pending_terminal_for_authority(&authority));
             assert!(!workspace
-                .pending_environment_runtime_terminal_authorities
-                .contains(&authority));
+                .pending_forked_conversation_for_authority(&authority)
+                .is_some());
             assert!(!workspace
-                .pending_environment_runtime_forked_conversation_entries
-                .contains_key(&authority));
-            assert!(!workspace
-                .pending_environment_runtime_session_restores
-                .contains_key(&authority));
+                .pending_session_restore_for_authority(&authority)
+                .is_some());
 
             workspace.queue_environment_runtime_intent(
                 &authority,
@@ -6531,20 +6568,18 @@ fn test_environment_runtime_pending_intents_are_single_slot_hard_cut() {
                 ctx,
             );
             assert!(workspace
-                .pending_environment_runtime_forked_conversation_entries
-                .contains_key(&authority));
+                .pending_forked_conversation_for_authority(&authority)
+                .is_some());
             assert!(!workspace
-                .pending_environment_runtime_agent_view_entries
-                .contains_key(&authority));
+                .pending_agent_view_for_authority(&authority)
+                .is_some());
             assert!(!workspace
-                .pending_environment_runtime_startup_commands
-                .contains_key(&authority));
+                .pending_startup_command_for_authority(&authority)
+                .is_some());
+            assert!(!workspace.has_pending_terminal_for_authority(&authority));
             assert!(!workspace
-                .pending_environment_runtime_terminal_authorities
-                .contains(&authority));
-            assert!(!workspace
-                .pending_environment_runtime_session_restores
-                .contains_key(&authority));
+                .pending_session_restore_for_authority(&authority)
+                .is_some());
 
             workspace.queue_environment_runtime_intent(
                 &authority,
@@ -6554,20 +6589,18 @@ fn test_environment_runtime_pending_intents_are_single_slot_hard_cut() {
                 ctx,
             );
             assert!(workspace
-                .pending_environment_runtime_session_restores
-                .contains_key(&authority));
+                .pending_session_restore_for_authority(&authority)
+                .is_some());
             assert!(!workspace
-                .pending_environment_runtime_forked_conversation_entries
-                .contains_key(&authority));
+                .pending_forked_conversation_for_authority(&authority)
+                .is_some());
             assert!(!workspace
-                .pending_environment_runtime_agent_view_entries
-                .contains_key(&authority));
+                .pending_agent_view_for_authority(&authority)
+                .is_some());
             assert!(!workspace
-                .pending_environment_runtime_startup_commands
-                .contains_key(&authority));
-            assert!(!workspace
-                .pending_environment_runtime_terminal_authorities
-                .contains(&authority));
+                .pending_startup_command_for_authority(&authority)
+                .is_some());
+            assert!(!workspace.has_pending_terminal_for_authority(&authority));
         });
     });
 }
@@ -6587,9 +6620,7 @@ fn test_environment_runtime_pending_intents_consume_only_after_terminal_created(
             assert!(workspace
                 .consume_pending_environment_runtime_entry(&authority, false)
                 .is_none());
-            assert!(workspace
-                .pending_environment_runtime_terminal_authorities
-                .contains(&authority));
+            assert!(workspace.has_pending_terminal_for_authority(&authority));
             assert!(workspace
                 .consume_pending_environment_runtime_entry(&authority, true)
                 .is_none());
@@ -6606,8 +6637,7 @@ fn test_environment_runtime_pending_intents_consume_only_after_terminal_created(
                 .is_none());
             assert_eq!(
                 workspace
-                    .pending_environment_runtime_startup_commands
-                    .get(&authority)
+                    .pending_startup_command_for_authority(&authority)
                     .map(String::as_str),
                 Some("claude --resume environment-session")
             );
@@ -6626,8 +6656,8 @@ fn test_environment_runtime_pending_intents_consume_only_after_terminal_created(
                 .consume_pending_environment_runtime_entry(&authority, false)
                 .is_none());
             assert!(workspace
-                .pending_environment_runtime_agent_view_entries
-                .contains_key(&authority));
+                .pending_agent_view_for_authority(&authority)
+                .is_some());
             assert!(workspace
                 .consume_pending_environment_runtime_entry(&authority, true)
                 .is_none());
@@ -6643,8 +6673,8 @@ fn test_environment_runtime_pending_intents_consume_only_after_terminal_created(
                 .consume_pending_environment_runtime_entry(&authority, false)
                 .is_none());
             assert!(workspace
-                .pending_environment_runtime_forked_conversation_entries
-                .contains_key(&authority));
+                .pending_forked_conversation_for_authority(&authority)
+                .is_some());
             assert!(workspace
                 .consume_pending_environment_runtime_entry(&authority, true)
                 .is_none());
@@ -6661,8 +6691,8 @@ fn test_environment_runtime_pending_intents_consume_only_after_terminal_created(
                 .consume_pending_environment_runtime_entry(&authority, false)
                 .is_none());
             assert!(workspace
-                .pending_environment_runtime_session_restores
-                .contains_key(&authority));
+                .pending_session_restore_for_authority(&authority)
+                .is_some());
             let consumed_restore = workspace
                 .consume_pending_environment_runtime_entry(&authority, true)
                 .expect("session restore should be returned only after terminal creation");
@@ -6695,7 +6725,7 @@ fn test_environment_runtime_scan_without_client_reconnects() {
                 PathBuf::from("/tmp/ashide-test-scan-without-client.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(stale_session_id, HostId::new("scan-missing-client-host".to_string()));
             workspace.set_active_tab_environment(environment);
 
@@ -6743,7 +6773,7 @@ fn test_environment_session_source_action_without_client_reconnects() {
                 PathBuf::from("/tmp/ashide-test-source-action-without-client.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(stale_session_id, HostId::new("source-action-missing-client-host".to_string()));
             workspace.set_active_tab_environment(environment);
 
@@ -6768,6 +6798,7 @@ fn test_environment_session_source_action_without_client_reconnects() {
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             };
 
             assert!(
@@ -6813,7 +6844,7 @@ fn test_missing_environment_runtime_transport_descriptor_marks_environment_error
 
             assert_eq!(
                 workspace
-                    .current_environment
+                    .current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.lifecycle_state),
                 Some(&EnvironmentLifecycleState::Error),
@@ -6835,7 +6866,7 @@ fn test_missing_environment_runtime_transport_descriptor_marks_environment_error
                         session.environment_authority_key.as_deref() != Some(authority.as_str())
                             || !session.is_active
                             || workspace
-                                .current_environment
+                                .current_environment_snapshot()
                                 .as_ref()
                                 .is_some_and(|environment| {
                                     environment.lifecycle_state == EnvironmentLifecycleState::Error
@@ -6888,8 +6919,7 @@ fn test_environment_runtime_bootstrap_failure_clears_pending_entry() {
                 "bootstrap failure must clear stale pending runtime entries"
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.lifecycle_state),
                 Some(&EnvironmentLifecycleState::Error),
@@ -6922,7 +6952,7 @@ fn test_environment_runtime_disconnected_request_after_bootstrap_marks_error() {
                 PathBuf::from("/tmp/ashide-test-ssh-control-request-disconnected.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, HostId::new("request-disconnected-host".to_string()));
             workspace.set_active_tab_environment(environment);
             workspace.queue_pending_environment_runtime_terminal(&authority, ctx);
@@ -6944,8 +6974,7 @@ fn test_environment_runtime_disconnected_request_after_bootstrap_marks_error() {
                 "post-bootstrap disconnected client request must not leave the runtime showing Connected"
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.lifecycle_state),
                 Some(&EnvironmentLifecycleState::Error),
@@ -6978,7 +7007,7 @@ fn test_environment_runtime_decoding_error_after_bootstrap_marks_error() {
                 PathBuf::from("/tmp/ashide-test-ssh-control-decode-error.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, HostId::new("decode-error-host".to_string()));
             workspace.set_active_tab_environment(environment);
 
@@ -6990,8 +7019,7 @@ fn test_environment_runtime_decoding_error_after_bootstrap_marks_error() {
                 "post-bootstrap protocol decoding errors should invalidate the runtime instead of leaving a stale Connected environment"
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.lifecycle_state),
                 Some(&EnvironmentLifecycleState::Error),
@@ -7023,13 +7051,13 @@ fn test_environment_live_row_activation_refuses_cross_environment_tab_locator() 
             );
             let authority = environment.authority_key.clone();
             let session_id = CoreSessionId::from(9014);
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 session_id,
                 PathBuf::from("/tmp/ashide-test-ssh-control-cross-env-live-row.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, HostId::new("test-host".to_string()));
             workspace.set_active_tab_environment(environment);
 
@@ -7052,6 +7080,7 @@ fn test_environment_live_row_activation_refuses_cross_environment_tab_locator() 
                     is_active: false,
                     is_pinned: false,
                     updated_at_unix_ms: None,
+                is_live_container: false,
                 });
 
             workspace.activate_restored_workspace_session(
@@ -7068,9 +7097,7 @@ fn test_environment_live_row_activation_refuses_cross_environment_tab_locator() 
                 "clicking an Environment session row must not focus a tab whose authority is current-app/local"
             );
             assert!(
-                workspace
-                    .pending_environment_runtime_session_restores
-                    .contains_key(&authority),
+                workspace.pending_session_restore_for_authority(&authority).is_some(),
                 "after refusing the cross-environment tab locator, activation should continue through Environment Runtime restore instead of silently doing nothing"
             );
         });
@@ -7102,13 +7129,13 @@ fn test_activate_restored_workspace_session_shows_error_for_cross_environment_se
                 );
             let runtime_authority = environment.authority_key.clone();
             let session_id = CoreSessionId::from(9015);
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 session_id,
                 PathBuf::from("/tmp/ashide-test-ssh-control-cross-env-activate.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, HostId::new("test-host".to_string()));
             workspace.set_active_tab_environment(environment);
 
@@ -7129,6 +7156,7 @@ fn test_activate_restored_workspace_session_shows_error_for_cross_environment_se
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             });
 
             workspace.activate_restored_workspace_session(
@@ -7150,9 +7178,7 @@ fn test_activate_restored_workspace_session_shows_error_for_cross_environment_se
                 "cross-environment session activation must not enter restoring state"
             );
             assert!(
-                !workspace
-                    .pending_environment_runtime_session_restores
-                    .contains_key(&runtime_authority),
+                !workspace.pending_session_restore_for_authority(&runtime_authority).is_some(),
                 "cross-environment local session activation must not queue runtime restore"
             );
         });
@@ -7199,6 +7225,7 @@ fn test_runtime_environment_tab_does_not_publish_current_app_terminal_live_row()
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             });
 
             let sessions = workspace.session_navigator_sessions(ctx);
@@ -7238,6 +7265,7 @@ fn test_restored_environment_session_registers_environment_host_key() {
         is_active: false,
         is_pinned: false,
         updated_at_unix_ms: None,
+        is_live_container: false,
     };
 
     assert_eq!(
@@ -7272,6 +7300,7 @@ fn test_workspace_session_action_target_none_is_current_app_not_environment_wild
         is_active: false,
         is_pinned: false,
         updated_at_unix_ms: None,
+        is_live_container: false,
     };
 
     let legacy_target_without_authority =
@@ -7320,13 +7349,13 @@ fn test_switch_to_runtime_registry_environment_without_tab_does_not_queue_termin
             );
             let authority = environment.authority_key.clone();
             let session_id = CoreSessionId::from(9019);
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 session_id,
                 PathBuf::from("/tmp/ashide-test-switch-registry-env.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, HostId::new("switch-registry-host".to_string()));
 
             assert!(
@@ -7349,8 +7378,7 @@ fn test_switch_to_runtime_registry_environment_without_tab_does_not_queue_termin
                 "switching environments must not be treated as a request to create a new terminal session"
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| environment.authority_key.as_str()),
                 Some(authority.as_str()),
@@ -7403,8 +7431,7 @@ fn test_switch_to_existing_environment_placeholder_queues_terminal_intent() {
                 "switching to an existing Environment placeholder must queue the native PTY intent"
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| environment.authority_key.as_str()),
                 Some(authority.as_str()),
@@ -7438,13 +7465,13 @@ fn test_authority_context_runtime_open_activates_target_environment_before_spawn
             let authority = environment.authority_key.clone();
             let session_id = CoreSessionId::from(9020);
             let host_id = HostId::new("authority-context-host".to_string());
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 session_id,
                 PathBuf::from("/tmp/ashide-test-authority-context-open.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, host_id.clone());
             workspace.queue_pending_environment_runtime_terminal(&authority, ctx);
 
@@ -7453,8 +7480,7 @@ fn test_authority_context_runtime_open_activates_target_environment_before_spawn
                 "test setup must simulate an authority-context open after the environment tab disappeared"
             );
             assert!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .is_none_or(|environment| environment.authority_key != authority),
                 "test setup must start outside the target environment"
@@ -7478,8 +7504,7 @@ fn test_authority_context_runtime_open_activates_target_environment_before_spawn
                 "authority-context opens must recreate/activate the target environment tab before trying to spawn"
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| environment.authority_key.as_str()),
                 Some(authority.as_str()),
@@ -7511,13 +7536,13 @@ fn test_environment_runtime_root_resolution_without_pending_keeps_environment_id
             let authority = environment.authority_key.clone();
             let session_id = CoreSessionId::from(9018);
             let host_id = HostId::new("idle-root-resolve-host".to_string());
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 session_id,
                 PathBuf::from("/tmp/ashide-test-ssh-control-idle-root.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, host_id.clone());
             workspace.set_active_tab_environment(environment);
 
@@ -7544,8 +7569,7 @@ fn test_environment_runtime_root_resolution_without_pending_keeps_environment_id
                 "root resolution without a pending terminal intent should keep the runtime connected instead of trying to spawn a terminal and marking Error"
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .and_then(|environment| environment.active_workspace_root.as_deref()),
                 Some("/root/project"),
@@ -7582,13 +7606,13 @@ fn test_environment_runtime_root_resolution_active_placeholder_queues_terminal_i
                 Some("root@dnyx216".to_string()),
                 ctx,
             );
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment,
                 session_id,
                 PathBuf::from("/tmp/ashide-test-active-placeholder-root.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, host_id.clone());
 
             assert!(
@@ -7712,9 +7736,7 @@ fn test_environment_runtime_preparation_watchdog_marks_stuck_bootstrap_error() {
                 PathBuf::from("/tmp/ashide-test-preparation-watchdog.sock"),
             );
             workspace.set_active_tab_environment(environment);
-            workspace
-                .environment_runtime_preparation_generations
-                .insert(authority.clone(), 1);
+            workspace.environments_mut().bump_preparation_generation(&authority);
 
             workspace.handle_environment_runtime_preparation_watchdog_timeout(
                 authority.clone(),
@@ -7731,8 +7753,7 @@ fn test_environment_runtime_preparation_watchdog_marks_stuck_bootstrap_error() {
                 "preparation watchdog timeout must turn a stuck Connecting/Installing runtime into a visible Environment error"
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.lifecycle_state),
                 Some(&EnvironmentLifecycleState::Error),
@@ -7760,13 +7781,13 @@ fn test_environment_runtime_root_resolution_keeps_pending_entry_until_terminal_c
             let authority = environment.authority_key.clone();
             let session_id = CoreSessionId::from(9014);
             let host_id = HostId::new("test-host".to_string());
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 session_id,
                 PathBuf::from("/tmp/ashide-test-ssh-control-drain.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, host_id.clone());
             workspace.set_active_tab_environment(environment);
 
@@ -7777,9 +7798,7 @@ fn test_environment_runtime_root_resolution_keeps_pending_entry_until_terminal_c
                 ctx,
             );
             assert!(
-                workspace
-                    .pending_environment_runtime_terminal_authorities
-                    .contains(&authority),
+                workspace.has_pending_terminal_for_authority(&authority),
                 "new Environment terminal intent should be pending before native PTY exists"
             );
 
@@ -7796,9 +7815,7 @@ fn test_environment_runtime_root_resolution_keeps_pending_entry_until_terminal_c
             );
 
             assert!(
-                workspace
-                    .pending_environment_runtime_terminal_authorities
-                    .contains(&authority),
+                workspace.has_pending_terminal_for_authority(&authority),
                 "pending terminal intent must not be consumed when no runtime terminal was created"
             );
             assert!(
@@ -7829,13 +7846,13 @@ fn test_open_directory_in_new_tab_from_environment_runtime_ignores_current_app_p
                 EnvironmentLifecycleState::Connected,
             );
             let session_id = CoreSessionId::from(9011);
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 session_id,
                 PathBuf::from("/tmp/ashide-test-ssh-control-open-dir.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, HostId::new("test-host".to_string()));
             workspace.set_active_tab_environment(environment);
 
@@ -7888,13 +7905,13 @@ fn test_open_directory_file_target_new_tab_from_environment_uses_runtime() {
                 EnvironmentLifecycleState::Connected,
             );
             let session_id = CoreSessionId::from(9012);
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 session_id,
                 PathBuf::from("/tmp/ashide-test-ssh-control-open-file-dir.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, HostId::new("test-host".to_string()));
             workspace.set_active_tab_environment(environment);
 
@@ -8047,6 +8064,7 @@ fn test_session_navigator_normalizes_stale_focused_environment_live_sessions() {
             is_active: true,
             is_pinned: false,
             updated_at_unix_ms: Some(1),
+            is_live_container: false,
         },
         WorkspaceSessionSnapshot {
             id: "tab:1:leaf:0".to_string(),
@@ -8064,6 +8082,7 @@ fn test_session_navigator_normalizes_stale_focused_environment_live_sessions() {
             is_active: true,
             is_pinned: false,
             updated_at_unix_ms: Some(2),
+            is_live_container: false,
         },
         WorkspaceSessionSnapshot {
             id: "tab:2:leaf:0".to_string(),
@@ -8081,6 +8100,7 @@ fn test_session_navigator_normalizes_stale_focused_environment_live_sessions() {
             is_active: true,
             is_pinned: false,
             updated_at_unix_ms: Some(3),
+            is_live_container: false,
         },
     ];
     Workspace::normalize_session_navigator_active_state(&mut sessions, None);
@@ -8119,6 +8139,7 @@ fn test_session_navigator_keeps_only_one_active_session_after_new_shell() {
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             };
             let second = WorkspaceSessionSnapshot {
                 id: "environment-restored-session-b".to_string(),
@@ -8136,6 +8157,7 @@ fn test_session_navigator_keeps_only_one_active_session_after_new_shell() {
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             };
             let first_key = Workspace::workspace_session_logical_key(&first);
             let second_key = Workspace::workspace_session_logical_key(&second);
@@ -8261,6 +8283,7 @@ fn test_session_navigator_clears_restored_active_marker_when_switching_tabs() {
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             };
             let restored_key = Workspace::workspace_session_logical_key(&restored);
             workspace.restored_workspace_sessions.push(restored);
@@ -8322,8 +8345,8 @@ fn test_session_navigator_active_row_uses_focused_cli_resume_identity() {
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: Some(10),
+                is_live_container: false,
             };
-            let indexed_key = Workspace::workspace_session_logical_key(&indexed);
             workspace.indexed_cli_agent_sessions.push(indexed);
 
             let terminal_view = workspace
@@ -8366,7 +8389,7 @@ fn test_session_navigator_active_row_uses_focused_cli_resume_identity() {
                         session_context:
                             crate::terminal::cli_agent_sessions::CLIAgentSessionContext {
                                 cwd: Some("/Users/admin/ashide".to_string()),
-                                session_id: None,
+                                session_id: Some(session_id.to_string()),
                                 ..Default::default()
                             },
                         input_state: crate::terminal::cli_agent_sessions::CLIAgentInputState::Closed,
@@ -8391,18 +8414,36 @@ fn test_session_navigator_active_row_uses_focused_cli_resume_identity() {
                 1,
                 "focused CLI resume pane must produce exactly one visual active row; sessions={sessions:#?}"
             );
+            // Container model: the live tab is a container with stable
+            // `source:tab:0:leaf:0` identity. The indexed Codex session is
+            // consumed (hidden) because the live container binds the same
+            // agent session id. The active row is the container, not the
+            // virtual target.
             assert_eq!(
                 Workspace::workspace_session_logical_key(active_rows[0]),
-                indexed_key,
-                "active row must be the Codex session identity, not the generic terminal source"
+                "local::source:tab:0:leaf:0",
+                "active row must be the live container identity, stable across agent changes"
             );
             assert_eq!(
                 active_rows[0].id, "tab:0:leaf:0",
                 "merged active Codex row must still point at the live focused pane"
             );
+            // The active row remains the live container, but the consumed
+            // indexed row can still contribute the more specific title.
             assert_eq!(
-                active_rows[0].label.as_deref(),
-                Some("Codex active row should win")
+                Workspace::workspace_session_label(active_rows[0]),
+                "Codex active row should win",
+                "active live row should keep the indexed session title instead of regressing to the generic agent name"
+            );
+            // The indexed virtual row must be consumed (not shown) because the
+            // live container binds the same agent session.
+            let indexed_rows = sessions
+                .iter()
+                .filter(|session| session.id == "codex-jsonl-active-row")
+                .collect::<Vec<_>>();
+            assert!(
+                indexed_rows.is_empty(),
+                "indexed Codex session must be consumed by the live container binding, sessions={sessions:#?}"
             );
         });
     });
@@ -8449,13 +8490,13 @@ fn test_add_default_tab_from_environment_runtime_creates_runtime_terminal_even_w
                 EnvironmentLifecycleState::Connected,
             );
             let session_id = CoreSessionId::from(9002);
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 session_id,
                 PathBuf::from("/tmp/ashide-test-ssh-control-default.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, HostId::new("test-host".to_string()));
             workspace.set_active_tab_environment(environment);
 
@@ -8482,7 +8523,8 @@ fn test_add_default_tab_from_environment_runtime_creates_runtime_terminal_even_w
 }
 
 #[test]
-fn test_add_default_tab_on_runtime_with_tab_config_mode_but_no_config_falls_through_to_runtime_terminal() {
+fn test_add_default_tab_on_runtime_with_tab_config_mode_but_no_config_falls_through_to_runtime_terminal(
+) {
     // #18: AddDefaultTab must consult default session mode BEFORE the runtime
     // try-route. With default mode = TabConfig but no default tab config
     // resolved, the missing-config fall-through must still open a runtime
@@ -8512,13 +8554,13 @@ fn test_add_default_tab_on_runtime_with_tab_config_mode_but_no_config_falls_thro
                 EnvironmentLifecycleState::Connected,
             );
             let session_id = CoreSessionId::from(9003);
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 session_id,
                 PathBuf::from("/tmp/ashide-test-ssh-control-tabconfig.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, HostId::new("test-host".to_string()));
             workspace.set_active_tab_environment(environment);
 
@@ -8560,7 +8602,7 @@ fn test_deliver_fork_split_pane_on_connecting_runtime_stages_loading_pane_and_qu
             );
             let authority = environment.authority_key.clone();
             let session_id = CoreSessionId::from(9004);
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 session_id,
                 PathBuf::from("/tmp/ashide-test-ssh-control-fork-split.sock"),
@@ -8574,16 +8616,12 @@ fn test_deliver_fork_split_pane_on_connecting_runtime_stages_loading_pane_and_qu
 
             // ForkEntry queued for the authority.
             assert!(
-                workspace
-                    .pending_environment_runtime_forked_conversation_entries
-                    .contains_key(&authority),
+                workspace.pending_forked_conversation_for_authority(&authority).is_some(),
                 "connecting-runtime fork split-pane must queue the ForkEntry"
             );
             // Loading pane id recorded so the connect callback replaces it.
             assert!(
-                workspace
-                    .pending_environment_runtime_split_pane_loading_ids
-                    .contains_key(&authority),
+                workspace.pending_split_pane_loading_id_for_authority(&authority).is_some(),
                 "connecting-runtime fork split-pane must record the loading pane id"
             );
         });
@@ -8613,7 +8651,7 @@ fn test_deliver_agent_pane_split_on_connecting_runtime_stages_loading_pane_and_q
             );
             let authority = environment.authority_key.clone();
             let session_id = CoreSessionId::from(9005);
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 session_id,
                 PathBuf::from("/tmp/ashide-test-ssh-control-agent-split.sock"),
@@ -8627,15 +8665,11 @@ fn test_deliver_agent_pane_split_on_connecting_runtime_stages_loading_pane_and_q
                 "connecting-runtime agent split-pane must return no live view"
             );
             assert!(
-                workspace
-                    .pending_environment_runtime_agent_view_entries
-                    .contains_key(&authority),
+                workspace.pending_agent_view_for_authority(&authority).is_some(),
                 "connecting-runtime agent split-pane must queue the AgentTabEntry"
             );
             assert!(
-                workspace
-                    .pending_environment_runtime_split_pane_loading_ids
-                    .contains_key(&authority),
+                workspace.pending_split_pane_loading_id_for_authority(&authority).is_some(),
                 "connecting-runtime agent split-pane must record the loading pane id"
             );
         });
@@ -8665,7 +8699,7 @@ fn test_deliver_startup_command_split_pane_on_connecting_runtime_stages_loading_
             );
             let authority = environment.authority_key.clone();
             let session_id = CoreSessionId::from(9006);
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 session_id,
                 PathBuf::from("/tmp/ashide-test-ssh-control-editor-split.sock"),
@@ -8678,15 +8712,11 @@ fn test_deliver_startup_command_split_pane_on_connecting_runtime_stages_loading_
             );
 
             assert!(
-                workspace
-                    .pending_environment_runtime_startup_commands
-                    .contains_key(&authority),
+                workspace.pending_startup_command_for_authority(&authority).is_some(),
                 "connecting-runtime editor split-pane must queue the startup command"
             );
             assert!(
-                workspace
-                    .pending_environment_runtime_split_pane_loading_ids
-                    .contains_key(&authority),
+                workspace.pending_split_pane_loading_id_for_authority(&authority).is_some(),
                 "connecting-runtime editor split-pane must record the loading pane id"
             );
         });
@@ -8729,14 +8759,10 @@ fn test_add_agent_tab_from_environment_runtime_inherits_environment() {
                     .and_then(|environment| environment.active_workspace_root.as_deref()),
                 Some("/root/project")
             );
-            assert!(workspace
-                .pending_environment_runtime_agent_view_entries
-                .contains_key(&authority));
+            assert!(workspace.pending_agent_view_for_authority(&authority).is_some());
 
             workspace.disconnect_environment_authority(&authority, ctx);
-            assert!(!workspace
-                .pending_environment_runtime_agent_view_entries
-                .contains_key(&authority));
+            assert!(!workspace.pending_agent_view_for_authority(&authority).is_some());
         });
     });
 }
@@ -8810,14 +8836,11 @@ fn test_project_agent_directory_from_environment_runtime_queues_agent_intent() {
                 "project agent entry in an Environment Runtime must queue an agent intent instead of opening a current-app terminal immediately"
             );
             assert!(
-                workspace
-                    .pending_environment_runtime_agent_view_entries
-                    .contains_key(&authority),
+                workspace.pending_agent_view_for_authority(&authority).is_some(),
                 "project agent entry should be stored as a pending Environment Runtime agent intent"
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .and_then(|environment| environment.active_workspace_root.as_deref()),
                 Some("/root/agent-project"),
@@ -8870,9 +8893,7 @@ fn test_ai_mode_tab_from_environment_runtime_inherits_environment() {
                     .and_then(|environment| environment.active_workspace_root.as_deref()),
                 Some("/root/project")
             );
-            assert!(workspace
-                .pending_environment_runtime_agent_view_entries
-                .contains_key(&authority));
+            assert!(workspace.pending_agent_view_for_authority(&authority).is_some());
         });
     });
 }
@@ -8912,6 +8933,7 @@ fn test_environment_restored_workspace_sessions_show_in_session_navigator() {
                     is_active: false,
                     is_pinned: false,
                     updated_at_unix_ms: None,
+                is_live_container: false,
                 });
             workspace
                 .restored_workspace_sessions
@@ -8931,6 +8953,7 @@ fn test_environment_restored_workspace_sessions_show_in_session_navigator() {
                     is_active: false,
                     is_pinned: false,
                     updated_at_unix_ms: None,
+                is_live_container: false,
                 });
 
             let sessions = workspace.session_navigator_sessions(ctx);
@@ -8970,13 +8993,13 @@ fn test_environment_restored_session_keeps_pending_restore_until_terminal_create
             );
             let authority = environment.authority_key.clone();
             let session_id = CoreSessionId::from(9010);
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 session_id,
                 PathBuf::from("/tmp/ashide-test-ssh-control-restore.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, HostId::new("restore-host".to_string()));
             workspace.set_active_tab_environment(environment);
 
@@ -8996,6 +9019,7 @@ fn test_environment_restored_session_keeps_pending_restore_until_terminal_create
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             };
             let logical_key = Workspace::workspace_session_logical_key(&restored);
             workspace.restored_workspace_sessions.push(restored.clone());
@@ -9009,15 +9033,11 @@ fn test_environment_restored_session_keeps_pending_restore_until_terminal_create
             );
 
             assert!(
-                workspace
-                    .pending_environment_runtime_session_restores
-                    .contains_key(&authority),
+                workspace.pending_session_restore_for_authority(&authority).is_some(),
                 "pending restore must survive when no runtime terminal was actually created"
             );
             assert_eq!(
-                workspace
-                    .pending_environment_runtime_session_restores
-                    .get(&authority)
+                workspace.pending_session_restore_for_authority(&authority)
                     .and_then(|pending| pending.startup_command.as_deref()),
                 Some("codex resume codex-connected-restore"),
                 "clicking an Environment Codex restore row must queue the explicit remote resume command, not only open a shell"
@@ -9088,7 +9108,7 @@ fn test_environment_runtime_restored_first_class_cli_agents_queue_remote_startup
                 );
                 let authority = environment.authority_key.clone();
                 let session_id = CoreSessionId::from(9011 + index as u64);
-                workspace.environment_runtimes.mark_connecting(
+                workspace.environments_mut().mark_connecting(
                     environment.clone(),
                     session_id,
                     PathBuf::from(format!(
@@ -9096,7 +9116,7 @@ fn test_environment_runtime_restored_first_class_cli_agents_queue_remote_startup
                     )),
                 );
                 workspace
-                    .environment_runtimes
+                    .environments_mut()
                     .mark_connected_session(session_id, HostId::new("restore-host".to_string()));
                 workspace.set_active_tab_environment(environment);
 
@@ -9121,6 +9141,7 @@ fn test_environment_runtime_restored_first_class_cli_agents_queue_remote_startup
                     is_active: false,
                     is_pinned: false,
                     updated_at_unix_ms: None,
+                is_live_container: false,
                 };
                 let logical_key = Workspace::workspace_session_logical_key(&restored);
                 workspace.restored_workspace_sessions.push(restored.clone());
@@ -9135,8 +9156,7 @@ fn test_environment_runtime_restored_first_class_cli_agents_queue_remote_startup
 
                 assert_eq!(
                     workspace
-                        .pending_environment_runtime_session_restores
-                        .get(&authority)
+                        .pending_session_restore_for_authority(&authority)
                         .and_then(|pending| pending.startup_command.as_deref()),
                     Some(expected_startup_command),
                     "{agent:?} restore must queue the native remote startup command without prepending a current-app cd"
@@ -9194,6 +9214,7 @@ fn test_open_terminal_bootstrap_restored_session_refuses_environment_runtime_ses
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             };
             let logical_key = Workspace::workspace_session_logical_key(&session);
             workspace
@@ -9269,6 +9290,7 @@ fn test_add_tab_with_shell_clears_stale_environment_restored_active_session_mark
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             };
             let logical_key = Workspace::workspace_session_logical_key(&session);
             workspace.active_restored_workspace_session_key = Some(logical_key.clone());
@@ -9346,6 +9368,7 @@ fn test_new_terminal_clears_stale_environment_restored_active_session_marker() {
                 is_active: false,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: false,
             };
             let logical_key = Workspace::workspace_session_logical_key(&session);
             workspace.active_restored_workspace_session_key = Some(logical_key.clone());
@@ -9418,6 +9441,7 @@ fn test_activating_tab_syncs_session_navigator_environment_cache() {
                     is_active: false,
                     is_pinned: false,
                     updated_at_unix_ms: None,
+                is_live_container: false,
                 });
             workspace
                 .restored_workspace_sessions
@@ -9437,6 +9461,7 @@ fn test_activating_tab_syncs_session_navigator_environment_cache() {
                     is_active: false,
                     is_pinned: false,
                     updated_at_unix_ms: None,
+                is_live_container: false,
                 });
 
             workspace.add_explicit_terminal_bootstrap_default_tab(None, ctx);
@@ -9500,7 +9525,7 @@ fn test_ssh_environment_restores_from_window_snapshot() {
             assert_eq!(workspace.tab_count(), 1);
             assert_eq!(
                 workspace
-                    .current_environment
+                    .current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.kind),
                 Some(&EnvironmentKind::Ssh)
@@ -9511,7 +9536,7 @@ fn test_ssh_environment_restores_from_window_snapshot() {
                     .as_ref()
                     .map(|environment| &environment.authority_key),
                 workspace
-                    .current_environment
+                    .current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.authority_key)
             );
@@ -9561,7 +9586,7 @@ fn test_transferred_ssh_tab_keeps_environment() {
             );
             assert_eq!(
                 workspace
-                    .current_environment
+                    .current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.kind),
                 Some(&EnvironmentKind::Ssh)
@@ -9637,8 +9662,7 @@ fn test_deleting_only_live_environment_session_keeps_environment_selected() {
                 "after deleting the only live Environment session, the Environment tab must be recreated and remain selected alongside the current-app tab"
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| environment.authority_key.as_str()),
                 Some(authority.as_str())
@@ -9670,13 +9694,13 @@ fn test_deleting_active_environment_session_reselects_same_environment_session()
             );
             let authority = environment.authority_key.clone();
             let session_id = CoreSessionId::from(9021);
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 session_id,
                 PathBuf::from("/tmp/ashide-test-delete-reselect-same-env.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(session_id, HostId::new("test-host".to_string()));
 
             // Two tabs in the *same* Environment, so deleting the active session can
@@ -9722,8 +9746,7 @@ fn test_deleting_active_environment_session_reselects_same_environment_session()
             );
 
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| environment.authority_key.as_str()),
                 Some(authority.as_str()),
@@ -9773,13 +9796,13 @@ fn test_deleting_active_environment_session_does_not_jump_to_next_environment() 
             );
             let first_authority = first_environment.authority_key.clone();
             let first_session_id = CoreSessionId::from(9121);
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 first_environment.clone(),
                 first_session_id,
                 PathBuf::from("/tmp/ashide-test-delete-stay-first-env.sock"),
             );
             workspace
-                .environment_runtimes
+                .environments_mut()
                 .mark_connected_session(first_session_id, HostId::new("first-host".to_string()));
             workspace.remember_environment_runtime_snapshot(first_environment.clone());
             workspace.set_active_tab_environment(first_environment);
@@ -9930,8 +9953,7 @@ fn test_deleting_inactive_environment_session_keeps_current_app_selected() {
 
             workspace.add_explicit_terminal_bootstrap_default_tab(None, ctx);
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.kind),
                 Some(&EnvironmentKind::Local),
@@ -9949,8 +9971,7 @@ fn test_deleting_inactive_environment_session_keeps_current_app_selected() {
             );
 
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.kind),
                 Some(&EnvironmentKind::Local),
@@ -10007,8 +10028,7 @@ fn test_closing_active_environment_tab_switches_current_environment_to_current_a
                 Some(&EnvironmentKind::Local)
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.kind),
                 Some(&EnvironmentKind::Local)
@@ -10035,8 +10055,7 @@ fn test_closing_inactive_environment_tab_keeps_active_current_app_environment() 
             );
             workspace.add_explicit_terminal_bootstrap_default_tab(None, ctx);
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.kind),
                 Some(&EnvironmentKind::Local)
@@ -10054,8 +10073,7 @@ fn test_closing_inactive_environment_tab_keeps_active_current_app_environment() 
                 Some(&EnvironmentKind::Local)
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.kind),
                 Some(&EnvironmentKind::Local)
@@ -10084,8 +10102,7 @@ fn test_close_other_tabs_preserves_target_environment_boundary() {
 
             workspace.add_explicit_terminal_bootstrap_default_tab(None, ctx);
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.kind),
                 Some(&EnvironmentKind::Local),
@@ -10096,8 +10113,7 @@ fn test_close_other_tabs_preserves_target_environment_boundary() {
 
             assert_eq!(workspace.tab_count(), 1);
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| environment.authority_key.as_str()),
                 Some(authority.as_str()),
@@ -10139,8 +10155,7 @@ fn test_close_other_tabs_preserves_target_current_app_boundary() {
 
             assert_eq!(workspace.tab_count(), 1);
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.kind),
                 Some(&EnvironmentKind::Local),
@@ -10179,8 +10194,7 @@ fn test_close_tabs_left_preserves_target_environment_boundary_when_active_is_rem
 
             workspace.activate_tab_internal(0, ctx);
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.kind),
                 Some(&EnvironmentKind::Local),
@@ -10191,8 +10205,7 @@ fn test_close_tabs_left_preserves_target_environment_boundary_when_active_is_rem
 
             assert_eq!(workspace.tab_count(), 1);
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| environment.authority_key.as_str()),
                 Some(authority.as_str()),
@@ -10229,8 +10242,7 @@ fn test_close_tabs_right_preserves_target_current_app_boundary_when_active_is_re
                 ),
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.kind),
                 Some(&EnvironmentKind::Ssh),
@@ -10241,8 +10253,7 @@ fn test_close_tabs_right_preserves_target_current_app_boundary_when_active_is_re
 
             assert_eq!(workspace.tab_count(), 1);
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.kind),
                 Some(&EnvironmentKind::Local),
@@ -10275,12 +10286,12 @@ fn test_close_active_environment_pane_syncs_session_navigator_active_row() {
                     Some("/root/project".to_string()),
                     EnvironmentLifecycleState::Connected,
                 );
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 runtime_session_id,
                 PathBuf::from("/tmp/ashide-test-close-pane-runtime.sock"),
             );
-            workspace.environment_runtimes.mark_connected_session(
+            workspace.environments_mut().mark_connected_session(
                 runtime_session_id,
                 HostId::new("close-pane-runtime-host".to_string()),
             );
@@ -10317,7 +10328,7 @@ fn test_close_active_environment_pane_syncs_session_navigator_active_row() {
 
         let (authority, active_before_close) = workspace.read(&app, |workspace, ctx| {
             let authority = workspace
-                .current_environment
+                .current_environment_snapshot()
                 .as_ref()
                 .expect("Environment should be active")
                 .authority_key
@@ -10380,12 +10391,12 @@ fn test_undo_close_environment_pane_restores_session_navigator_active_row() {
                     Some("/root/project".to_string()),
                     EnvironmentLifecycleState::Connected,
                 );
-            workspace.environment_runtimes.mark_connecting(
+            workspace.environments_mut().mark_connecting(
                 environment.clone(),
                 runtime_session_id,
                 PathBuf::from("/tmp/ashide-test-undo-pane-runtime.sock"),
             );
-            workspace.environment_runtimes.mark_connected_session(
+            workspace.environments_mut().mark_connected_session(
                 runtime_session_id,
                 HostId::new("undo-pane-runtime-host".to_string()),
             );
@@ -10422,7 +10433,7 @@ fn test_undo_close_environment_pane_restores_session_navigator_active_row() {
 
         let authority = workspace.read(&app, |workspace, ctx| {
             let authority = workspace
-                .current_environment
+                .current_environment_snapshot()
                 .as_ref()
                 .expect("Environment should be active")
                 .authority_key
@@ -10495,7 +10506,7 @@ fn test_undo_close_environment_tab_restores_environment_boundary() {
 
             workspace.close_tab(environment_tab_index, true, true, ctx);
             assert_eq!(
-                workspace.current_environment.as_ref().map(|environment| &environment.kind),
+                workspace.current_environment_snapshot().as_ref().map(|environment| &environment.kind),
                 Some(&EnvironmentKind::Local),
                 "closing the active Environment tab should temporarily fall back to current-app/local"
             );
@@ -10508,8 +10519,7 @@ fn test_undo_close_environment_tab_restores_environment_boundary() {
 
         workspace.read(&app, |workspace, _ctx| {
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| environment.authority_key.as_str()),
                 Some(authority.as_str()),
@@ -10606,8 +10616,7 @@ fn test_disconnect_only_runtime_environment_leaves_current_app_tab() {
                 Some(&EnvironmentKind::Local)
             );
             assert_eq!(
-                workspace
-                    .current_environment
+                workspace.current_environment_snapshot()
                     .as_ref()
                     .map(|environment| &environment.kind),
                 Some(&EnvironmentKind::Local)
@@ -10626,11 +10635,12 @@ fn test_disconnect_only_runtime_environment_leaves_current_app_tab() {
 #[test]
 fn test_split_pane_add_terminal_pane_call_sites_are_audited() {
     const VIEW_RS: &str = include_str!("view.rs");
-    let call_count = VIEW_RS.matches("add_terminal_pane_in_current_environment(").count();
+    let call_count = VIEW_RS
+        .matches("add_terminal_pane_in_current_environment(")
+        .count();
     const APPROVED_CALL_SITES: usize = 6;
     assert_eq!(
-        call_count,
-        APPROVED_CALL_SITES,
+        call_count, APPROVED_CALL_SITES,
         "unexpected add_terminal_pane_in_current_environment call site — route split-pane \
          capabilities through deliver_agent_pane_split / deliver_fork_split_pane / \
          deliver_startup_command_split_pane, or document exceptions in \
@@ -10644,11 +10654,12 @@ fn test_split_pane_add_terminal_pane_call_sites_are_audited() {
 #[test]
 fn test_environment_backend_kind_dispatch_call_sites_are_audited() {
     const VIEW_RS: &str = include_str!("view.rs");
-    let for_env_count = VIEW_RS.matches("EnvironmentBackendKind::for_environment").count();
+    let for_env_count = VIEW_RS
+        .matches("EnvironmentBackendKind::for_environment")
+        .count();
     const APPROVED_FOR_ENVIRONMENT_DISPATCHES: usize = 9;
     assert_eq!(
-        for_env_count,
-        APPROVED_FOR_ENVIRONMENT_DISPATCHES,
+        for_env_count, APPROVED_FOR_ENVIRONMENT_DISPATCHES,
         "unexpected EnvironmentBackendKind::for_environment dispatch — add a capability-matrix \
          row and routing test when introducing a new local/remote entry point"
     );

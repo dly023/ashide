@@ -32,7 +32,7 @@ use warpui::{EntityId, ViewContext};
 
 use crate::ai::agent::conversation::AIConversation;
 use crate::ai::blocklist::agent_view::AgentViewEntryOrigin;
-use crate::app_state::EnvironmentSnapshot;
+use crate::app_state::{EnvironmentSnapshot, WorkspaceSessionSnapshot};
 use crate::terminal::view::inline_banner::ZeroStatePromptSuggestionType;
 use crate::workspace::environment_runtime::authority_uses_terminal_bootstrap;
 use crate::workspace::view::Workspace;
@@ -93,6 +93,15 @@ pub(crate) struct ForkEntry {
     pub(crate) summarize_after_fork: bool,
     pub(crate) summarization_prompt: Option<String>,
     pub(crate) initial_prompt: Option<String>,
+}
+
+/// Unified parameter bag for a pending session restore on an environment
+/// runtime. Carries the session metadata and optional startup command across
+/// the async runtime connection boundary.
+#[derive(Clone)]
+pub(crate) struct PendingEnvironmentRuntimeSessionRestore {
+    pub(crate) session: WorkspaceSessionSnapshot,
+    pub(crate) startup_command: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

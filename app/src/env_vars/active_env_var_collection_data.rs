@@ -1,11 +1,11 @@
 use crate::{
-    drive::access::{ContentEditability, LocalObjectAccessLevel},
+    drive::access::ContentEditability,
     env_vars::EnvVarCollectionObject,
     object_store::ids::{ClientId, ObjectStoreId},
     object_store::{
         breadcrumbs::ContainingObject,
         model::{persistence::ObjectStoreEvent, view::ObjectStoreViewModel},
-        Owner, Revision, Space, StoredObject,
+        Owner, Revision, StoredObject,
     },
     AppContext, ObjectStoreModel,
 };
@@ -123,18 +123,6 @@ impl ActiveEnvVarCollectionData {
         }
     }
 
-    /// The current user's access level on this env var collection.
-    pub fn access_level(&self, app: &AppContext) -> LocalObjectAccessLevel {
-        match &self.active_env_var_collection {
-            ActiveEnvVarCollection::CommittedEnvVarCollection(object_store_id) => {
-                ObjectStoreViewModel::as_ref(app).access_level(&object_store_id.uid(), app)
-            }
-            ActiveEnvVarCollection::None | ActiveEnvVarCollection::NewEnvVarCollection(_) => {
-                LocalObjectAccessLevel::Full
-            }
-        }
-    }
-
     pub fn editability(&self, app: &AppContext) -> ContentEditability {
         match &self.active_env_var_collection {
             ActiveEnvVarCollection::CommittedEnvVarCollection(object_store_id) => {
@@ -142,19 +130,6 @@ impl ActiveEnvVarCollectionData {
             }
             ActiveEnvVarCollection::None | ActiveEnvVarCollection::NewEnvVarCollection(_) => {
                 ContentEditability::Editable
-            }
-        }
-    }
-
-    /// The space that this env var collection is in.
-    pub fn space(&self, app: &AppContext) -> Option<Space> {
-        match &self.active_env_var_collection {
-            ActiveEnvVarCollection::None => None,
-            ActiveEnvVarCollection::CommittedEnvVarCollection(object_store_id) => {
-                ObjectStoreViewModel::as_ref(app).object_space(&object_store_id.uid(), app)
-            }
-            ActiveEnvVarCollection::NewEnvVarCollection(env_var_collection) => {
-                Some(env_var_collection.space(app))
             }
         }
     }
@@ -214,9 +189,6 @@ pub enum TrashStatus {
 pub enum ActiveEnvVarCollectionDataEvent {
     /// The EVC's breadcrumbs were updated.
     BreadcrumbsChanged,
-    /// The EVC was trashed or untrashed
-    /// (used for refreshing the pane overflow items)
-    TrashStatusChanged,
 }
 
 impl Entity for ActiveEnvVarCollectionData {

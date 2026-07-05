@@ -145,6 +145,8 @@ fn compile_objc_lib() {
     }
 
     cc::Build::new()
+        .flag_if_supported("-Wno-deprecated-declarations")
+        .flag_if_supported("-Wno-unsupported-availability-guard")
         .file("src/platform/mac/objc/app.m")
         .file("src/platform/mac/objc/host_view.m")
         .file("src/platform/mac/objc/hotkey.m")

@@ -71,11 +71,23 @@ impl DaemonSftpBackend {
         path.to_string_lossy().replace('\\', "/")
     }
 
-    fn kind_to_entry_type(kind: EnvironmentRuntimeFileKind, is_dir: bool) -> FileEntryType {
+    fn kind_to_entry_type(
+        kind: EnvironmentRuntimeFileKind,
+        target_kind: EnvironmentRuntimeFileKind,
+        is_dir: bool,
+    ) -> FileEntryType {
         match kind {
             EnvironmentRuntimeFileKind::Directory => FileEntryType::Directory,
             EnvironmentRuntimeFileKind::File => FileEntryType::File,
-            EnvironmentRuntimeFileKind::Symlink => FileEntryType::Symlink,
+            EnvironmentRuntimeFileKind::Symlink => match target_kind {
+                EnvironmentRuntimeFileKind::Directory => FileEntryType::Directory,
+                EnvironmentRuntimeFileKind::File => FileEntryType::File,
+                EnvironmentRuntimeFileKind::Missing
+                | EnvironmentRuntimeFileKind::Other
+                | EnvironmentRuntimeFileKind::Unspecified
+                | EnvironmentRuntimeFileKind::Symlink => FileEntryType::Symlink,
+            },
+            EnvironmentRuntimeFileKind::Missing => FileEntryType::Other,
             EnvironmentRuntimeFileKind::Other => FileEntryType::Other,
             EnvironmentRuntimeFileKind::Unspecified => {
                 if is_dir {
@@ -111,7 +123,8 @@ impl SftpBackend for DaemonSftpBackend {
             .entries
             .into_iter()
             .map(|entry| {
-                let file_type = Self::kind_to_entry_type(entry.kind, entry.is_dir);
+                let file_type =
+                    Self::kind_to_entry_type(entry.kind, entry.target_kind, entry.is_dir);
                 FileEntry {
                     path: base.join(&entry.name),
                     name: entry.name,
@@ -173,27 +186,6 @@ impl SftpBackend for DaemonSftpBackend {
             .block_on(environment_runtime::resolve_path(&self.client, path_str))
             .map_err(SftpOpsError::Operation)?;
         Ok(PathBuf::from(resolved.canonical_path))
-    }
-
-    fn stat(&self, path: &Path) -> Result<FileEntry, SftpOpsError> {
-        let path_str = Self::path_string(path);
-        let resolved = self
-            .block_on(environment_runtime::resolve_path(&self.client, path_str))
-            .map_err(SftpOpsError::Operation)?;
-        let file_type = Self::kind_to_entry_type(resolved.kind, false);
-        let canonical = PathBuf::from(&resolved.canonical_path);
-        let name = canonical
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        Ok(FileEntry {
-            name,
-            path: canonical,
-            file_type,
-            size: resolved.size_bytes.unwrap_or(0),
-            modified: None,
-            permissions: None,
-        })
     }
 
     fn upload_file(

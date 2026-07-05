@@ -168,10 +168,6 @@ impl EnvironmentRuntimePlaceholderView {
                 crate::t!("environment-runtime-placeholder-installing"),
                 crate::t!("environment-runtime-placeholder-installing-detail"),
             ),
-            Some(EnvironmentLifecycleState::Reconnecting) => (
-                crate::t!("environment-runtime-placeholder-reconnecting"),
-                crate::t!("environment-runtime-placeholder-reconnecting-detail"),
-            ),
             Some(EnvironmentLifecycleState::Error) => (
                 crate::t!("environment-runtime-placeholder-error"),
                 crate::t!("environment-runtime-placeholder-error-detail"),

@@ -88,35 +88,6 @@ pub fn prewarm_db_in_background() {
     }
 }
 
-// Remove sqlite database as part of Logout v0.
-// TODO: Implement per user scoping of sqlite.
-#[cfg_attr(not(feature = "local_fs"), allow(unused_variables))]
-pub fn remove(sender: &Option<SyncSender<ModelEvent>>) {
-    cfg_if::cfg_if! {
-        if #[cfg(feature = "local_fs")] {
-            if let Some(sender) = sender.clone() {
-                sqlite::remove(sender);
-            }
-        } else {
-            log::info!("Local filesystem persistence is not enabled.");
-        }
-    }
-}
-
-// Reconstruct sqlite database as part of Logout v0.
-#[cfg_attr(not(feature = "local_fs"), allow(unused_variables))]
-pub fn reconstruct(sender: &Option<SyncSender<ModelEvent>>) {
-    cfg_if::cfg_if! {
-        if #[cfg(feature = "local_fs")] {
-            if let Some(sender) = sender.clone() {
-                sqlite::reconstruct(sender);
-            }
-        } else {
-            log::info!("Local filesystem persistence is not enabled.");
-        }
-    }
-}
-
 /// Holds interfaces to the writer thread.
 pub struct WriterHandles {
     pub handle: JoinHandle<()>,
@@ -291,12 +262,6 @@ pub enum ModelEvent {
     SaveExperiments {
         experiments: Vec<ServerExperiment>,
     },
-    // `PauseAndRemoveDatabase` and `ReconstructAndResume` are used to pause and resume the writer thread.
-    // These are employed as part of Logout v0 to ensure that the writer thread
-    // does not continue writing to the DB after the user has logged out and the DB is deleted.
-    PauseAndRemoveDatabase,
-    #[cfg(feature = "local_fs")]
-    ReconstructAndResume,
     InsertObjectAction {
         object_action: ObjectAction,
     },

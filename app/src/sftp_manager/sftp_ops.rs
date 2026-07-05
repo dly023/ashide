@@ -11,14 +11,10 @@ use std::path::PathBuf;
 /// SFTP 操作错误
 #[derive(Debug)]
 pub enum SftpOpsError {
-    /// 连接错误
-    Connection(String),
     /// 操作错误
     Operation(String),
     /// 本地 IO 错误
     LocalIo(String),
-    /// 未找到凭据
-    NoCredentials(String),
     /// 传输已取消
     Cancelled,
 }
@@ -26,10 +22,8 @@ pub enum SftpOpsError {
 impl std::fmt::Display for SftpOpsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SftpOpsError::Connection(msg) => write!(f, "连接错误: {msg}"),
             SftpOpsError::Operation(msg) => write!(f, "操作错误: {msg}"),
             SftpOpsError::LocalIo(msg) => write!(f, "本地 IO 错误: {msg}"),
-            SftpOpsError::NoCredentials(msg) => write!(f, "未找到凭据: {msg}"),
             SftpOpsError::Cancelled => write!(f, "传输已取消"),
         }
     }
@@ -56,15 +50,6 @@ pub(crate) fn normalize_remote_path(path: &PathBuf) -> PathBuf {
 mod tests {
     use super::*;
 
-    /// 测试 SftpOpsError::Connection Display 输出
-    #[test]
-    fn test_sftp_ops_error_display_connection() {
-        assert_eq!(
-            SftpOpsError::Connection("refused".into()).to_string(),
-            "连接错误: refused"
-        );
-    }
-
     /// 测试 SftpOpsError::Operation Display 输出
     #[test]
     fn test_sftp_ops_error_display_operation() {
@@ -80,15 +65,6 @@ mod tests {
         assert_eq!(
             SftpOpsError::LocalIo("disk full".into()).to_string(),
             "本地 IO 错误: disk full"
-        );
-    }
-
-    /// 测试 SftpOpsError::NoCredentials Display 输出
-    #[test]
-    fn test_sftp_ops_error_display_no_credentials() {
-        assert_eq!(
-            SftpOpsError::NoCredentials("no key".into()).to_string(),
-            "未找到凭据: no key"
         );
     }
 
@@ -108,15 +84,6 @@ mod tests {
 
     // ==================== SftpOpsError 边界场景测试 ====================
 
-    /// 测试 SftpOpsError::Connection 空消息
-    #[test]
-    fn test_sftp_ops_error_connection_empty() {
-        assert_eq!(
-            SftpOpsError::Connection(String::new()).to_string(),
-            "连接错误: "
-        );
-    }
-
     /// 测试 SftpOpsError::Operation 空消息
     #[test]
     fn test_sftp_ops_error_operation_empty() {
@@ -132,15 +99,6 @@ mod tests {
         assert_eq!(
             SftpOpsError::LocalIo(String::new()).to_string(),
             "本地 IO 错误: "
-        );
-    }
-
-    /// 测试 SftpOpsError::NoCredentials 空消息
-    #[test]
-    fn test_sftp_ops_error_no_credentials_empty() {
-        assert_eq!(
-            SftpOpsError::NoCredentials(String::new()).to_string(),
-            "未找到凭据: "
         );
     }
 

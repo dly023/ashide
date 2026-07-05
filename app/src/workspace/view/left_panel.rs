@@ -2,18 +2,18 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use warp_core::ui::theme::color::internal_colors;
-use warp_core::{HostId, SessionId, ui::Icon};
+use warp_core::{ui::Icon, HostId, SessionId};
 use warp_util::path::LineAndColumnArg;
 use warpui::{
-    AppContext, Entity, FocusContext, ModelHandle, SingletonEntity, TypedActionView, View,
-    ViewContext, ViewHandle, WeakViewHandle,
     elements::{
-        ChildView, ConstrainedBox, Container, CrossAxisAlignment, DragBarSide, Element, Empty,
-        Flex, MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Resizable,
-        ResizableStateHandle, Shrinkable, resizable_state_handle,
+        resizable_state_handle, ChildView, ConstrainedBox, Container, CrossAxisAlignment,
+        DragBarSide, Element, Empty, Flex, MainAxisAlignment, MainAxisSize, MouseStateHandle,
+        ParentElement, Resizable, ResizableStateHandle, Shrinkable,
     },
     platform::Cursor,
     ui_components::components::{Coords, UiComponent, UiComponentStyles},
+    AppContext, Entity, FocusContext, ModelHandle, SingletonEntity, TypedActionView, View,
+    ViewContext, ViewHandle, WeakViewHandle,
 };
 
 use crate::ai::skills::{SkillManager, SkillOpenOrigin};
@@ -29,16 +29,18 @@ use crate::settings_view::keybindings::{KeybindingChangedEvent, KeybindingChange
 use crate::skill_manager::{SkillManagerPanel, SkillManagerPanelEvent};
 #[cfg(feature = "local_fs")]
 use crate::util::file::external_editor::EditorSettings;
-use crate::util::openable_file_type::FileTarget;
 #[cfg(feature = "local_fs")]
 use crate::util::openable_file_type::resolve_file_target_with_editor_choice;
+use crate::util::openable_file_type::FileTarget;
 use crate::workspace::environment_provider::{
     EnvironmentProviderManagerEvent, EnvironmentProviderManagerView, EnvironmentProviderTarget,
 };
 use crate::workspace::view::global_search::view::{
     Event as GlobalSearchViewEvent, GlobalSearchEntryFocus, GlobalSearchView,
 };
-use crate::workspace::view::server_file_browser::{ServerFileBrowserEvent, ServerFileBrowserView};
+use crate::workspace::view::server_file_browser::{
+    FileBrowserRole, ServerFileBrowserEvent, ServerFileBrowserView,
+};
 use crate::workspace::view::{
     LEFT_PANEL_ENVIRONMENT_PROVIDER_MANAGER_BINDING_NAME, LEFT_PANEL_GLOBAL_SEARCH_BINDING_NAME,
     LEFT_PANEL_LOCAL_DRIVE_BINDING_NAME, LEFT_PANEL_PROJECT_EXPLORER_BINDING_NAME,
@@ -49,7 +51,7 @@ use crate::{
     appearance::Appearance,
     code::file_tree::FileTreeView,
     drive::panel::{MAX_SIDEBAR_WIDTH_RATIO, MIN_SIDEBAR_WIDTH},
-    pane_group::pane::view::header::{PANE_HEADER_HEIGHT, components::HEADER_EDGE_PADDING},
+    pane_group::pane::view::header::{components::HEADER_EDGE_PADDING, PANE_HEADER_HEIGHT},
     pane_group::{self},
     terminal::resizable_data::{ModalType, ResizableData},
     ui_components::{
@@ -657,6 +659,7 @@ impl LeftPanelView {
     ) {
         self.environment_project_explorer_view
             .update(ctx, |view, ctx| {
+                view.set_role(FileBrowserRole::ProjectExplorer, ctx);
                 view.set_environment_root(host_id, path, session_id, lifecycle_state, ctx);
             });
     }
@@ -671,17 +674,6 @@ impl LeftPanelView {
             .update(ctx, |view, ctx| {
                 view.set_environment_unavailable_root(path, lifecycle_state, ctx);
             });
-    }
-
-    pub fn navigate_server_file_browser(
-        &mut self,
-        host_id: HostId,
-        path: String,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.server_file_browser_view.update(ctx, |view, ctx| {
-            view.navigate_to_environment_path(host_id, path, ctx);
-        });
     }
 
     pub fn navigate_environment_project_explorer(

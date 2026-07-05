@@ -5,11 +5,7 @@ use chrono::{DateTime, Utc};
 use derivative::Derivative;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    auth::UserUid,
-    object_store::ids::{ObjectStoreId, StableObjectId},
-    server_time::ServerTimestamp,
-};
+use crate::{auth::UserUid, object_store::ids::ObjectStoreId, server_time::ServerTimestamp};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ObjectIdType {
@@ -218,12 +214,6 @@ impl Owner {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ServerObjectContainer {
-    Folder { folder_uid: StableObjectId },
-    Drive { owner: Owner },
-}
-
 #[derive(Clone, Debug)]
 pub struct NumInFlightRequests(pub usize);
 
@@ -318,13 +308,8 @@ impl StoredObjectStatuses {
 
 #[derive(Copy, Default, Clone, Debug, Eq, PartialEq)]
 pub enum StoredObjectEventEntrypoint {
-    LocalSettings,
-    ResourceCenter,
-    UniversalSearch,
-    ManagementUI,
     Blocklist,
     ImportModal,
-    Onboarding,
     #[default]
     Unknown,
 }

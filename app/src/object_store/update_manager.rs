@@ -14,10 +14,8 @@ use crate::{
     },
     object_store::{
         model::{
-            actions::{ObjectAction, ObjectActionHistory, ObjectActionType, ObjectActions},
-            generic_string_model::{
-                GenericStringModel, GenericStringObjectId, Serializer, StringModel,
-            },
+            actions::{ObjectActionType, ObjectActions},
+            generic_string_model::GenericStringObjectId,
             persistence::{ObjectStoreEvent, ObjectStoreModel, UpdateSource},
         },
         GenericStoredObject, GenericStringObjectFormat, JsonObjectType, ObjectIdType, ObjectType,
@@ -33,12 +31,11 @@ use crate::{
     },
     workspaces::user_workspaces::UserWorkspaces,
 };
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashSet;
 use std::sync::{mpsc::SyncSender, Arc};
-use warpui::r#async::FutureId;
 use warpui::AppContext;
 use warpui::{Entity, ModelContext, SingletonEntity};
 
@@ -50,25 +47,18 @@ lazy_static! {
 #[derive(Debug, PartialEq)]
 pub enum OperationSuccessType {
     Success,
-    Failure,
     Rejection,
-    Denied(String),
-    FeatureNotAvailable,
 }
 
 #[derive(Debug, PartialEq)]
 pub enum ObjectOperation {
-    Create { initiated_by: InitiatedBy },
     Update,
     MoveToFolder,
     MoveToDrive,
     Trash,
-    TakeEditAccess,
     Untrash,
     Delete { initiated_by: InitiatedBy },
     EmptyTrash,
-    UpdatePermissions,
-    Leave,
 }
 
 #[derive(Debug)]
@@ -83,29 +73,13 @@ pub struct ObjectOperationResult {
 #[derive(Debug)]
 pub enum UpdateManagerEvent {
     ObjectOperationComplete { result: ObjectOperationResult },
-    AmbientTaskUpdated { timestamp: DateTime<Utc> },
 }
 
 /// An enum that defines whether the action was initiated by the user or the system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitiatedBy {
     User,
-    System,
 }
-#[derive(Debug)]
-pub struct GenericStringObjectInput<T, S>
-where
-    T: StringModel<
-            StoredObjectType = GenericStoredObject<GenericStringObjectId, GenericStringModel<T, S>>,
-        > + 'static,
-    S: Serializer<T> + 'static,
-{
-    pub id: ClientId,
-    pub model: GenericStringModel<T, S>,
-    pub initial_folder_id: Option<ObjectStoreId>,
-    pub entrypoint: StoredObjectEventEntrypoint,
-}
-
 /// The UpdateManager is responsible for delegating work
 /// when there is an update to an object (e.g. via a user interaction or
 /// a local persistence event). Specifically, it will
@@ -113,7 +87,6 @@ where
 /// - interact with the ObjectStoreModel to update the in-memory state used by the object views
 pub struct UpdateManager {
     model_event_sender: Option<SyncSender<ModelEvent>>,
-    spawned_futures: Vec<FutureId>,
 }
 
 impl UpdateManager {
@@ -121,20 +94,12 @@ impl UpdateManager {
         model_event_sender: Option<SyncSender<ModelEvent>>,
         _ctx: &mut ModelContext<Self>,
     ) -> Self {
-        Self {
-            model_event_sender,
-            spawned_futures: Default::default(),
-        }
+        Self { model_event_sender }
     }
 
     #[cfg(test)]
     pub fn mock(ctx: &mut ModelContext<Self>) -> Self {
         Self::new(None, ctx)
-    }
-
-    #[cfg(any(test, feature = "integration_tests"))]
-    pub fn spawned_futures(&self) -> &[FutureId] {
-        &self.spawned_futures
     }
 
     fn save_to_db(&self, events: impl IntoIterator<Item = ModelEvent>) {
@@ -155,22 +120,6 @@ impl UpdateManager {
     ) {
         if let Some(stored_object) = object_store_model.get_by_uid(uid) {
             self.save_to_db([stored_object.upsert_event()]);
-        }
-    }
-
-    fn save_in_memory_object_metadata_to_sqlite(
-        &mut self,
-        object_store_model: &ObjectStoreModel,
-        uid: &ObjectUid,
-        hashed_sqlite_id: &str,
-    ) {
-        if let Some(stored_object) = object_store_model.get_by_uid(uid) {
-            let metadata = stored_object.metadata().clone();
-            let event = ModelEvent::UpdateObjectMetadata {
-                id: hashed_sqlite_id.to_string(),
-                metadata,
-            };
-            self.save_to_db([event]);
         }
     }
 
@@ -410,8 +359,6 @@ impl UpdateManager {
                     StoredObjectEventEntrypoint::Unknown,
                     true,
                     None,
-                    // When adding the initiated_by parameter to this function call, InitiatedBy::User was set as a default value.
-                    // This can be changed to InitiatedBy::System if this action was automatically kicked off by the system and we do not want a user facing toast.
                     InitiatedBy::User,
                     ctx,
                 );
@@ -577,8 +524,6 @@ impl UpdateManager {
             entrypoint,
             true,
             initial_folder_id,
-            // When adding the initiated_by parameter to this function call, InitiatedBy::User was set as a default value.
-            // This can be changed to InitiatedBy::System if this action was automatically kicked off by the system and we do not want a user facing toast.
             InitiatedBy::User,
             ctx,
         );
@@ -598,8 +543,6 @@ impl UpdateManager {
             Default::default(),
             false,
             None,
-            // When adding the initiated_by parameter to this function call, InitiatedBy::User was set as a default value.
-            // This can be changed to InitiatedBy::System if this action was automatically kicked off by the system and we do not want a user facing toast.
             InitiatedBy::User,
             ctx,
         );
@@ -640,8 +583,6 @@ impl UpdateManager {
             Default::default(),
             false,
             None,
-            // When adding the initiated_by parameter to this function call, InitiatedBy::User was set as a default value.
-            // This can be changed to InitiatedBy::System if this action was automatically kicked off by the system and we do not want a user facing toast.
             InitiatedBy::User,
             ctx,
         );
@@ -694,8 +635,6 @@ impl UpdateManager {
             entrypoint,
             force_expand,
             initial_folder_id,
-            // When adding the initiated_by parameter to this function call, InitiatedBy::User was set as a default value.
-            // This can be changed to InitiatedBy::System if this action was automatically kicked off by the system and we do not want a user facing toast.
             InitiatedBy::User,
             ctx,
         );
@@ -748,8 +687,6 @@ impl UpdateManager {
             entrypoint,
             force_expand,
             initial_folder_id,
-            // When adding the initiated_by parameter to this function call, InitiatedBy::User was set as a default value.
-            // This can be changed to InitiatedBy::System if this action was automatically kicked off by the system and we do not want a user facing toast.
             InitiatedBy::User,
             ctx,
         );
@@ -772,8 +709,6 @@ impl UpdateManager {
             entrypoint,
             force_expand,
             None,
-            // When adding the initiated_by parameter to this function call, InitiatedBy::User was set as a default value.
-            // This can be changed to InitiatedBy::System if this action was automatically kicked off by the system and we do not want a user facing toast.
             InitiatedBy::User,
             ctx,
         );
@@ -797,8 +732,6 @@ impl UpdateManager {
             entrypoint,
             force_expand,
             initial_folder_id,
-            // When adding the initiated_by parameter to this function call, InitiatedBy::User was set as a default value.
-            // This can be changed to InitiatedBy::System if this action was automatically kicked off by the system and we do not want a user facing toast.
             InitiatedBy::User,
             ctx,
         );
@@ -942,46 +875,6 @@ impl UpdateManager {
         self.save_to_db([ModelEvent::InsertObjectAction { object_action }]);
 
         let _ = (id_and_type, action_type, data, action_timestamp);
-    }
-
-    fn maybe_overwrite_object_action_history(
-        &mut self,
-        history: &ObjectActionHistory,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        ObjectActions::handle(ctx).update(ctx, |object_actions_model, ctx| {
-            // Accept this action history if we don't have any actions for this object OR the server's latest action
-            // for this object is at least as recent as our latest synced action for this object
-            let latest_processed_at_ts =
-                object_actions_model.get_latest_processed_at_ts(&history.uid);
-            if latest_processed_at_ts
-                .is_none_or(|client_ts| client_ts <= history.latest_processed_at_timestamp)
-            {
-                // Overwrite the history for this object.
-                object_actions_model.overwrite_action_history_for_object(
-                    &history.uid,
-                    history.actions.clone(),
-                    ctx,
-                );
-            }
-        });
-    }
-
-    /// Overwrites the actions in SQLite for a specified set of objects with the actions that
-    /// are currently in the ObjectActions singleton model.
-    fn sync_actions_for_objects_to_sqlite(
-        &mut self,
-        object_uids: Vec<&ObjectUid>,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        // Retrieve the objects from the ObjectActions model
-        let actions = ObjectActions::handle(ctx).read(ctx, |object_actions_model, _ctx| {
-            object_actions_model.get_actions_for_objects(object_uids)
-        });
-
-        // Overwrite the actions for those objects in sqlite
-        let actions_to_sync: Vec<ObjectAction> = actions.values().flatten().cloned().collect();
-        self.save_to_db([ModelEvent::SyncObjectActions { actions_to_sync }]);
     }
 
     /// Sets the notebook's current editor in local memory.

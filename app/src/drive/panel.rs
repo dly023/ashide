@@ -318,7 +318,6 @@ impl DrivePanel {
                             true,
                             *initial_folder_id,
                             // When adding the initiated_by parameter to this function call, InitiatedBy::User was set as a default value.
-                            // It can be changed to InitiatedBy::System if this action was automatically kicked off and does not require toasts to notify the user of completion.
                             InitiatedBy::User,
                             ctx,
                         );

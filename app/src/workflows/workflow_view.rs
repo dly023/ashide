@@ -14,7 +14,6 @@ use syntax_highlightable::SyntaxHighlightable;
 use crate::{
     ai::blocklist::secret_redaction::find_secrets_in_text,
     appearance::Appearance,
-    auth::{AuthState, AuthStateProvider},
     drive::{
         items::LocalDriveItemId,
         local_drive_object_styling::local_drive_icon_color,
@@ -87,8 +86,8 @@ use warpui::{
 };
 
 use super::{
-    aliases::WorkflowAliases, command_parser::WorkflowCommandDisplayData, WorkflowObjectModel,
-    WorkflowSource, WorkflowType, WorkflowViewMode,
+    command_parser::WorkflowCommandDisplayData, WorkflowObjectModel, WorkflowSource, WorkflowType,
+    WorkflowViewMode,
 };
 
 #[cfg(target_family = "wasm")]
@@ -286,7 +285,6 @@ pub struct WorkflowView {
     default_argument_id: usize,
     pub(super) ai_metadata_assist_state: AiAssistState,
     revision_ts: Option<Revision>,
-    pub(super) auth_state: Arc<AuthState>,
     owner: Option<Owner>,
     initial_folder_id: Option<ObjectStoreId>,
 
@@ -440,7 +438,6 @@ impl WorkflowView {
             initial_folder_id: None,
             revision_ts: None,
             command_display_data: WorkflowCommandDisplayData::new_empty(),
-            auth_state: AuthStateProvider::as_ref(ctx).get().clone(),
             pending_argument_editor_row: None,
             pending_focus_argument_name: None,
             show_enum_creation_dialog: false,
@@ -537,45 +534,7 @@ impl WorkflowView {
         event: &UpdateManagerEvent,
         ctx: &mut ViewContext<Self>,
     ) {
-        let UpdateManagerEvent::ObjectOperationComplete { result } = event else {
-            return;
-        };
-
-        if let (ObjectOperation::Create { .. }, OperationSuccessType::Success) =
-            (&result.operation, &result.success_type)
-        {
-            if self.workflow_id.into_client() == result.client_id {
-                let created_id = result
-                    .stable_id
-                    .map(ObjectStoreId::StableId)
-                    .or_else(|| result.client_id.map(ObjectStoreId::ClientId));
-                let Some(created_id) = created_id else {
-                    return;
-                };
-
-                if created_id != self.workflow_id {
-                    WorkflowAliases::handle(ctx).update(ctx, |aliases, ctx| {
-                        if let Result::Err(e) =
-                            aliases.update_workflow_id(self.workflow_id, created_id, ctx)
-                        {
-                            log::error!("Failed to update aliases after workflow creation: {e:?}");
-                        }
-                    });
-                }
-
-                if let Some(workflow) =
-                    ObjectStoreModel::as_ref(ctx).get_workflow_by_uid(&created_id.uid())
-                {
-                    self.load(
-                        workflow.clone(),
-                        &LocalDriveObjectSettings::default(),
-                        self.workflow_view_mode,
-                        ctx,
-                    );
-                }
-                ctx.notify();
-            }
-        }
+        let UpdateManagerEvent::ObjectOperationComplete { result } = event;
 
         if let (ObjectOperation::Update, OperationSuccessType::Success) =
             (&result.operation, &result.success_type)

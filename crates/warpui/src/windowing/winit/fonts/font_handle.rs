@@ -94,6 +94,7 @@ impl FontHandle {
         self.data
     }
 
+    #[allow(dead_code)]
     pub(super) fn data(&self) -> &FontData {
         &self.data
     }

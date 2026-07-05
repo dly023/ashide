@@ -12,7 +12,7 @@ use crate::code::editor::{
     find::view::{CodeEditorFind as Find, Event as FindViewEvent},
     goto_line::view::{Event as GoToLineEvent, GoToLineView},
     line::EditorLineLocation,
-    model::{CodeEditorModel, CodeEditorModelEvent, HoverableLink, LineBound, StableEditorLine},
+    model::{CodeEditorModel, CodeEditorModelEvent, LineBound, StableEditorLine},
     nav_bar::{NavBar, NavBarBehavior, NavBarEvent},
     scroll::{ScrollPosition, ScrollTrigger, ScrollWheelBehavior},
 };
@@ -38,17 +38,13 @@ use std::rc::Rc;
 use std::{collections::HashMap, ops::Range};
 use std::{collections::HashSet, path::Path};
 use string_offset::CharOffset;
-use vec1::{vec1, Vec1};
+use vec1::vec1;
 use vim::vim::{Direction, InsertPosition, VimMode, VimModel, VimState, VimSubscriber};
 use warp_core::platform::SessionPlatform;
 use warp_core::ui::color::coloru_with_opacity;
 use warp_editor::{
     content::{
-        buffer::{
-            Buffer, BufferEditAction, EditOrigin, InitialBufferState, ToBufferCharOffset as _,
-            ToBufferPoint,
-        },
-        text::IndentUnit,
+        buffer::{Buffer, EditOrigin, InitialBufferState, ToBufferPoint},
         version::BufferVersion,
     },
     model::{CoreEditorModel, PlainTextEditorModel},
@@ -77,9 +73,6 @@ use warpui::{
     },
     event::ModifiersState,
     keymap::Keystroke,
-    platform::Cursor,
-    prelude::RectF,
-    text::point::Point,
     units::Pixels,
     AppContext, BlurContext, CursorInfo, Element, Entity, FocusContext, ModelHandle,
     SingletonEntity, View, ViewContext, ViewHandle, WeakViewHandle, WindowId,
@@ -140,13 +133,7 @@ pub enum CodeEditorEvent {
         /// True if the `ctrl-c` action was used to copy an active selection.
         copied_selection: bool,
     },
-    MouseHovered {
-        offset: CharOffset,
-        cmd: bool,
-        clamped: bool,
-        /// Whether the mouse move event was covered by an element above the editor.
-        is_covered: bool,
-    },
+    MouseHovered,
     DeleteComment {
         id: CommentId,
     },
@@ -429,10 +416,6 @@ impl CodeEditorView {
             window_id: ctx.window_id(),
             color_override: render_options.color_override,
         }
-    }
-
-    pub fn window_id(&self) -> WindowId {
-        self.window_id
     }
 
     pub fn set_add_diff_hunk_as_context_button(
@@ -798,55 +781,7 @@ impl CodeEditorView {
     }
 
     /// Set diagnostic decorations (e.g., error/warning underlines) on the editor.
-    pub fn set_diagnostic_decorations(
-        &self,
-        decorations: Vec<Decoration>,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            model.render_state().update(ctx, |render, ctx| {
-                render.set_text_decorations(decorations, ctx);
-            });
-        });
-    }
-
-    pub fn character_bounds_in_viewport(
-        &self,
-        offset: CharOffset,
-        app: &AppContext,
-    ) -> Option<RectF> {
-        let render_state = self.model.as_ref(app).render_state().as_ref(app);
-
-        // Get the bounds of the character in viewport coordinates.
-        let bounds = render_state.character_bounds_in_viewport(offset)?;
-
-        // The render_state bounds are relative to the editor content area, but the
-        // CodeEditorView also includes a gutter (line numbers). We need to offset
-        // the bounds by the gutter width when line numbers are shown.
-        let gutter_offset = if self.display_options.show_line_numbers {
-            super::element::GUTTER_WIDTH
-        } else {
-            0.0
-        };
-
-        Some(RectF::new(
-            bounds.origin() + vec2f(gutter_offset, 0.0),
-            bounds.size(),
-        ))
-    }
-
     /// Returns the current viewport height in pixels, or None if not yet laid out.
-    pub fn viewport_height(&self, app: &AppContext) -> Option<f32> {
-        let render_state = self.model.as_ref(app).render_state().as_ref(app);
-        let height = render_state.viewport().height();
-        // Return None if the viewport hasn't been laid out yet (height is zero)
-        if height.as_f32() > 0.0 {
-            Some(height.as_f32())
-        } else {
-            None
-        }
-    }
-
     #[allow(clippy::single_range_in_vec_init)]
     fn expand_hidden_section(
         &mut self,
@@ -1346,15 +1281,6 @@ impl CodeEditorView {
         ctx.emit(CodeEditorEvent::Focused);
     }
 
-    pub fn indent_unit(&self, ctx: &AppContext) -> IndentUnit {
-        self.model
-            .as_ref(ctx)
-            .buffer()
-            .as_ref(ctx)
-            .indent_unit_at_plain_text()
-            .unwrap_or_default()
-    }
-
     fn selection_start(
         &mut self,
         offset: CharOffset,
@@ -1416,12 +1342,6 @@ impl CodeEditorView {
         });
     }
 
-    pub fn set_language_with_name(&mut self, name: &str, ctx: &mut ViewContext<Self>) {
-        self.model.update(ctx, |model, ctx| {
-            model.set_language_with_name(name, ctx);
-        });
-    }
-
     fn jump_to_line_column(&self, line: usize, column: Option<usize>, ctx: &mut ViewContext<Self>) {
         self.model.update(ctx, |model, ctx| {
             model.jump_to_line_column(line, column, ctx)
@@ -1450,18 +1370,7 @@ impl CodeEditorView {
         self.model.as_ref(ctx).content_string(ctx)
     }
 
-    pub fn word_range_at_offset(
-        &self,
-        offset: CharOffset,
-        app: &AppContext,
-    ) -> Option<Range<CharOffset>> {
-        self.model.as_ref(app).word_range_at_offset(offset, app)
-    }
-
     /// Returns the character at the given offset in the buffer, if it exists.
-    pub fn char_at(&self, offset: CharOffset, ctx: &AppContext) -> Option<char> {
-        self.model.as_ref(ctx).char_at(offset, ctx)
-    }
 
     /// Check whether the given version matches the version of the underlying buffer.
     pub fn version_match(&self, version: &ContentVersion, ctx: &AppContext) -> bool {
@@ -1513,15 +1422,6 @@ impl CodeEditorView {
 
     /// Identifies which line (current or removed) is at the given content-space
     /// vertical offset. Delegates to [`CodeEditorModel::line_at_vertical_offset`].
-    pub fn line_at_vertical_offset(
-        &self,
-        offset: Pixels,
-        ctx: &mut ViewContext<Self>,
-    ) -> Option<(StableEditorLine, Pixels)> {
-        self.model
-            .update(ctx, |model, ctx| model.line_at_vertical_offset(offset, ctx))
-    }
-
     /// Returns the content-space vertical offset of the top of the given line.
     /// Delegates to [`CodeEditorModel::line_top`].
     pub fn line_top(&self, line: &StableEditorLine, ctx: &AppContext) -> Option<Pixels> {
@@ -1614,73 +1514,6 @@ impl CodeEditorView {
     }
 
     /// Returns the buffer offset at the current cursor head.
-    pub fn cursor_head_offset(&self, ctx: &AppContext) -> CharOffset {
-        self.model.as_ref(ctx).selections(ctx).first().head
-    }
-
-    pub fn hovered_symbol_range<'a>(
-        &'a self,
-        ctx: &'a AppContext,
-    ) -> Option<&'a Range<CharOffset>> {
-        self.model
-            .as_ref(ctx)
-            .hovered_symbol_range()
-            .map(|link| link.range())
-    }
-
-    pub fn cursor_at(&self, point: Point, ctx: &mut ViewContext<Self>) {
-        let offset = point.to_buffer_char_offset(self.model.as_ref(ctx).content().as_ref(ctx));
-        self.model.update(ctx, |model, ctx| {
-            model.cursor_at(offset, ctx);
-        });
-    }
-
-    pub fn clear_hovered_symbol_range(&mut self, ctx: &mut ViewContext<Self>) -> bool {
-        self.set_hovered_symbol_range(None, ctx)
-    }
-
-    pub fn set_hovered_symbol_range(
-        &mut self,
-        range: Option<HoverableLink>,
-        ctx: &mut ViewContext<Self>,
-    ) -> bool {
-        let cursor_shape = if range.is_some() {
-            Cursor::PointingHand
-        } else {
-            Cursor::IBeam
-        };
-
-        let updated = self
-            .model
-            .update(ctx, |model, _ctx| model.set_hovered_symbol_range(range));
-
-        if updated {
-            ctx.set_cursor_shape(cursor_shape);
-        }
-
-        updated
-    }
-
-    pub fn apply_edits(
-        &mut self,
-        edits: Vec1<(String, Range<CharOffset>)>,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            let selection_model = model.buffer_selection_model().clone();
-            model.update_content(
-                |mut content, ctx| {
-                    content.apply_edit(
-                        BufferEditAction::InsertAtCharOffsetRanges { edits: &edits },
-                        EditOrigin::UserInitiated,
-                        selection_model,
-                        ctx,
-                    );
-                },
-                ctx,
-            );
-        });
-    }
 
     /// Splits text based on pascal case, camel case, hyphens, or underscores.
     /// Returns a tuple of (parts, delimiter) where delimiter is Some(char) if a delimiter was used.

@@ -538,6 +538,7 @@ enum FileSystemEntryKind {
   DIRECTORY = 2;
   SYMLINK = 3;
   OTHER = 4;
+  MISSING = 5;
 }
 
 // A single directory entry returned by ListDirectory.
@@ -547,6 +548,9 @@ message DirEntry {
   FileSystemEntryKind kind = 3;
   optional uint64 size_bytes = 4;
   optional uint64 modified_epoch_millis = 5;
+  // For symlink entries, the kind of the resolved target (FILE / DIRECTORY /
+  // MISSING / OTHER). UNSPECIFIED for non-symlink entries.
+  FileSystemEntryKind target_kind = 6;
 }
 
 // Server → client: the entries contained directly in the requested directory.
@@ -573,6 +577,8 @@ message ResolvePathSuccess {
   string canonical_path = 1;
   FileSystemEntryKind kind = 2;
   optional uint64 size_bytes = 3;
+  // For symlink entries, the kind of the resolved target.
+  FileSystemEntryKind target_kind = 4;
 }
 
 message ResolvePathResponse {

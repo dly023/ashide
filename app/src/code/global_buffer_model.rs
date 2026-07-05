@@ -966,54 +966,6 @@ impl GlobalBufferModel {
         BufferState::new(file_id, buffer)
     }
 
-    /// Attempts to retrieve specific lines from an in-memory buffer for the given file path.
-    /// Returns `Some(Vec<(usize, String)>)` if the file is loaded in a buffer, `None` otherwise.
-    ///
-    /// This is a fast, synchronous operation that avoids disk I/O.
-    ///
-    /// # Arguments
-    /// * `path` - Path to the file
-    /// * `line_numbers` - A list of 0-based line numbers to retrieve. Supports non-consecutive lines.
-    ///
-    /// # Returns
-    /// A vector of (line_number, line_content) tuples for each requested line that exists.
-    /// Lines that don't exist in the buffer are omitted from the result.
-    pub fn get_lines_for_file(
-        &mut self,
-        path: &Path,
-        line_numbers: Vec<usize>,
-        ctx: &mut ModelContext<Self>,
-    ) -> Option<Vec<(usize, String)>> {
-        use warp_editor::content::text::LineCount;
-
-        if line_numbers.is_empty() {
-            return Some(Vec::new());
-        }
-
-        let file_id = self
-            .location_to_id
-            .get_by_left(&BufferLocation::CurrentAppFileSystem(path.to_path_buf()))?;
-        let buffer = self.buffer_handle_for_id(*file_id, ctx)?;
-
-        let buffer_ref = buffer.as_ref(ctx);
-        let total_lines = (buffer_ref.max_point().row + 1) as usize;
-
-        let mut lines = Vec::with_capacity(line_numbers.len());
-        for line_idx in line_numbers {
-            if line_idx >= total_lines {
-                continue;
-            }
-            // Convert 0-based line index to 1-based LineCount
-            let line_count = LineCount::from(line_idx + 1);
-            let line_start = buffer_ref.line_start(line_count);
-            let line_end = buffer_ref.line_end(line_count);
-            let line_text = buffer_ref.text_in_range(line_start..line_end).into_string();
-            lines.push((line_idx, line_text));
-        }
-
-        Some(lines)
-    }
-
     // ── Environment Runtime buffer operations (client side) ─────────────
 
     /// Open an Environment Runtime buffer identified by an `EnvironmentFilePath`.
@@ -1459,18 +1411,6 @@ impl GlobalBufferModel {
             }
         }
     }
-
-    /// Returns whether a buffer is a `ServerCurrentAppFileSystem` source.
-    #[cfg(test)]
-    pub fn use_server_current_app_file_system(&self, file_id: FileId) -> bool {
-        self.buffers.get(&file_id).is_some_and(|state| {
-            matches!(
-                state.source,
-                BufferSource::ServerCurrentAppFileSystem { .. }
-            )
-        })
-    }
-
     /// 该 buffer 是否由 Environment Runtime 文件系统提供。
     ///
     /// 编辑器保存时用它判断:Environment Runtime 文件不能走当前 app 的 `FileModel`(无 current-app 路径,

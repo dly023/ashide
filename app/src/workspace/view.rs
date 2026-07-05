@@ -3,7 +3,6 @@ pub(crate) mod codex_modal;
 #[cfg(enable_crash_recovery)]
 mod crash_recovery;
 pub mod global_search;
-pub(crate) mod launch_modal;
 pub(crate) mod left_panel;
 pub(crate) mod onboarding;
 pub(crate) mod right_panel;
@@ -17,7 +16,7 @@ pub(crate) mod vertical_tabs;
 #[cfg(target_family = "wasm")]
 mod wasm_view;
 
-use self::vertical_tabs::{VerticalTabsPanelState, render_detail_sidecar};
+use self::vertical_tabs::{render_detail_sidecar, VerticalTabsPanelState};
 use crate::workspace::cross_window_tab_drag::{
     AttachTarget, CrossWindowTabDrag, DragResult, DropResult, GhostState,
 };
@@ -27,8 +26,8 @@ pub(crate) use onboarding::OnboardingTutorial;
 use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::agent_conversations_model::ConversationOrTask;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
-use crate::ai::blocklist::agent_view::AgentViewEntryOrigin;
 use crate::ai::blocklist::agent_view::agent_input_footer::editor::AgentToolbarEditorMode;
+use crate::ai::blocklist::agent_view::AgentViewEntryOrigin;
 use crate::ai::blocklist::suggested_agent_mode_workflow_modal::SuggestedAgentModeWorkflowAndId;
 use crate::ai::blocklist::suggested_rule_modal::{
     SuggestedRuleAndId, SuggestedRuleModal, SuggestedRuleModalEvent,
@@ -38,15 +37,15 @@ use crate::ai::conversation_utils;
 use crate::ai::document::ai_document_model::{AIDocumentId, AIDocumentModel};
 use crate::ai::llms::LLMPreferences;
 use crate::ai::{
-    agent::{EntrypointType, api::ServerConversationToken, conversation::AIConversationId},
+    agent::{api::ServerConversationToken, conversation::AIConversationId, EntrypointType},
     blocklist::{
-        SlashCommandRequest,
         inline_action::code_diff_view::CodeDiffView,
         suggested_agent_mode_workflow_modal::{
             SuggestedAgentModeWorkflowModal, SuggestedAgentModeWorkflowModalEvent,
         },
+        SlashCommandRequest,
     },
-    facts::{AIFactManager, AIFactView, AIFactViewEvent, view::AIFactPage},
+    facts::{view::AIFactPage, AIFactManager, AIFactView, AIFactViewEvent},
 };
 use crate::ai_assistant::execution_context::AiExecutionContext;
 use crate::app_state::{
@@ -56,8 +55,8 @@ use crate::app_state::{
     TerminalPaneSnapshot, WindowSnapshot, WorkflowPaneSnapshot, WorkspaceSessionKind,
     WorkspaceSessionSnapshot,
 };
-use crate::code_review::GlobalCodeReviewModel;
 use crate::code_review::diff_state::{DiffStateModel, GitDeltaPreference};
+use crate::code_review::GlobalCodeReviewModel;
 use crate::coding_panel_enablement_state::CodingPanelEnablementState;
 use crate::default_terminal::DefaultTerminal;
 use crate::notebooks::NotebookObject;
@@ -92,47 +91,44 @@ use crate::util::file::external_editor::Editor;
 use crate::util::file::external_editor::EditorSettings;
 use crate::util::openable_file_type::FileTarget;
 #[cfg(feature = "local_fs")]
-use crate::util::openable_file_type::{EditorLayout, resolve_file_target_with_editor_choice};
+use crate::util::openable_file_type::{resolve_file_target_with_editor_choice, EditorLayout};
 
-use crate::BlocklistAIHistoryModel;
-use crate::ai::blocklist::FORK_PREFIX;
 use crate::ai::blocklist::history_model::LoadedConversationData;
+use crate::ai::blocklist::FORK_PREFIX;
 use crate::session_bridge::adapter_registry::{
     session_bridge_adapter_for_agent, session_bridge_fork_targets,
 };
-use crate::terminal::CLIAgent;
 use crate::terminal::cli_agent::CLIAgentInstallModel;
 use crate::terminal::cli_agent_session_index as current_app_cli_agent_index;
 #[cfg(not(target_family = "wasm"))]
-use crate::terminal::cli_agent_sessions::plugin_manager::{PluginModalKind, plugin_manager_for};
+use crate::terminal::cli_agent_sessions::plugin_manager::{plugin_manager_for, PluginModalKind};
 use crate::terminal::cli_agent_sessions::{
     CLIAgentInputState, CLIAgentSession, CLIAgentSessionContext, CLIAgentSessionStatus,
     CLIAgentSessionsModel, CLIAgentSessionsModelEvent,
 };
+use crate::terminal::CLIAgent;
 use crate::workspace::header_toolbar_editor::{HeaderToolbarEditorEvent, HeaderToolbarEditorModal};
 use crate::workspace::header_toolbar_item::HeaderToolbarItemKind;
 use crate::workspace::tab_settings::TabCloseButtonPosition;
 use crate::workspace::view::ashide_launch_modal::{AshideLaunchModal, AshideLaunchModalEvent};
 use crate::workspace::view::codex_modal::{CodexModal, CodexModalEvent};
 use crate::workspace::{ForkFromExchange, ForkedConversationDestination, SessionBridgeForkTarget};
+use crate::BlocklistAIHistoryModel;
 
 use serde_json;
 use warpui::notification::NotificationSendError;
 
-use super::WorkspaceRegistry;
 use super::hoa_onboarding::{
-    HoaOnboardingFlow, HoaOnboardingFlowEvent, HoaOnboardingStep, mark_hoa_onboarding_completed,
+    mark_hoa_onboarding_completed, HoaOnboardingFlow, HoaOnboardingFlowEvent, HoaOnboardingStep,
 };
 use super::lightbox_view::{LightboxParams, LightboxView, LightboxViewEvent};
 use super::util;
+use super::WorkspaceRegistry;
 use crate::ai::execution_profiles::editor::ExecutionProfileEditorManager;
 use crate::ai::execution_profiles::profiles::{AIExecutionProfilesModel, ClientProfileId};
+use crate::auth::AuthManager;
+use crate::auth::AuthOverrideWarningModal;
 use crate::auth::AuthState;
-use crate::auth::{AuthManager, AuthManagerEvent};
-use crate::auth::{
-    AuthOverrideWarningModal, AuthOverrideWarningModalEvent, AuthOverrideWarningModalVariant,
-};
-use crate::auth::{AuthView, AuthViewEvent, AuthViewVariant};
 #[cfg(feature = "local_fs")]
 use crate::code::editor_management::CodeManager;
 use crate::code::editor_management::CodeSource;
@@ -182,7 +178,7 @@ use crate::wasm_nux_dialog::WasmNUXDialog;
 use crate::appearance::{Appearance, AppearanceManager};
 use crate::auth::AuthStateProvider;
 use crate::autoupdate::{
-    AutoupdateState, AutoupdateStateEvent, RelaunchModel, is_incoming_version_past_current,
+    is_incoming_version_past_current, AutoupdateState, AutoupdateStateEvent, RelaunchModel,
 };
 use crate::banner::BannerState;
 use crate::changelog_model::{ChangelogModel, ChangelogRequestType, Event as ChangelogEvent};
@@ -197,13 +193,13 @@ use crate::drive::{
     DriveObjectType, DrivePanel, DrivePanelEvent, LocalDriveObjectSettings, ObjectTypeAndId,
 };
 use crate::env_vars::{
-    EnvVarCollectionObject,
     manager::{EnvVarCollectionManager, EnvVarCollectionSource},
+    EnvVarCollectionObject,
 };
 use crate::experiments::{BlockOnboarding, Experiment};
 use crate::menu::{
-    DEFAULT_WIDTH as MENU_DEFAULT_WIDTH, Event as MenuEvent, Menu, MenuItem, MenuItemFields,
-    MenuSelectionSource,
+    Event as MenuEvent, Menu, MenuItem, MenuItemFields, MenuSelectionSource,
+    DEFAULT_WIDTH as MENU_DEFAULT_WIDTH,
 };
 use crate::modal::{Modal, ModalEvent, ModalViewState};
 use crate::network::{NetworkStatus, NetworkStatusEvent};
@@ -232,8 +228,8 @@ use crate::prompt::editor_modal::{
 };
 use crate::report_if_error;
 use crate::resource_center::{
-    ResourceCenterEvent, ResourceCenterPage, ResourceCenterView, Tip, TipAction, TipsCompleted,
     mark_feature_used_and_write_to_user_defaults, skip_tips_and_write_to_user_defaults,
+    ResourceCenterEvent, ResourceCenterPage, ResourceCenterView, Tip, TipAction, TipsCompleted,
 };
 use crate::root_view::{NewWorkspaceSource, OpenLaunchConfigArg};
 use crate::search::command_search::searcher::{
@@ -243,10 +239,10 @@ use crate::search::command_search::view::{CommandSearchEvent, CommandSearchView}
 use crate::server_time::ServerTime;
 use crate::session_management::{SessionNavigationData, SessionSource};
 use crate::settings::{
-    AccessibilitySettings, AliasExpansionSettings, AppEditorSettings, BlockVisibilitySettings,
-    CursorBlink, DebugSettings, FontSettings, GPUSettings, InputSettings, MonospaceFontSize,
-    PaneSettings, PrivacySettings, SelectionSettings, SshSettings, ThemeSettings,
-    active_theme_kind, respect_system_theme,
+    active_theme_kind, respect_system_theme, AccessibilitySettings, AliasExpansionSettings,
+    AppEditorSettings, BlockVisibilitySettings, CursorBlink, DebugSettings, FontSettings,
+    GPUSettings, InputSettings, MonospaceFontSize, PaneSettings, PrivacySettings,
+    SelectionSettings, SshSettings, ThemeSettings,
 };
 use crate::settings_view::flags;
 use crate::settings_view::keybindings::{KeybindingChangedEvent, KeybindingChangedNotifier};
@@ -260,7 +256,7 @@ use crate::terminal::model::blockgrid::BlockGrid;
 use crate::terminal::model::session::Session;
 use crate::terminal::model::session::SessionId;
 use crate::terminal::resizable_data::{
-    DEFAULT_LEFT_PANEL_WIDTH, DEFAULT_RIGHT_PANEL_WIDTH, ModalSizes, ModalType, ResizableData,
+    ModalSizes, ModalType, ResizableData, DEFAULT_LEFT_PANEL_WIDTH, DEFAULT_RIGHT_PANEL_WIDTH,
 };
 use crate::terminal::safe_mode_settings::SafeModeSettings;
 use crate::terminal::session_settings::{
@@ -278,10 +274,9 @@ use crate::workspaces::user_workspaces::UserWorkspaces;
 use ::settings::{Setting, ToggleableSetting};
 use warp_core::features::FeatureFlag;
 
-use crate::GlobalResourceHandles;
 use crate::search::{self, QueryFilter};
 use crate::terminal::view::{
-    NOTIFICATIONS_TROUBLESHOOT_URL, SyncEvent, SyncInputType, TerminalAction,
+    SyncEvent, SyncInputType, TerminalAction, NOTIFICATIONS_TROUBLESHOOT_URL,
 };
 use crate::terminal::{BlockListSettings, TerminalModel};
 use crate::themes::theme::{AnsiColorIdentifier, RespectSystemTheme, ThemeKind};
@@ -291,27 +286,27 @@ use crate::themes::theme_deletion_modal::{ThemeDeletionModal, ThemeDeletionModal
 use crate::tips::{TipsEvent, TipsView};
 use crate::ui_components::buttons::{combo_inner_button, icon_button_with_color};
 use crate::undo_close::UndoCloseStack;
-use crate::user_config::{WarpConfig, WarpConfigUpdateEvent};
 #[cfg(feature = "local_fs")]
 use crate::user_config::{
     ensure_default_worktree_config, find_unused_tab_config_path, find_unused_toml_path,
     find_unused_worktree_config_path, materialize_default_worktree_config, sanitize_toml_base_name,
     tab_configs_dir,
 };
+use crate::user_config::{WarpConfig, WarpConfigUpdateEvent};
 use crate::util::bindings::{keybinding_name_to_display_string, keybinding_name_to_keystroke};
 use crate::util::links;
-use crate::util::traffic_lights::{TrafficLightMouseStates, TrafficLightSide, traffic_light_data};
+use crate::util::traffic_lights::{traffic_light_data, TrafficLightMouseStates, TrafficLightSide};
 use crate::util::truncation::truncate_from_end;
 #[cfg(target_family = "wasm")]
 use crate::view_components::action_button::ActionButton;
 use crate::view_components::callout_bubble::{
-    CalloutArrowDirection, CalloutArrowPosition, CalloutBubbleConfig, render_callout_bubble,
+    render_callout_bubble, CalloutArrowDirection, CalloutArrowPosition, CalloutBubbleConfig,
 };
 use crate::view_components::{AgentToastStack, DismissibleToast, DismissibleToastStack, ToastLink};
 use crate::window_settings::{WindowSettings, WindowSettingsChangedEvent, ZoomLevel};
 use crate::workflows::{
-    AIWorkflowOrigin, WorkflowObject, WorkflowSelectionSource, WorkflowSource, WorkflowType,
-    WorkflowViewMode, manager::WorkflowOpenSource,
+    manager::WorkflowOpenSource, AIWorkflowOrigin, WorkflowObject, WorkflowSelectionSource,
+    WorkflowSource, WorkflowType, WorkflowViewMode,
 };
 use crate::workspace::action::CommandSearchOptions;
 use crate::workspace::one_time_modal_model::OneTimeModalModel;
@@ -319,10 +314,11 @@ use crate::workspace::sync_inputs::SyncedInputState;
 use crate::workspace::toast_stack::{
     ToastStack as WorkspaceToastStack, ToastStackEvent as WorkspaceToastStackEvent,
 };
+use crate::GlobalResourceHandles;
 use crate::{
     ai_assistant::{
-        AI_ASSISTANT_FEATURE_NAME, AI_ASSISTANT_LOGO_COLOR, AskAIType,
         panel::{AIAssistantPanelEvent, AIAssistantPanelView},
+        AskAIType, AI_ASSISTANT_FEATURE_NAME, AI_ASSISTANT_LOGO_COLOR,
     },
     settings,
     ui_components::blended_colors,
@@ -332,17 +328,16 @@ use futures::{Future, FutureExt};
 use itertools::Itertools;
 use parking_lot::FairMutex;
 use pathfinder_geometry::rect::RectF;
-use repo_metadata::repositories::DetectedRepositories;
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "local_fs")]
 use std::convert::TryFrom;
 use std::time::Duration;
 #[cfg(target_os = "macos")]
 use std::time::{SystemTime, UNIX_EPOCH};
-use warp_core::HostId;
 use warp_core::context_flag::ContextFlag;
 use warp_core::semantic_selection::SemanticSelection;
-use warp_util::path::{LineAndColumnArg, user_friendly_path};
+use warp_core::HostId;
+use warp_util::path::{user_friendly_path, LineAndColumnArg};
 use warpui::fonts::Weight;
 use warpui::modals::{AlertDialogWithCallbacks, AppModalCallback, ModalButton};
 
@@ -412,17 +407,16 @@ use crate::tab_configs::{
 };
 use crate::workspace::environment_backend::{
     AgentTabEntry, EnvironmentBackendKind, EnvironmentEntryBackend, ForkEntry, LocalEntryBackend,
-    RuntimeEntryBackend,
+    PendingEnvironmentRuntimeSessionRestore, RuntimeEntryBackend,
 };
 #[cfg(feature = "local_fs")]
 use crate::workspace::environment_runtime::EnvironmentRuntimeTransportEvent;
 use crate::workspace::environment_runtime::{
     EnvironmentCliAgentSessionRecord, EnvironmentCliAgentSessionSourceAction,
-    EnvironmentCliAgentSessionSourceTarget, EnvironmentDisplayIconKind, EnvironmentRuntimeRegistry,
-    EnvironmentRuntimeRoots, EnvironmentRuntimeSpawnPlan, EnvironmentRuntimeSpawnPlanHandler,
-    EnvironmentRuntimeTarget, EnvironmentRuntimeTerminalSpawn, EnvironmentSessionTabPlan,
-    EnvironmentSessionTabPlanHandler, EnvironmentTerminalBootstrap, TerminalBootstrapSpawn,
-    TerminalBootstrapTarget,
+    EnvironmentCliAgentSessionSourceTarget, EnvironmentDisplayIconKind, EnvironmentRuntimeRoots,
+    EnvironmentRuntimeSpawnPlan, EnvironmentRuntimeSpawnPlanHandler, EnvironmentRuntimeTarget,
+    EnvironmentRuntimeTerminalSpawn, EnvironmentSessionTabPlan, EnvironmentSessionTabPlanHandler,
+    EnvironmentTerminalBootstrap, TerminalBootstrapSpawn, TerminalBootstrapTarget,
 };
 
 use crate::app_interaction::PaletteSource;
@@ -430,8 +424,8 @@ use crate::code::editor::{add_color, remove_color};
 use crate::palette::PaletteMode;
 use crate::search::command_palette::view::{Event as CommandPaletteEvent, View as CommandPalette};
 use crate::tab::{
-    NewSessionMenuItem, PaneNameMenuTarget, SelectedTabColor, TAB_BAR_BORDER_HEIGHT, TabBarState,
-    TabComponent, TabData, tab_position_id, uses_vertical_tabs,
+    tab_position_id, uses_vertical_tabs, NewSessionMenuItem, PaneNameMenuTarget, SelectedTabColor,
+    TabBarState, TabComponent, TabData, TAB_BAR_BORDER_HEIGHT,
 };
 use crate::terminal::view::ssh_file_upload::FileUploadId;
 use crate::ui_components::icons;
@@ -449,10 +443,10 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process;
 #[cfg(not(target_family = "wasm"))]
-use std::sync::{Mutex, mpsc};
+use std::sync::{mpsc, Mutex};
 use std::{cmp::Ordering, sync::Arc};
-use warp_core::ui::theme::{Fill, color::internal_colors, phenomenon::PhenomenonStyle};
-use warp_core::ui::{Icon, color::coloru_with_opacity};
+use warp_core::ui::theme::{color::internal_colors, phenomenon::PhenomenonStyle, Fill};
+use warp_core::ui::{color::coloru_with_opacity, Icon};
 use warp_editor::editor::NavigationKey;
 use warpui::keymap::Context;
 use warpui::notification::{RequestPermissionsOutcome, UserNotification};
@@ -462,7 +456,6 @@ use warpui::platform::{
 use warpui::text_layout::ClipConfig;
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::{
-    AppContext, Entity, TypedActionView, UpdateView, View, ViewContext, ViewHandle,
     accessibility::{
         AccessibilityContent, AccessibilityVerbosity, ActionAccessibilityContent, WarpA11yRole,
     },
@@ -474,7 +467,8 @@ use warpui::{
         PositionedElementAnchor, PositionedElementOffsetBounds, Radius, SavePosition,
         ScrollbarWidth, Shrinkable, Stack, Text,
     },
-    geometry::vector::{Vector2F, vec2f},
+    geometry::vector::{vec2f, Vector2F},
+    AppContext, Entity, TypedActionView, UpdateView, View, ViewContext, ViewHandle,
 };
 use warpui::{
     EntityId, FocusContext, ModelHandle, SingletonEntity, UpdateModel, ViewAsRef, WeakViewHandle,
@@ -561,11 +555,6 @@ const ENVIRONMENT_PROVIDER_PICKER_ANCHOR_GAP: f32 = 6.;
 const ENVIRONMENT_STRIP_ADD_PROVIDER_CHIP_WIDTH: f32 = 28.;
 const ENVIRONMENT_PROVIDER_PICKER_POSITION_ID: &str =
     "workspace:environment_provider_picker_button";
-const RESTORED_WORKSPACE_SESSIONS_POPOVER_WIDTH: f32 = 320.;
-const RESTORED_WORKSPACE_SESSIONS_POPOVER_HORIZONTAL_PADDING: f32 = 10.;
-const RESTORED_WORKSPACE_SESSIONS_ROW_WIDTH: f32 = RESTORED_WORKSPACE_SESSIONS_POPOVER_WIDTH
-    - RESTORED_WORKSPACE_SESSIONS_POPOVER_HORIZONTAL_PADDING * 2.;
-
 const ASK_AI_ASSISTANT_KEYBINDING_NAME: &str = "workspace:toggle_ai_assistant";
 const TOGGLE_RESOURCE_CENTER_KEYBINDING_NAME: &str = "workspace:toggle_resource_center";
 
@@ -676,7 +665,7 @@ fn write_session_bridge_derivation(
     }
 }
 
-#[cfg(feature = "local_fs")]
+#[cfg(all(feature = "local_fs", target_family = "wasm"))]
 fn fork_conversation_session_bridge_derivation_blocking(
     source_session_id: String,
 ) -> anyhow::Result<crate::session_bridge::transform::SessionDerivation> {
@@ -711,7 +700,7 @@ fn read_conversation_session_bridge_blocking(
     Ok(read_result.session)
 }
 
-#[cfg(feature = "local_fs")]
+#[cfg(all(feature = "local_fs", target_family = "wasm"))]
 fn fork_conversation_session_bridge_blocking(
     source_session_id: String,
     fork_target: SessionBridgeForkTarget,
@@ -745,7 +734,7 @@ fn write_session_bridge_bundle_blocking(
     crate::session_bridge::bundle::write_bundle(&session, Some(&output_path)).map_err(Into::into)
 }
 
-#[cfg(feature = "local_fs")]
+#[cfg(all(feature = "local_fs", target_family = "wasm"))]
 fn fork_cli_agent_session_read_result_blocking(
     read_result: crate::session_bridge::cli_agent_reader::CliAgentSessionReadResult,
     fork_target: SessionBridgeForkTarget,
@@ -828,7 +817,7 @@ async fn apply_environment_native_session_write_plan(
     Ok(())
 }
 
-#[cfg(feature = "local_fs")]
+#[cfg(all(feature = "local_fs", target_family = "wasm"))]
 fn fork_current_app_cli_agent_session_blocking(
     source_target: current_app_cli_agent_index::CurrentAppCliAgentSessionSourceTarget,
     title: Option<String>,
@@ -952,7 +941,6 @@ impl SessionBridgeEnvironment {
                         provider_session_id,
                         crate::session_bridge::cli_agent_reader::CliAgentSessionSourceBytes {
                             reference: source_bytes.reference,
-                            sha256: source_bytes.sha256,
                             bytes: source_bytes.bytes,
                         },
                         title,
@@ -1191,9 +1179,7 @@ type WorkspaceMenuHandles = (
 );
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum NewSessionSidecarSelection {
-    OpenWorktreeRepo { repo_path: String },
-}
+enum NewSessionSidecarSelection {}
 
 #[derive(Debug, Default)]
 struct FileUploadSessions {
@@ -1265,20 +1251,9 @@ struct CodeReviewPaneContext {
 struct RightPanelUpdateParams<'a> {
     pane_group: &'a ViewHandle<PaneGroup>,
     target_open_state: bool,
-    entrypoint: Option<CodeReviewPaneEntrypoint>,
-    cli_agent: Option<crate::terminal::CLIAgent>,
     review_pane_context: Option<&'a CodeReviewPaneContext>,
 }
 
-/// Groups a modal view handle with the ID of the tab that was created to host
-/// it, so the custom tab title can be cleared on close regardless of which tab
-/// is active at that point.
-struct ModalWithTab<V> {
-    view: ViewHandle<V>,
-    /// Set when the modal opens a new tab; consumed (taken) when the modal
-    /// closes so we can clear the custom tab title.
-    tab_pane_group_id: Option<EntityId>,
-}
 /// Context saved when the session config modal triggers `open_tab_config` and
 /// the tab config has params (worktree). The params modal opens asynchronously,
 /// so we store what we need to finish the tab replacement when it completes.
@@ -1313,15 +1288,6 @@ pub struct TransferredTab {
 }
 
 #[derive(Clone)]
-struct PendingEnvironmentRuntimeSessionRestore {
-    session: WorkspaceSessionSnapshot,
-    startup_command: Option<String>,
-}
-
-// AgentTabEntry is defined in environment_backend.rs (shared between local and
-// runtime impls). Imported below alongside the other backend types.
-
-#[derive(Clone)]
 struct EnvironmentRuntimePaneTemplateEntry {
     cwd: PathBuf,
     commands: Vec<String>,
@@ -1349,7 +1315,6 @@ enum EnvironmentRuntimeSplitPaneIntent {
 }
 
 struct PendingEnvironmentRuntimeEntryPlan {
-    session_restore: Option<PendingEnvironmentRuntimeSessionRestore>,
     startup_command: Option<String>,
     terminal: bool,
     agent_view_entry: Option<AgentTabEntry>,
@@ -1440,7 +1405,6 @@ pub struct Workspace {
     should_show_ai_assistant_warm_welcome: bool,
     ai_assistant_close_warm_welcome_mouse_state_handle: MouseStateHandle,
     auth_override_warning_modal: ViewHandle<AuthOverrideWarningModal>,
-    require_login_modal: ViewHandle<AuthView>,
     workflow_modal: ViewHandle<WorkflowModal>,
     prompt_editor_modal: ViewHandle<PromptEditorModal>,
     agent_toolbar_editor_modal: ViewHandle<AgentToolbarEditorModal>,
@@ -1500,31 +1464,11 @@ pub struct Workspace {
     /// When true, this workspace was created to receive a transferred PaneGroup.
     /// The placeholder tab will be replaced when adopt_transferred_pane_group is called.
     pending_pane_group_transfer: bool,
-    /// Current Ashide authority boundary for this window. This is a transition
-    /// field while the legacy Ashide tab model is being reframed into
-    /// Environment -> Workspace -> Session; full environment tables will own
-    /// this later.
-    current_environment: Option<EnvironmentSnapshot>,
-    /// Runtime registry for Environment-owned authorities. Runtime reconnect
-    /// flows use this instead of making a visible terminal own the environment runtime transport.
-    environment_runtimes: EnvironmentRuntimeRegistry,
-    /// Workspace-held Environment authorities. Tab focus is only a view concern:
-    /// once a runtime Environment has been opened or activated, the Workspace owns
-    /// its lifecycle until an explicit disconnect tears it down.
-    retained_environment_authorities: HashSet<String>,
-    /// Environment Runtime home roots discovered at connect time. Project Explorer
-    /// follows the active terminal cwd, while File Browser should keep showing
-    /// the environment home/root instead of drifting to the project cwd.
-    environment_runtime_home_roots: HashMap<String, String>,
-    /// Monotonic per-authority heartbeat generation. Every reconnect increments
-    /// the generation so late heartbeat callbacks from old runtime clients are
-    /// ignored instead of poisoning the newly connected Environment.
-    environment_runtime_heartbeat_generations: HashMap<String, u64>,
-    /// Monotonic per-authority preparation watchdog generation. Connecting,
-    /// installing, and reconnecting must eventually produce Connected/Error; a
-    /// stale watchdog from an older runtime session must not poison a newer one.
-    environment_runtime_preparation_generations: HashMap<String, u64>,
-    next_environment_runtime_session_id: u64,
+    /// Single source of truth for all environment state in this workspace:
+    /// identity, lifecycle, runtime handle, transport generations, home roots,
+    /// pending intents, and indexed CLI-agent sessions. Local and remote
+    /// environments live in the same table.
+    environments: crate::workspace::environment_table::EnvironmentTable,
     /// Restored Ashide session metadata that is visible to the user but not
     /// automatically resumed. This lets Codex/Claude/agy sessions become
     /// explicit recovery affordances without binding their resume protocols yet.
@@ -1533,53 +1477,12 @@ pub struct Workspace {
     /// (Claude Code, Codex, etc.). These are not live panes, but can be opened
     /// in a terminal with the 会话来源对应的恢复命令.
     indexed_cli_agent_sessions: Vec<WorkspaceSessionSnapshot>,
-    /// Read-only CLI-agent history discovered from connected Environment Runtime
-    /// homes. Keyed by environment authority; populated only after the runtime is
-    /// connected, so Session Navigator never shows current-app 会话来源存储 as a
-    /// substitute for an Environment Runtime.
-    indexed_environment_cli_agent_sessions: HashMap<String, Vec<WorkspaceSessionSnapshot>>,
-    /// Ashide-owned CLI-agent session user state discovered from connected
-    /// Environment Runtime homes. Keyed by environment authority. This keeps
-    /// remote aliases / pins owned by the remote environment instead of
-    /// leaking into the current-app sidecar.
-    indexed_environment_cli_agent_session_user_states:
-        HashMap<String, crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserState>,
     /// Stable per-window display order for Session Navigator rows. Provider
     /// history timestamps can change during resume; once a row has appeared in
     /// the UI, refresh/resume must not make it jump.
     session_navigator_display_order: HashMap<String, u64>,
     next_session_navigator_display_order: u64,
     workspace_sessions_refresh_state: WorkspaceSessionsRefreshState,
-    /// Session Navigator rows waiting for the Environment Runtime terminal to be
-    /// created. Clicking an Environment agent session must not stop at
-    /// "environment connected"; the selected 会话来源恢复命令 is injected into
-    /// the first environment-owned terminal after the runtime is ready.
-    pending_environment_runtime_session_restores:
-        HashMap<String, PendingEnvironmentRuntimeSessionRestore>,
-    /// Environment authorities whose next environment-owned terminal should execute
-    /// a specific startup command after the environment shell has bootstrapped. This
-    /// carries `Codex` / specific CLI agent launch intents across async runtime
-    /// runtime connection boundary.
-    pending_environment_runtime_startup_commands: HashMap<String, String>,
-    /// Environment authorities whose next environment-owned terminal is explicitly
-    /// requested without additional startup/agent payload. This makes legacy
-    /// OpenEnvironmentRuntimeTerminal and already-connected environment terminal opens use the
-    /// same pending intent machinery as agent/startup/restore.
-    pending_environment_runtime_terminal_authorities: HashSet<String>,
-    /// Environment authorities whose next environment-owned terminal should enter
-    /// the generic Agent view after the environment shell has bootstrapped. This
-    /// carries the user's `New Agent` intent across async runtime
-    /// connection boundary, where the placeholder current-app pane is replaced.
-    pending_environment_runtime_agent_view_entries: HashMap<String, AgentTabEntry>,
-    pending_environment_runtime_forked_conversation_entries: HashMap<String, ForkEntry>,
-    /// Environment authorities whose pending split-pane intent (agent or fork)
-    /// is materializing into a loading pane while the runtime is still
-    /// connecting. Maps authority -> loading pane id to replace once the
-    /// runtime connects. Without this, split-pane fork/agent on a connecting
-    /// runtime silently aborted (#15/#16); now it queues like the new-tab path
-    /// and the connect callback replaces the specific loading pane instead of
-    /// the focused one.
-    pending_environment_runtime_split_pane_loading_ids: HashMap<String, PaneId>,
     /// Logical Session Navigator rows that have already accepted a restore click
     /// in this window. This gives the left rail immediate click feedback and
     /// prevents duplicate resume commands while the live tab is being created.
@@ -1725,6 +1628,72 @@ impl<'a, 'b> EnvironmentSessionTabPlanHandler
 }
 
 impl Workspace {
+    #[cfg(test)]
+    pub(crate) fn environments_mut(
+        &mut self,
+    ) -> &mut crate::workspace::environment_table::EnvironmentTable {
+        &mut self.environments
+    }
+
+    #[cfg(test)]
+    pub(crate) fn current_environment_snapshot(&self) -> Option<EnvironmentSnapshot> {
+        self.current_environment()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_startup_command_for_authority(&self, authority: &str) -> Option<&String> {
+        self.environments
+            .entry_for_authority(authority)
+            .and_then(|entry| entry.pending_startup_command.as_ref())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_session_restore_for_authority(
+        &self,
+        authority: &str,
+    ) -> Option<&PendingEnvironmentRuntimeSessionRestore> {
+        self.environments
+            .entry_for_authority(authority)
+            .and_then(|entry| entry.pending_restore.as_ref())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_pending_terminal_for_authority(&self, authority: &str) -> bool {
+        self.environments
+            .entry_for_authority(authority)
+            .is_some_and(|entry| entry.pending_terminal)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_agent_view_for_authority(
+        &self,
+        authority: &str,
+    ) -> Option<&AgentTabEntry> {
+        self.environments
+            .entry_for_authority(authority)
+            .and_then(|entry| entry.pending_agent_view.as_ref())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_forked_conversation_for_authority(
+        &self,
+        authority: &str,
+    ) -> Option<&ForkEntry> {
+        self.environments
+            .entry_for_authority(authority)
+            .and_then(|entry| entry.pending_forked_conversation.as_ref())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_split_pane_loading_id_for_authority(
+        &self,
+        authority: &str,
+    ) -> Option<PaneId> {
+        self.environments
+            .entry_for_authority(authority)
+            .and_then(|entry| entry.pending_split_pane_loading_id)
+    }
+
     const ASHIDE_CONVERSATION_SESSION_ID_PREFIX: &'static str = "ashide-conversation:";
 
     fn ashide_conversation_session_id(conversation_id: AIConversationId) -> String {
@@ -2217,45 +2186,18 @@ impl Workspace {
         (settings_pane, theme_chooser_view)
     }
 
-    fn build_require_login_modal(ctx: &mut ViewContext<Self>) -> ViewHandle<AuthView> {
-        let require_login_modal = ctx.add_typed_action_view(|ctx| {
-            AuthView::new(AuthViewVariant::RequireLoginCloseable, ctx)
-        });
-        ctx.subscribe_to_view(&require_login_modal, move |me, _, event, ctx| {
-            me.handle_require_login_modal_event(event, ctx);
-        });
-
-        require_login_modal
-    }
-
     fn build_auth_override_warning_modal(
         ctx: &mut ViewContext<Self>,
     ) -> ViewHandle<AuthOverrideWarningModal> {
-        let auth_override_warning_modal = ctx.add_typed_action_view(|ctx| {
-            AuthOverrideWarningModal::new(ctx, AuthOverrideWarningModalVariant::WorkspaceModal)
-        });
+        let auth_override_warning_modal =
+            ctx.add_typed_action_view(|ctx| AuthOverrideWarningModal::new(ctx));
 
-        ctx.subscribe_to_view(&auth_override_warning_modal, |me, _, event, ctx| {
-            me.handle_auth_override_warning_modal_event(event, ctx);
+        ctx.subscribe_to_view(&auth_override_warning_modal, |me, _, (), ctx| {
+            me.current_workspace_state.is_auth_override_modal_open = false;
+            ctx.notify();
         });
 
         auth_override_warning_modal
-    }
-
-    fn handle_auth_override_warning_modal_event(
-        &mut self,
-        event: &AuthOverrideWarningModalEvent,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        match event {
-            AuthOverrideWarningModalEvent::Close => {
-                self.current_workspace_state.is_auth_override_modal_open = false;
-                ctx.notify();
-            }
-            AuthOverrideWarningModalEvent::BulkExport => {
-                self.export_all_local_drive_objects(ctx);
-            }
-        }
     }
 
     fn build_workflow_modal(ctx: &mut ViewContext<Self>) -> ViewHandle<WorkflowModal> {
@@ -2313,10 +2255,10 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         match event {
-            SuggestedRuleModalEvent::AddNewRule { .. } => {
+            SuggestedRuleModalEvent::AddNewRule => {
                 self.current_workspace_state.is_suggested_rule_modal_open = false;
             }
-            SuggestedRuleModalEvent::OpenRuleForEditing { .. } => {
+            SuggestedRuleModalEvent::OpenRuleForEditing => {
                 self.current_workspace_state.is_suggested_rule_modal_open = false;
                 self.open_ai_fact_collection_pane(Some(Direction::Right), None, ctx);
             }
@@ -2583,16 +2525,12 @@ impl Workspace {
                     && ai_settings.default_tab_config_path() == path.to_string_lossy();
                 if is_removed_default {
                     AISettings::handle(ctx).update(ctx, |settings, ctx| {
-                        report_if_error!(
-                            settings
-                                .default_session_mode_internal
-                                .set_value(DefaultSessionMode::Terminal, ctx)
-                        );
-                        report_if_error!(
-                            settings
-                                .default_tab_config_path
-                                .set_value(String::new(), ctx)
-                        );
+                        report_if_error!(settings
+                            .default_session_mode_internal
+                            .set_value(DefaultSessionMode::Terminal, ctx));
+                        report_if_error!(settings
+                            .default_tab_config_path
+                            .set_value(String::new(), ctx));
                     });
                 }
                 if let Err(e) = std::fs::remove_file(path) {
@@ -3195,9 +3133,6 @@ impl Workspace {
             me.handle_palette_event(event, ctx);
         });
 
-        let auth_manager = AuthManager::handle(ctx);
-        ctx.subscribe_to_model(&auth_manager, Self::handle_auth_manager_event);
-
         // Handle theme updates when there is a cloud update to themes while the picker is open.
         ctx.subscribe_to_model(&ThemeSettings::handle(ctx), |me, _, _, ctx| {
             if me.is_theme_chooser_open() {
@@ -3238,8 +3173,6 @@ impl Workspace {
         ctx.subscribe_to_view(&codex_modal, |me, _, event, ctx| {
             me.handle_codex_modal_event(event, ctx);
         });
-
-        let require_login_modal = Self::build_require_login_modal(ctx);
 
         let auth_override_warning_modal = Self::build_auth_override_warning_modal(ctx);
 
@@ -3690,7 +3623,6 @@ impl Workspace {
             auth_override_warning_modal,
             suggested_agent_mode_workflow_modal,
             suggested_rule_modal,
-            require_login_modal,
             workflow_modal,
             theme_creator_modal,
             theme_deletion_modal,
@@ -3739,26 +3671,12 @@ impl Workspace {
             hoa_onboarding_flow: None,
             hoa_vtabs_callout_pinned_position: None,
             pending_pane_group_transfer: false,
-            current_environment: None,
-            environment_runtimes: EnvironmentRuntimeRegistry::default(),
-            retained_environment_authorities: HashSet::new(),
-            environment_runtime_home_roots: HashMap::new(),
-            environment_runtime_heartbeat_generations: HashMap::new(),
-            environment_runtime_preparation_generations: HashMap::new(),
-            next_environment_runtime_session_id: 9_000_000_000,
+            environments: crate::workspace::environment_table::EnvironmentTable::default(),
             restored_workspace_sessions: Vec::new(),
             indexed_cli_agent_sessions: Self::scan_terminal_cli_agent_sessions(40),
-            indexed_environment_cli_agent_sessions: HashMap::new(),
-            indexed_environment_cli_agent_session_user_states: HashMap::new(),
             session_navigator_display_order: HashMap::new(),
             next_session_navigator_display_order: 0,
             workspace_sessions_refresh_state: WorkspaceSessionsRefreshState::default(),
-            pending_environment_runtime_session_restores: HashMap::new(),
-            pending_environment_runtime_startup_commands: HashMap::new(),
-            pending_environment_runtime_terminal_authorities: HashSet::new(),
-            pending_environment_runtime_agent_view_entries: HashMap::new(),
-            pending_environment_runtime_forked_conversation_entries: HashMap::new(),
-            pending_environment_runtime_split_pane_loading_ids: HashMap::new(),
             restoring_workspace_session_keys: HashSet::new(),
             active_restored_workspace_session_key: None,
             suppress_detach_panes_on_window_close: false,
@@ -4063,11 +3981,11 @@ impl Workspace {
         };
 
         if Self::session_bridge_conversation_id_for_terminal_view(&terminal_view, ctx).is_none() {
-            return vec![
-                MenuItemFields::new(crate::t!("workspace-session-bridge-fork-unavailable"))
-                    .with_disabled(true)
-                    .into_item(),
-            ];
+            return vec![MenuItemFields::new(crate::t!(
+                "workspace-session-bridge-fork-unavailable"
+            ))
+            .with_disabled(true)
+            .into_item()];
         }
 
         Self::session_bridge_menu_items_for_active_pane(locator)
@@ -4188,6 +4106,7 @@ impl Workspace {
                     is_active: false,
                     is_pinned: false,
                     updated_at_unix_ms: Some(conversation.last_updated.timestamp_millis()),
+                    is_live_container: false,
                 }
             })
             .collect()
@@ -5056,7 +4975,7 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) -> Option<ViewHandle<TerminalView>> {
         let direction = PaneGroupDirection::Right;
-        let Some(environment) = self.current_environment.clone() else {
+        let Some(environment) = self.current_environment().clone() else {
             return self.deliver_agent_pane_split_in_real_pane(direction, entry, ctx);
         };
         let authority = environment.authority_key.clone();
@@ -5120,7 +5039,7 @@ impl Workspace {
     /// so it no longer silently aborts on a connecting runtime.
     fn deliver_startup_command_split_pane(&mut self, command: String, ctx: &mut ViewContext<Self>) {
         let direction = PaneGroupDirection::Right;
-        let Some(environment) = self.current_environment.clone() else {
+        let Some(environment) = self.current_environment().clone() else {
             self.deliver_startup_command_split_pane_in_real_pane(direction, command, ctx);
             return;
         };
@@ -5717,16 +5636,30 @@ impl Workspace {
         self.set_current_environment_snapshot(active_environment);
     }
 
+    /// Current active environment snapshot (backed by the environment table).
+    /// Replaces the old `current_environment` field. Callers that wrote
+    /// `self.current_environment.clone()` should call `.current_environment()`
+    /// instead.
+    fn current_environment(&self) -> Option<EnvironmentSnapshot> {
+        self.environments.current_snapshot()
+    }
+
     fn set_current_environment_snapshot(&mut self, environment: EnvironmentSnapshot) {
         self.retain_environment_authority(&environment);
-        self.current_environment = Some(environment);
+        let authority = environment.authority_key.clone();
+        self.environments.upsert(environment);
+        self.environments.set_active_authority(Some(authority));
     }
 
     fn set_current_environment_snapshot_opt(&mut self, environment: Option<EnvironmentSnapshot>) {
         if let Some(environment) = environment.as_ref() {
             self.retain_environment_authority(environment);
+            self.environments.upsert(environment.clone());
+            self.environments
+                .set_active_authority(Some(environment.authority_key.clone()));
+        } else {
+            self.environments.set_active_authority(None);
         }
-        self.current_environment = environment;
     }
 
     fn set_tab_environment_snapshot(tab: &mut TabData, environment: EnvironmentSnapshot) {
@@ -5813,8 +5746,7 @@ impl Workspace {
         &self,
         authority: &str,
     ) -> Option<String> {
-        self.current_environment
-            .as_ref()
+        self.current_environment()
             .filter(|environment| environment.authority_key == authority)
             .and_then(|environment| environment.active_workspace_root.clone())
             .or_else(|| {
@@ -5895,17 +5827,16 @@ impl Workspace {
             return;
         }
 
-        self.retained_environment_authorities
-            .insert(environment.authority_key.clone());
+        self.environments.retain(&environment.authority_key);
         self.remember_environment_runtime_snapshot(environment.clone());
     }
 
     fn release_environment_authority(&mut self, authority: &str) {
-        self.retained_environment_authorities.remove(authority);
+        self.environments.release(authority);
     }
 
     fn is_environment_authority_retained(&self, authority: &str) -> bool {
-        self.retained_environment_authorities.contains(authority)
+        self.environments.is_retained(authority)
     }
 
     fn reconnect_retained_environment_runtime_authority(
@@ -5924,7 +5855,7 @@ impl Workspace {
     }
 
     fn remember_environment_runtime_snapshot(&mut self, environment: EnvironmentSnapshot) {
-        self.environment_runtimes.upsert_environment(environment);
+        self.environments.upsert(environment);
     }
 
     fn restored_environment_snapshot_needs_lifecycle_reset(
@@ -5936,7 +5867,6 @@ impl Workspace {
                 EnvironmentLifecycleState::Connected
                     | EnvironmentLifecycleState::Connecting
                     | EnvironmentLifecycleState::Installing
-                    | EnvironmentLifecycleState::Reconnecting
             )
     }
 
@@ -6103,8 +6033,7 @@ impl Workspace {
     }
 
     fn remember_environment_runtime_home_root(&mut self, authority: String, home_root: String) {
-        self.environment_runtime_home_roots
-            .insert(authority, home_root);
+        self.environments.set_home_root(authority, home_root);
     }
 
     fn environment_runtime_home_root_or_project_root(
@@ -6112,18 +6041,17 @@ impl Workspace {
         authority: &str,
         project_root: &str,
     ) -> String {
-        self.environment_runtime_home_roots
-            .get(authority)
-            .cloned()
+        self.environments
+            .home_root(authority)
             .unwrap_or_else(|| project_root.to_owned())
     }
 
     fn environment_runtime_home_root(&self, authority: &str) -> Option<String> {
-        self.environment_runtime_home_roots.get(authority).cloned()
+        self.environments.home_root(authority)
     }
 
     fn clear_environment_runtime_home_root_for_authority(&mut self, authority: &str) {
-        self.environment_runtime_home_roots.remove(authority);
+        self.environments.clear_home_root(authority);
     }
 
     fn set_environment_project_explorer_root(
@@ -6221,7 +6149,7 @@ impl Workspace {
         &self,
         authority: &str,
     ) -> Option<EnvironmentLifecycleState> {
-        self.environment_runtimes.lifecycle_for_authority(authority)
+        self.environments.lifecycle_for_authority(authority)
     }
 
     fn is_environment_runtime_connected_client_available_for_authority(
@@ -6294,11 +6222,7 @@ impl Workspace {
                     false
                 }
             }
-            Some(
-                EnvironmentLifecycleState::Connecting
-                | EnvironmentLifecycleState::Installing
-                | EnvironmentLifecycleState::Reconnecting,
-            ) => {
+            Some(EnvironmentLifecycleState::Connecting | EnvironmentLifecycleState::Installing) => {
                 if self.has_environment_runtime_bootstrap_session(authority) {
                     true
                 } else {
@@ -6318,8 +6242,7 @@ impl Workspace {
         &self,
         authority: &str,
     ) -> Option<EnvironmentRuntimeTarget> {
-        self.environment_runtimes
-            .connected_target_for_authority(authority)
+        self.environments.connected_target_for_authority(authority)
     }
 
     fn is_environment_runtime_connected_for_authority(&self, authority: &str) -> bool {
@@ -6339,6 +6262,7 @@ impl Workspace {
     /// runtime. Returns the `HostId` only when a runtime exists for that
     /// authority and is in the Connected state (so the daemon file RPCs are
     /// usable); otherwise `None`.
+    #[cfg(not(any(test, feature = "integration_tests")))]
     pub(crate) fn connected_environment_runtime_host_id_for_node(
         &self,
         node_id: &str,
@@ -6349,14 +6273,14 @@ impl Workspace {
     }
 
     fn environment_runtime_authority_for_session(&self, session_id: SessionId) -> Option<&str> {
-        self.environment_runtimes.authority_for_session(session_id)
+        self.environments.authority_for_session(session_id)
     }
 
     fn environment_runtime_authority_for_session_or_synthetic(
         &self,
         session_id: SessionId,
     ) -> Option<&str> {
-        self.environment_runtimes
+        self.environments
             .authority_for_session_or_synthetic(session_id)
     }
 
@@ -6364,8 +6288,7 @@ impl Workspace {
         &self,
         session_id: SessionId,
     ) -> Option<&str> {
-        self.environment_runtimes
-            .current_authority_for_session(session_id)
+        self.environments.current_authority_for_session(session_id)
     }
 
     fn environment_runtime_lifecycle_for_session(
@@ -6379,20 +6302,16 @@ impl Workspace {
     fn is_environment_runtime_session_bootstrapping(&self, session_id: SessionId) -> bool {
         matches!(
             self.environment_runtime_lifecycle_for_session(session_id),
-            Some(
-                EnvironmentLifecycleState::Connecting
-                    | EnvironmentLifecycleState::Installing
-                    | EnvironmentLifecycleState::Reconnecting,
-            )
+            Some(EnvironmentLifecycleState::Connecting | EnvironmentLifecycleState::Installing,)
         )
     }
 
     fn environment_runtime_session_for_authority(&self, authority: &str) -> Option<SessionId> {
-        self.environment_runtimes.session_for_authority(authority)
+        self.environments.session_for_authority(authority)
     }
 
     fn has_environment_runtime_bootstrap_session(&self, authority: &str) -> bool {
-        self.environment_runtimes.has_bootstrap_session(authority)
+        self.environments.has_bootstrap_session(authority)
     }
 
     fn environment_runtime_session_matches_authority(
@@ -6407,45 +6326,33 @@ impl Workspace {
         &self,
         host_id: &HostId,
     ) -> Option<(String, SessionId)> {
-        self.environment_runtimes
-            .connected_session_for_host(host_id)
+        self.environments.connected_session_for_host(host_id)
     }
 
-    fn remove_environment_runtime_authority(
-        &mut self,
-        authority: &str,
-    ) -> Option<crate::workspace::environment_runtime::EnvironmentRuntime> {
-        self.environment_runtimes.remove_authority(authority)
+    fn remove_environment_runtime_authority(&mut self, authority: &str) {
+        self.environments.remove(authority);
     }
 
     fn environment_runtime_connection_ref_for_authority(&self, authority: &str) -> Option<String> {
-        self.environment_runtimes
-            .runtime_for_authority(authority)
-            .and_then(|runtime| {
-                runtime
-                    .environment
-                    .runtime_connection_ref()
-                    .map(str::to_owned)
-            })
+        self.environments.connection_ref_for_authority(authority)
     }
 
     fn environment_runtime_snapshot_for_authority(
         &self,
         authority: &str,
     ) -> Option<EnvironmentSnapshot> {
-        self.environment_runtimes.snapshot_for_authority(authority)
+        self.environments.snapshot_for_authority(authority)
     }
 
     fn environment_runtime_snapshots(&self) -> Vec<EnvironmentSnapshot> {
-        self.environment_runtimes.environment_snapshots()
+        self.environments.runtime_snapshots()
     }
 
     fn environment_runtime_spawn_plan_for_environment(
         &self,
         environment: &EnvironmentSnapshot,
     ) -> EnvironmentRuntimeSpawnPlan {
-        self.environment_runtimes
-            .spawn_plan_for_environment(environment)
+        self.environments.spawn_plan_for_environment(environment)
     }
 
     fn terminal_bootstrap_spawn_for_environment(
@@ -6453,7 +6360,7 @@ impl Workspace {
         environment: &EnvironmentSnapshot,
     ) -> Option<TerminalBootstrapSpawn> {
         let target = self
-            .environment_runtimes
+            .environments
             .terminal_bootstrap_target_for_environment(environment)?;
         Some(self.terminal_bootstrap_spawn_for_target(target))
     }
@@ -6462,7 +6369,7 @@ impl Workspace {
         &self,
         target: TerminalBootstrapTarget,
     ) -> TerminalBootstrapSpawn {
-        self.environment_runtimes
+        self.environments
             .terminal_bootstrap_spawn_for_target(target)
     }
 
@@ -6470,8 +6377,7 @@ impl Workspace {
         &self,
         session_id: SessionId,
     ) -> Option<PathBuf> {
-        self.environment_runtimes
-            .control_path_for_session(session_id)
+        self.environments.control_path_for_session(session_id)
     }
 
     fn is_current_environment_runtime_session(&self, session_id: SessionId) -> bool {
@@ -6493,9 +6399,7 @@ impl Workspace {
         &mut self,
         session_id: SessionId,
     ) -> Option<String> {
-        let authority = self
-            .environment_runtimes
-            .mark_installing_session(session_id)?;
+        let authority = self.environments.mark_installing_session(session_id)?;
         self.set_environment_lifecycle_for_authority(
             &authority,
             EnvironmentLifecycleState::Installing,
@@ -6509,14 +6413,13 @@ impl Workspace {
         host_id: HostId,
     ) -> Option<String> {
         let authority = self
-            .environment_runtimes
+            .environments
             .mark_connected_session(session_id, host_id)?;
         self.set_environment_lifecycle_for_authority(
             &authority,
             EnvironmentLifecycleState::Connected,
         );
-        self.environment_runtime_preparation_generations
-            .remove(&authority);
+        self.environments.clear_preparation_generation(&authority);
         Some(authority)
     }
 
@@ -6526,20 +6429,17 @@ impl Workspace {
         error: String,
     ) -> Option<String> {
         let authority = self
-            .environment_runtimes
+            .environments
             .mark_error_for_session(session_id, error)?;
         self.set_environment_lifecycle_for_authority(&authority, EnvironmentLifecycleState::Error);
-        self.environment_runtime_preparation_generations
-            .remove(&authority);
+        self.environments.clear_preparation_generation(&authority);
         Some(authority)
     }
 
     fn mark_environment_runtime_error_for_authority(&mut self, authority: &str, error: String) {
-        self.environment_runtimes
-            .mark_error_for_authority(authority, error);
+        self.environments.mark_error_for_authority(authority, error);
         self.set_environment_lifecycle_for_authority(authority, EnvironmentLifecycleState::Error);
-        self.environment_runtime_preparation_generations
-            .remove(authority);
+        self.environments.clear_preparation_generation(authority);
     }
 
     fn mark_environment_runtime_connecting(
@@ -6550,7 +6450,7 @@ impl Workspace {
     ) {
         let authority = environment.authority_key.clone();
         self.retain_environment_authority(&environment);
-        self.environment_runtimes
+        self.environments
             .mark_connecting(environment, session_id, socket_path);
         self.set_environment_lifecycle_for_authority(
             &authority,
@@ -6563,10 +6463,14 @@ impl Workspace {
         authority: &str,
         lifecycle_state: EnvironmentLifecycleState,
     ) {
-        if let Some(environment) = self.current_environment.as_mut() {
-            if environment.authority_key == authority {
-                environment.lifecycle_state = lifecycle_state.clone();
-            }
+        if self
+            .current_environment()
+            .is_some_and(|e| e.authority_key == authority)
+        {
+            self.environments
+                .patch_snapshot_for_authority(authority, |e| {
+                    e.lifecycle_state = lifecycle_state.clone();
+                });
         }
 
         for tab in &mut self.tabs {
@@ -6593,9 +6497,19 @@ impl Workspace {
         };
 
         let mut environment_to_remember = None;
-        if let Some(environment) = self.current_environment.as_mut() {
-            if Self::patch_environment_workspace_root(environment, authority, &root) {
-                environment_to_remember = Some(environment.clone());
+        let mut patched = false;
+        if self
+            .current_environment()
+            .is_some_and(|e| e.authority_key == authority)
+        {
+            self.environments
+                .patch_snapshot_for_authority(authority, |environment| {
+                    if Self::patch_environment_workspace_root(environment, authority, &root) {
+                        patched = true;
+                    }
+                });
+            if patched {
+                environment_to_remember = self.current_environment();
             }
         }
         for tab in &mut self.tabs {
@@ -6698,12 +6612,6 @@ impl Workspace {
     ) -> Option<EnvironmentSnapshot> {
         crate::workspace::environment_runtime::terminal_bootstrap_environment_for_authority(
             authority_key,
-        )
-    }
-
-    fn current_environment_uses_terminal_bootstrap(&self, ctx: &AppContext) -> bool {
-        crate::workspace::environment_runtime::authority_uses_terminal_bootstrap(
-            &self.current_environment_for_strip(ctx).authority_key,
         )
     }
 
@@ -7605,11 +7513,9 @@ impl Workspace {
             right,
         };
         TabSettings::handle(ctx).update(ctx, |settings, ctx| {
-            report_if_error!(
-                settings
-                    .header_toolbar_chip_selection
-                    .set_value(selection, ctx)
-            );
+            report_if_error!(settings
+                .header_toolbar_chip_selection
+                .set_value(selection, ctx));
         });
     }
 
@@ -7856,6 +7762,11 @@ impl Workspace {
                 } => {
                     self.cd_to_environment_directory(path, ctx);
                 }
+                crate::workspace::view::server_file_browser::ServerFileBrowserEvent::OpenDirectoryInNewTab {
+                    path,
+                } => {
+                    self.open_directory_in_new_tab(PathBuf::from(path), ctx);
+                }
                 crate::workspace::view::server_file_browser::ServerFileBrowserEvent::EnvironmentRuntimeUnavailable {
                     session_id,
                     host_id,
@@ -7928,7 +7839,7 @@ impl Workspace {
         host_id: Option<HostId>,
         ctx: &mut ViewContext<Self>,
     ) {
-        let Some(environment) = self.current_environment.clone() else {
+        let Some(environment) = self.current_environment().clone() else {
             return;
         };
         if !crate::workspace::environment_runtime::should_ensure_runtime_transport(&environment) {
@@ -7951,8 +7862,7 @@ impl Workspace {
         let lifecycle_state = self
             .environment_runtime_lifecycle_for_authority(&authority)
             .or_else(|| {
-                self.current_environment
-                    .as_ref()
+                self.current_environment()
                     .filter(|environment| environment.authority_key == authority)
                     .map(|environment| environment.lifecycle_state.clone())
             });
@@ -7986,11 +7896,7 @@ impl Workspace {
 
         if matches!(
             self.environment_runtime_lifecycle_for_authority(&authority),
-            Some(
-                EnvironmentLifecycleState::Connecting
-                    | EnvironmentLifecycleState::Installing
-                    | EnvironmentLifecycleState::Reconnecting,
-            )
+            Some(EnvironmentLifecycleState::Connecting | EnvironmentLifecycleState::Installing,)
         ) && self.has_environment_runtime_bootstrap_session(&authority)
         {
             log::info!(
@@ -8008,12 +7914,6 @@ impl Workspace {
             "Environment runtime browser reported unavailable for {authority}; forcing reconnect"
         );
         self.reconnect_environment_runtime_authority(&authority, ctx);
-    }
-
-    fn is_cli_agent_session_source_id(session_id: &str) -> bool {
-        session_id.starts_with("external:")
-            || session_id.starts_with("external-index:")
-            || session_id.starts_with("remote:")
     }
 
     fn is_terminal_cli_agent_session_source_id(session_id: &str) -> bool {
@@ -8104,67 +8004,48 @@ impl Workspace {
         authority: &str,
         ctx: &mut ViewContext<Self>,
     ) {
-        if let Some(pending_restore) = self
-            .pending_environment_runtime_session_restores
-            .remove(authority)
-        {
-            self.clear_workspace_session_restoring(&pending_restore.session);
-            self.clear_active_restored_workspace_session_if_matches(&pending_restore.session, ctx);
+        if let Some(entry) = self.environments.entry_for_authority_mut(authority) {
+            if let Some(pending_restore) = entry.pending_restore.take() {
+                self.clear_workspace_session_restoring(&pending_restore.session);
+                self.clear_active_restored_workspace_session_if_matches(
+                    &pending_restore.session,
+                    ctx,
+                );
+            }
         }
     }
 
     fn clear_pending_environment_runtime_startup_command_for_authority(&mut self, authority: &str) {
-        self.pending_environment_runtime_startup_commands
-            .remove(authority);
+        self.environments.clear_startup_command(authority);
     }
 
     fn clear_pending_environment_runtime_terminal_for_authority(&mut self, authority: &str) {
-        self.pending_environment_runtime_terminal_authorities
-            .remove(authority);
+        self.environments.clear_terminal(authority);
     }
 
     fn clear_pending_environment_runtime_agent_view_entry_for_authority(
         &mut self,
         authority: &str,
     ) {
-        self.pending_environment_runtime_agent_view_entries
-            .remove(authority);
+        self.environments.clear_agent_view(authority);
     }
 
     fn clear_pending_environment_runtime_forked_conversation_entry_for_authority(
         &mut self,
         authority: &str,
     ) {
-        self.pending_environment_runtime_forked_conversation_entries
-            .remove(authority);
+        self.environments.clear_forked_conversation(authority);
     }
 
     fn clear_pending_environment_runtime_split_pane_loading_id_for_authority(
         &mut self,
         authority: &str,
     ) {
-        self.pending_environment_runtime_split_pane_loading_ids
-            .remove(authority);
+        self.environments.clear_split_pane_loading_id(authority);
     }
 
     fn has_pending_environment_runtime_entry_for_authority(&self, authority: &str) -> bool {
-        self.pending_environment_runtime_session_restores
-            .contains_key(authority)
-            || self
-                .pending_environment_runtime_startup_commands
-                .contains_key(authority)
-            || self
-                .pending_environment_runtime_terminal_authorities
-                .contains(authority)
-            || self
-                .pending_environment_runtime_agent_view_entries
-                .contains_key(authority)
-            || self
-                .pending_environment_runtime_forked_conversation_entries
-                .contains_key(authority)
-            || self
-                .pending_environment_runtime_split_pane_loading_ids
-                .contains_key(authority)
+        self.environments.has_pending_entry(authority)
     }
 
     fn clear_pending_environment_runtime_intents_for_authority(
@@ -8190,8 +8071,7 @@ impl Workspace {
         self.clear_pending_environment_runtime_agent_view_entry_for_authority(authority);
         self.clear_pending_environment_runtime_forked_conversation_entry_for_authority(authority);
         self.clear_pending_environment_runtime_split_pane_loading_id_for_authority(authority);
-        self.pending_environment_runtime_terminal_authorities
-            .insert(authority.to_owned());
+        self.environments.queue_terminal(authority);
     }
 
     fn queue_pending_environment_runtime_agent_view_entry(
@@ -8205,8 +8085,7 @@ impl Workspace {
         self.clear_pending_environment_runtime_terminal_for_authority(authority);
         self.clear_pending_environment_runtime_forked_conversation_entry_for_authority(authority);
         self.clear_pending_environment_runtime_split_pane_loading_id_for_authority(authority);
-        self.pending_environment_runtime_agent_view_entries
-            .insert(authority.to_owned(), entry);
+        self.environments.queue_agent_view(authority, entry);
     }
 
     fn queue_pending_environment_runtime_startup_command(
@@ -8220,8 +8099,8 @@ impl Workspace {
         self.clear_pending_environment_runtime_forked_conversation_entry_for_authority(authority);
         self.clear_pending_environment_runtime_terminal_for_authority(authority);
         self.clear_pending_environment_runtime_split_pane_loading_id_for_authority(authority);
-        self.pending_environment_runtime_startup_commands
-            .insert(authority.to_owned(), startup_command);
+        self.environments
+            .queue_startup_command(authority, startup_command);
     }
 
     fn queue_pending_environment_runtime_session_restore(
@@ -8236,8 +8115,7 @@ impl Workspace {
         self.clear_pending_environment_runtime_startup_command_for_authority(authority);
         self.clear_pending_environment_runtime_terminal_for_authority(authority);
         self.clear_pending_environment_runtime_split_pane_loading_id_for_authority(authority);
-        self.pending_environment_runtime_session_restores
-            .insert(authority.to_owned(), pending_restore);
+        self.environments.queue_restore(authority, pending_restore);
     }
 
     fn queue_pending_environment_runtime_forked_conversation_entry(
@@ -8251,8 +8129,8 @@ impl Workspace {
         self.clear_pending_environment_runtime_startup_command_for_authority(authority);
         self.clear_pending_environment_runtime_terminal_for_authority(authority);
         self.clear_pending_environment_runtime_split_pane_loading_id_for_authority(authority);
-        self.pending_environment_runtime_forked_conversation_entries
-            .insert(authority.to_owned(), entry);
+        self.environments
+            .queue_forked_conversation(authority, entry);
     }
 
     /// Queue a split-pane intent (agent or fork) for `authority` and record the
@@ -8280,8 +8158,8 @@ impl Workspace {
                 self.queue_pending_environment_runtime_startup_command(authority, command, ctx);
             }
         }
-        self.pending_environment_runtime_split_pane_loading_ids
-            .insert(authority.to_owned(), loading_pane_id);
+        self.environments
+            .set_split_pane_loading_id(authority, loading_pane_id);
     }
 
     fn queue_environment_runtime_intent(
@@ -8421,7 +8299,7 @@ impl Workspace {
             ),
             ctx,
         );
-        if let Some(environment) = self.current_environment.clone() {
+        if let Some(environment) = self.current_environment().clone() {
             self.remember_environment_runtime_snapshot(environment.clone());
             self.ensure_environment_runtime_transport(environment, transport, ctx);
         }
@@ -8452,38 +8330,6 @@ impl Workspace {
             (None, Some(pending_command)) => Some(pending_command),
             (None, None) => None,
         }
-    }
-
-    fn execute_command_for_pane(
-        &mut self,
-        locator: PaneViewLocator,
-        pending_command: Option<String>,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        let Some(command) = pending_command else {
-            return;
-        };
-
-        let Some(tab) = self
-            .tabs
-            .iter()
-            .find(|tab| tab.pane_group.id() == locator.pane_group_id)
-        else {
-            log::warn!("execute_command_for_pane: pane group not found");
-            return;
-        };
-
-        tab.pane_group.update(ctx, |pane_group, ctx| {
-            let Some(terminal_view) = pane_group.terminal_view_from_pane_id(locator.pane_id, ctx)
-            else {
-                log::warn!("execute_command_for_pane: terminal pane not found");
-                return;
-            };
-            log::info!("execute_command_for_pane: executing workspace session restore command");
-            terminal_view.update(ctx, |terminal_view, ctx| {
-                terminal_view.execute_command_or_set_pending(&command, ctx);
-            });
-        });
     }
 
     fn open_terminal_bootstrap_restored_session_terminal(
@@ -8703,13 +8549,6 @@ impl Workspace {
             return;
         };
         self.open_environment_runtime_from_provider(target, ctx);
-    }
-
-    fn current_environment_runtime_connection_ref(&self) -> Option<String> {
-        self.current_environment
-            .as_ref()?
-            .runtime_connection_ref()
-            .map(str::to_string)
     }
 
     fn handle_environment_runtime_binary_check_complete(
@@ -8973,7 +8812,7 @@ impl Workspace {
         );
     }
 
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(all(test, not(target_family = "wasm")))]
     fn schedule_environment_cli_agent_session_source_action(
         &mut self,
         session: &WorkspaceSessionSnapshot,
@@ -9071,7 +8910,7 @@ impl Workspace {
         false
     }
 
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(all(test, not(target_family = "wasm")))]
     fn refresh_environment_cli_agent_sessions_for_authority(
         &mut self,
         authority: &str,
@@ -9285,19 +9124,12 @@ impl Workspace {
                     is_active: false,
                     is_pinned: false,
                     updated_at_unix_ms: record.modified_ms,
+                    is_live_container: false,
                 };
                 snapshot.is_pinned = snapshot.is_pinned_by(&user_state.pinned);
                 Some(snapshot)
             })
             .collect()
-    }
-
-    #[cfg(target_family = "wasm")]
-    fn refresh_environment_cli_agent_sessions_for_authority(
-        &mut self,
-        _authority: &str,
-        _ctx: &mut ViewContext<Self>,
-    ) {
     }
     fn resolve_environment_runtime_root(
         &mut self,
@@ -9418,38 +9250,21 @@ impl Workspace {
         authority: &str,
         startup_command_override: Option<&str>,
     ) -> PendingEnvironmentRuntimeEntryPlan {
-        let session_restore = self
-            .pending_environment_runtime_session_restores
-            .get(authority)
-            .cloned();
+        let entry = self.environments.entry_for_authority(authority);
+        let session_restore = entry.and_then(|e| e.pending_restore.clone());
         let startup_command_from_pending_restore = session_restore
             .as_ref()
             .and_then(|restore| restore.startup_command.clone());
-        let pending_startup_command = self
-            .pending_environment_runtime_startup_commands
-            .get(authority)
-            .cloned();
-        let terminal = self
-            .pending_environment_runtime_terminal_authorities
-            .contains(authority);
+        let pending_startup_command = entry.and_then(|e| e.pending_startup_command.clone());
+        let terminal = entry.is_some_and(|e| e.pending_terminal);
         let startup_command = startup_command_override
             .map(str::to_owned)
             .or(startup_command_from_pending_restore)
             .or(pending_startup_command);
-        let agent_view_entry = self
-            .pending_environment_runtime_agent_view_entries
-            .get(authority)
-            .cloned();
-        let forked_conversation_entry = self
-            .pending_environment_runtime_forked_conversation_entries
-            .get(authority)
-            .cloned();
-        let split_pane_loading_id = self
-            .pending_environment_runtime_split_pane_loading_ids
-            .get(authority)
-            .copied();
+        let agent_view_entry = entry.and_then(|e| e.pending_agent_view.clone());
+        let forked_conversation_entry = entry.and_then(|e| e.pending_forked_conversation.clone());
+        let split_pane_loading_id = entry.and_then(|e| e.pending_split_pane_loading_id);
         PendingEnvironmentRuntimeEntryPlan {
-            session_restore,
             startup_command,
             terminal,
             agent_view_entry,
@@ -9467,18 +9282,10 @@ impl Workspace {
             return None;
         }
         let pending_restore = self
-            .pending_environment_runtime_session_restores
-            .remove(authority);
-        self.pending_environment_runtime_startup_commands
-            .remove(authority);
-        self.pending_environment_runtime_terminal_authorities
-            .remove(authority);
-        self.pending_environment_runtime_agent_view_entries
-            .remove(authority);
-        self.pending_environment_runtime_forked_conversation_entries
-            .remove(authority);
-        self.pending_environment_runtime_split_pane_loading_ids
-            .remove(authority);
+            .environments
+            .entry_for_authority_mut(authority)
+            .and_then(|e| e.pending_restore.take());
+        self.environments.clear_pending_intents(authority);
         pending_restore
     }
 
@@ -9516,17 +9323,16 @@ impl Workspace {
         target: EnvironmentRuntimeTarget,
         root: impl Into<String>,
     ) -> EnvironmentRuntimeTerminalSpawn {
-        self.environment_runtimes
-            .terminal_spawn_for_target(target, root)
+        self.environments.terminal_spawn_for_target(target, root)
     }
 
     fn sync_active_pane_group_environment_terminal_options(&mut self, ctx: &mut ViewContext<Self>) {
         let uses_environment_runtime = self
-            .current_environment
+            .current_environment()
             .as_ref()
             .is_some_and(|environment| Self::should_sync_environment_terminal_options(environment));
         let options = self
-            .current_environment
+            .current_environment()
             .as_ref()
             .filter(|environment| Self::should_sync_environment_terminal_options(environment))
             .and_then(|environment| {
@@ -9617,7 +9423,7 @@ impl Workspace {
         direction: Direction,
         ctx: &mut ViewContext<Self>,
     ) -> Option<TerminalPaneId> {
-        let Some(environment) = self.current_environment.clone() else {
+        let Some(environment) = self.current_environment().clone() else {
             return Some(self.add_terminal_bootstrap_pane_in_current_tab(direction, ctx));
         };
 
@@ -9643,7 +9449,7 @@ impl Workspace {
     ///   primitive after bootstrap — same queue/replay discipline as new-tab.
     fn deliver_fork_split_pane(&mut self, entry: ForkEntry, ctx: &mut ViewContext<Self>) {
         let direction = PaneGroupDirection::Right;
-        let Some(environment) = self.current_environment.clone() else {
+        let Some(environment) = self.current_environment().clone() else {
             self.deliver_fork_split_pane_in_real_pane(direction, entry, ctx);
             return;
         };
@@ -9700,15 +9506,6 @@ impl Workspace {
             ctx,
         );
         ctx.notify();
-    }
-
-    fn replace_active_pane_with_environment_runtime_terminal(
-        &mut self,
-        authority: &str,
-        terminal_options: NewTerminalOptions,
-        ctx: &mut ViewContext<Self>,
-    ) -> EnvironmentRuntimeTerminalOpenResult {
-        self.replace_pane_with_environment_runtime_terminal(authority, terminal_options, None, ctx)
     }
 
     /// Replace a pane with an environment-runtime terminal. When
@@ -9998,7 +9795,7 @@ impl Workspace {
     ) {
         let authority = target.authority.clone();
         if self
-            .current_environment
+            .current_environment()
             .as_ref()
             .is_none_or(|environment| environment.authority_key != authority)
         {
@@ -10063,7 +9860,7 @@ impl Workspace {
         &mut self,
         ctx: &mut ViewContext<Self>,
     ) {
-        let Some(environment) = self.current_environment.clone() else {
+        let Some(environment) = self.current_environment().clone() else {
             return;
         };
         if !Self::should_sync_connected_left_panel_roots(&environment) {
@@ -10134,7 +9931,7 @@ impl Workspace {
         }
 
         if self
-            .current_environment
+            .current_environment()
             .as_ref()
             .is_none_or(|environment| environment.authority_key != authority)
         {
@@ -10165,11 +9962,9 @@ impl Workspace {
         let node_id = self
             .environment_runtime_connection_ref_for_authority(authority)
             .or_else(|| {
-                self.current_environment
-                    .as_ref()
+                self.current_environment()
                     .filter(|environment| environment.authority_key == authority)
-                    .and_then(EnvironmentSnapshot::runtime_connection_ref)
-                    .map(str::to_owned)
+                    .and_then(|environment| environment.runtime_connection_ref().map(str::to_owned))
             })?;
 
         environment_provider::runtime_transport_descriptor_for_connection_ref(&node_id)
@@ -10182,11 +9977,9 @@ impl Workspace {
         let connection_ref = self
             .environment_runtime_connection_ref_for_authority(authority)
             .or_else(|| {
-                self.current_environment
-                    .as_ref()
+                self.current_environment()
                     .filter(|environment| environment.authority_key == authority)
-                    .and_then(EnvironmentSnapshot::runtime_connection_ref)
-                    .map(str::to_owned)
+                    .and_then(|environment| environment.runtime_connection_ref().map(str::to_owned))
             })
             .or_else(|| environment_provider::runtime_connection_ref_from_authority(authority));
 
@@ -10231,11 +10024,10 @@ impl Workspace {
     ) {
         let timeout = Self::environment_runtime_preparation_timeout_for_phase(phase);
         let generation = self
-            .environment_runtime_preparation_generations
-            .entry(authority.clone())
-            .and_modify(|generation| *generation += 1)
-            .or_insert(1);
-        let generation = *generation;
+            .environments
+            .bump_preparation_generation(&authority)
+            .unwrap_or(1);
+        let generation = generation;
 
         ctx.spawn(
             async move {
@@ -10266,13 +10058,10 @@ impl Workspace {
         timeout: Duration,
         ctx: &mut ViewContext<Self>,
     ) {
-        let Some(current_generation) = self
-            .environment_runtime_preparation_generations
-            .get(&authority)
-            .copied()
-        else {
+        let current_generation = self.environments.preparation_generation(&authority);
+        if current_generation == 0 {
             return;
-        };
+        }
         if current_generation != generation {
             return;
         }
@@ -10309,11 +10098,9 @@ impl Workspace {
         };
 
         let generation = self
-            .environment_runtime_heartbeat_generations
-            .entry(authority.clone())
-            .and_modify(|generation| *generation += 1)
-            .or_insert(1);
-        let generation = *generation;
+            .environments
+            .bump_heartbeat_generation(&authority)
+            .unwrap_or(1);
 
         ctx.spawn(
             async move {
@@ -10351,13 +10138,10 @@ impl Workspace {
         result: Result<(), String>,
         ctx: &mut ViewContext<Self>,
     ) {
-        let Some(current_generation) = self
-            .environment_runtime_heartbeat_generations
-            .get(&authority)
-            .copied()
-        else {
+        let current_generation = self.environments.heartbeat_generation(&authority);
+        if current_generation == 0 {
             return;
-        };
+        }
         if current_generation != generation {
             return;
         }
@@ -10415,9 +10199,7 @@ impl Workspace {
     }
 
     fn next_environment_runtime_session_id(&mut self) -> SessionId {
-        let session_id = SessionId::from(self.next_environment_runtime_session_id);
-        self.next_environment_runtime_session_id += 1;
-        session_id
+        self.environments.next_runtime_session_id()
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -10513,7 +10295,7 @@ impl Workspace {
         &mut self,
         ctx: &mut ViewContext<Self>,
     ) {
-        let Some(environment) = self.current_environment.clone() else {
+        let Some(environment) = self.current_environment().clone() else {
             return;
         };
         if !crate::workspace::environment_runtime::should_ensure_runtime_transport(&environment) {
@@ -10570,11 +10352,9 @@ impl Workspace {
         let connection_ref = self
             .environment_runtime_connection_ref_for_authority(authority)
             .or_else(|| {
-                self.current_environment
-                    .as_ref()
+                self.current_environment()
                     .filter(|environment| environment.authority_key == authority)
-                    .and_then(EnvironmentSnapshot::runtime_connection_ref)
-                    .map(str::to_owned)
+                    .and_then(|environment| environment.runtime_connection_ref().map(str::to_owned))
             })
             .or_else(|| environment_provider::runtime_connection_ref_from_authority(authority));
 
@@ -10596,7 +10376,7 @@ impl Workspace {
 
         self.set_environment_lifecycle_for_authority(
             authority,
-            EnvironmentLifecycleState::Reconnecting,
+            EnvironmentLifecycleState::Connecting,
         );
         ctx.notify();
 
@@ -10617,14 +10397,12 @@ impl Workspace {
         let active_workspace_root = self
             .environment_runtime_snapshot_for_authority(authority)
             .or_else(|| {
-                self.current_environment
-                    .as_ref()
+                self.current_environment()
                     .filter(|environment| environment.authority_key == authority)
-                    .cloned()
             })
             .and_then(|environment| environment.active_workspace_root);
         let should_update_current_environment = self
-            .current_environment
+            .current_environment()
             .as_ref()
             .is_some_and(|environment| environment.authority_key == authority);
 
@@ -10633,14 +10411,14 @@ impl Workspace {
         let environment = transport.runtime_snapshot(
             connection_ref,
             active_workspace_root,
-            EnvironmentLifecycleState::Reconnecting,
+            EnvironmentLifecycleState::Connecting,
         );
         if should_update_current_environment {
             self.apply_active_tab_environment(environment.clone(), ctx);
         } else {
             self.set_environment_lifecycle_for_authority(
                 &environment.authority_key,
-                EnvironmentLifecycleState::Reconnecting,
+                EnvironmentLifecycleState::Connecting,
             );
         }
         self.update_left_panel_available_views(ctx);
@@ -10652,7 +10430,7 @@ impl Workspace {
 
     pub fn reconnect_current_environment(&mut self, ctx: &mut ViewContext<Self>) {
         let Some(authority) = self
-            .current_environment
+            .current_environment()
             .as_ref()
             .map(|environment| environment.authority_key.clone())
         else {
@@ -11565,172 +11343,12 @@ impl Workspace {
         true
     }
 
-    fn open_ready_environment_runtime_template_entries(
-        &mut self,
-        mut environment: EnvironmentSnapshot,
-        template_entries: Vec<EnvironmentRuntimePaneTemplateEntry>,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        let authority = environment.authority_key.clone();
-        let Some((first_entry, remaining_entries)) = template_entries.split_first() else {
-            return;
-        };
-
-        Self::set_environment_workspace_root(
-            &mut environment,
-            Self::template_entry_root(first_entry),
-        );
-        self.open_environment_runtime_template_entry(environment, first_entry.clone(), ctx);
-        self.configure_active_environment_runtime_template_entry(first_entry, ctx);
-
-        for entry in remaining_entries {
-            let Some(mut target) = self.environment_runtime_target_for_authority(&authority) else {
-                log::warn!(
-                    "open_ready_environment_runtime_template_entries: runtime target disappeared for {authority}; remaining template panes are not opened"
-                );
-                return;
-            };
-            let root = Self::template_entry_root(entry).unwrap_or_else(|| "/".to_owned());
-            target.root = Some(root.clone());
-            let Some(pane_id) =
-                self.add_environment_runtime_terminal_pane(target, &root, Direction::Right, ctx)
-            else {
-                return;
-            };
-            let pane_group = self.active_tab_pane_group().clone();
-            let pane_group_id = pane_group.id();
-            self.focus_pane(
-                PaneViewLocator {
-                    pane_group_id,
-                    pane_id: pane_id.into(),
-                },
-                ctx,
-            );
-            if let Some(terminal_view) = pane_group
-                .as_ref(ctx)
-                .terminal_view_from_pane_id(pane_id, ctx)
-            {
-                Self::configure_environment_runtime_template_terminal_view(
-                    &terminal_view,
-                    entry,
-                    true,
-                    ctx,
-                );
-            }
-        }
-    }
-
-    fn open_environment_runtime_template_entry(
-        &mut self,
-        environment: EnvironmentSnapshot,
-        template_entry: EnvironmentRuntimePaneTemplateEntry,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        match (
-            template_entry.pane_mode,
-            Self::template_entry_startup_command(&template_entry),
-        ) {
-            (crate::launch_configs::launch_config::PaneMode::Agent, None) => {
-                self.open_environment_runtime_agent_entry(
-                    environment,
-                    AgentTabEntry {
-                        initial_prompt: None,
-                        origin: AgentViewEntryOrigin::Input {
-                            was_prompt_autodetected: false,
-                        },
-                        codex_model_id: None,
-                        open_code_review_pane: false,
-                        fallback_display_title: None,
-                        zero_state_prompt_suggestion_type: None,
-                        restore_left_panel_open: false,
-                    },
-                    false,
-                    ctx,
-                );
-            }
-            (_, Some(startup_command)) => {
-                self.open_environment_runtime_startup_command_entry(
-                    environment,
-                    startup_command,
-                    false,
-                    ctx,
-                );
-            }
-            (crate::launch_configs::launch_config::PaneMode::Terminal, None)
-            | (crate::launch_configs::launch_config::PaneMode::AmbientAgent, None) => {
-                self.open_environment_runtime_terminal_entry(environment, false, ctx);
-            }
-        }
-    }
-
-    fn configure_active_environment_runtime_template_entry(
-        &self,
-        template_entry: &EnvironmentRuntimePaneTemplateEntry,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        if let Some(terminal_view) = self
-            .active_tab_pane_group()
-            .as_ref(ctx)
-            .active_session_view(ctx)
-        {
-            Self::configure_environment_runtime_template_terminal_view(
-                &terminal_view,
-                template_entry,
-                false,
-                ctx,
-            );
-        }
-    }
-
-    fn configure_environment_runtime_template_terminal_view(
-        terminal_view: &ViewHandle<TerminalView>,
-        template_entry: &EnvironmentRuntimePaneTemplateEntry,
-        seed_pending_command: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        if !template_entry.commands.is_empty() {
-            terminal_view.update(ctx, |terminal_view, ctx| {
-                if seed_pending_command {
-                    terminal_view.set_pending_command(
-                        &Self::template_entry_startup_command(template_entry).unwrap_or_default(),
-                        ctx,
-                    );
-                }
-                if matches!(
-                    template_entry.pane_mode,
-                    crate::launch_configs::launch_config::PaneMode::Agent
-                ) {
-                    terminal_view.set_enter_agent_view_after_pending_commands();
-                }
-            });
-        } else if matches!(
-            template_entry.pane_mode,
-            crate::launch_configs::launch_config::PaneMode::Agent
-        ) {
-            terminal_view.update(ctx, |terminal_view, ctx| {
-                terminal_view.enter_agent_view_for_new_conversation(
-                    None,
-                    AgentViewEntryOrigin::Input {
-                        was_prompt_autodetected: false,
-                    },
-                    ctx,
-                );
-            });
-        }
-    }
-
     fn template_entry_root(entry: &EnvironmentRuntimePaneTemplateEntry) -> Option<String> {
         entry
             .cwd
             .to_str()
             .filter(|root| !root.trim().is_empty())
             .map(str::to_owned)
-    }
-
-    fn template_entry_startup_command(
-        entry: &EnvironmentRuntimePaneTemplateEntry,
-    ) -> Option<String> {
-        (!entry.commands.is_empty()).then(|| entry.commands.iter().map(String::as_str).join(" && "))
     }
 
     fn environment_runtime_template_node(
@@ -13076,21 +12694,17 @@ impl Workspace {
 
     fn toggle_recording_mode(&self, ctx: &mut ViewContext<Self>) {
         DebugSettings::handle(ctx).update(ctx, |debug_settings, settings_ctx| {
-            report_if_error!(
-                debug_settings
-                    .recording_mode
-                    .toggle_and_save_value(settings_ctx)
-            );
+            report_if_error!(debug_settings
+                .recording_mode
+                .toggle_and_save_value(settings_ctx));
         });
     }
 
     fn toggle_in_band_generators(&self, ctx: &mut ViewContext<Self>) {
         DebugSettings::handle(ctx).update(ctx, |debug_settings, settings_ctx| {
-            report_if_error!(
-                debug_settings
-                    .are_in_band_generators_for_all_sessions_enabled
-                    .toggle_and_save_value(settings_ctx)
-            );
+            report_if_error!(debug_settings
+                .are_in_band_generators_for_all_sessions_enabled
+                .toggle_and_save_value(settings_ctx));
         });
     }
 
@@ -13382,13 +12996,7 @@ impl Workspace {
             terminal_view: panel_context.terminal_view.clone(),
         };
 
-        self.open_right_panel(
-            &context,
-            &pane_group,
-            panel_context.entrypoint,
-            panel_context.cli_agent,
-            ctx,
-        );
+        self.open_right_panel(&context, &pane_group, ctx);
 
         let active_conversation_id = panel_context
             .terminal_view
@@ -13494,8 +13102,6 @@ impl Workspace {
             RightPanelUpdateParams {
                 pane_group: pane_group_handle,
                 target_open_state,
-                entrypoint: Some(CodeReviewPaneEntrypoint::RightPanel),
-                cli_agent: None,
                 review_pane_context: context.as_ref(),
             },
             ctx,
@@ -13507,8 +13113,6 @@ impl Workspace {
         &mut self,
         context: &CodeReviewPaneContext,
         pane_group_handle: &ViewHandle<PaneGroup>,
-        entrypoint: CodeReviewPaneEntrypoint,
-        cli_agent: Option<crate::terminal::CLIAgent>,
         ctx: &mut ViewContext<Self>,
     ) {
         if pane_group_handle.as_ref(ctx).right_panel_open {
@@ -13524,8 +13128,6 @@ impl Workspace {
             RightPanelUpdateParams {
                 pane_group: pane_group_handle,
                 target_open_state: true,
-                entrypoint: Some(entrypoint),
-                cli_agent,
                 review_pane_context: Some(context),
             },
             ctx,
@@ -13542,8 +13144,6 @@ impl Workspace {
         &mut self,
         _context: &CodeReviewPaneContext,
         _pane_group_handle: &ViewHandle<PaneGroup>,
-        _entrypoint: CodeReviewPaneEntrypoint,
-        _cli_agent: Option<crate::terminal::CLIAgent>,
         _ctx: &mut ViewContext<Self>,
     ) {
     }
@@ -13557,8 +13157,6 @@ impl Workspace {
             RightPanelUpdateParams {
                 pane_group: pane_group_handle,
                 target_open_state: false,
-                entrypoint: None,
-                cli_agent: None,
                 review_pane_context: None,
             },
             ctx,
@@ -13694,13 +13292,9 @@ impl Workspace {
     fn execute_new_session_sidecar_selection(
         &mut self,
         selection: NewSessionSidecarSelection,
-        ctx: &mut ViewContext<Self>,
+        _ctx: &mut ViewContext<Self>,
     ) {
-        match selection {
-            NewSessionSidecarSelection::OpenWorktreeRepo { repo_path } => {
-                self.open_worktree_in_repo(repo_path, ctx);
-            }
-        }
+        match selection {}
     }
 
     fn toggle_user_menu(&mut self, ctx: &mut ViewContext<Self>) {
@@ -13816,22 +13410,6 @@ impl Workspace {
                 self.sync_new_session_sidecar_selection_to_hover(ctx);
             }
         }
-    }
-
-    fn should_include_worktree_sidecar_repo(repo_path: &Path, ctx: &AppContext) -> bool {
-        // This performs one repo-metadata lookup per persisted workspace while the
-        // sidecar items are rebuilt. That's acceptable for now given the expected
-        // repo counts here, and it keeps linked-worktree filtering scoped to the
-        // only UI that currently needs it.
-        let Some(repository) =
-            DetectedRepositories::as_ref(ctx).get_watched_repo_for_path(repo_path, ctx)
-        else {
-            return true;
-        };
-        // Linked worktrees (and submodules) have an external gitdir; exclude
-        // them so only primary repository checkouts appear in the list.
-
-        repository.as_ref(ctx).external_git_directory().is_none()
     }
 
     fn build_worktree_sidecar_items(&self) -> Vec<MenuItem<NewSessionSidecarSelection>> {
@@ -14631,13 +14209,6 @@ impl Workspace {
             WorkflowModalEvent::ViewInLocalDrive(id) => {
                 self.view_in_and_focus_local_drive(*id, ctx);
             }
-            WorkflowModalEvent::AiAssistUpgradeError(_, _) => {
-                self.toast_stack.update(ctx, |view, ctx| {
-                    let new_toast =
-                        DismissibleToast::error(crate::t!("workspace-toast-ai-unavailable"));
-                    view.add_ephemeral_toast(new_toast, ctx);
-                });
-            }
         }
     }
 
@@ -14694,19 +14265,6 @@ impl Workspace {
                         ctx,
                     );
                 }
-            }
-        }
-    }
-
-    fn handle_require_login_modal_event(
-        &mut self,
-        event: &AuthViewEvent,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        match event {
-            AuthViewEvent::Close => {
-                self.current_workspace_state.is_require_login_modal_open = false;
-                ctx.notify();
             }
         }
     }
@@ -14936,30 +14494,11 @@ impl Workspace {
         ctx.notify();
     }
 
-    fn handle_auth_manager_event(
-        &mut self,
-        _handle: ModelHandle<AuthManager>,
-        event: &AuthManagerEvent,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        match event {
-            AuthManagerEvent::AttemptedLoginGatedFeature { auth_view_variant } => {
-                self.open_require_login_modal(*auth_view_variant, ctx)
-            }
-            AuthManagerEvent::AuthComplete => {}
-            _ => {
-                ctx.notify();
-            }
-        }
-    }
-
     pub fn toggle_block_snackbar(&mut self, ctx: &mut ViewContext<Self>) {
         BlockListSettings::handle(ctx).update(ctx, |blocklist_settings, ctx| {
-            report_if_error!(
-                blocklist_settings
-                    .snackbar_enabled
-                    .toggle_and_save_value(ctx)
-            );
+            report_if_error!(blocklist_settings
+                .snackbar_enabled
+                .toggle_and_save_value(ctx));
         });
     }
 
@@ -14971,11 +14510,9 @@ impl Workspace {
 
     pub fn toggle_syntax_highlighting(&mut self, ctx: &mut ViewContext<Self>) {
         InputSettings::handle(ctx).update(ctx, |input_settings, ctx| {
-            report_if_error!(
-                input_settings
-                    .syntax_highlighting
-                    .toggle_and_save_value(ctx)
-            );
+            report_if_error!(input_settings
+                .syntax_highlighting
+                .toggle_and_save_value(ctx));
         });
     }
 
@@ -14990,11 +14527,9 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         AccessibilitySettings::handle(ctx).update(ctx, |accessibility_settings, ctx| {
-            report_if_error!(
-                accessibility_settings
-                    .a11y_verbosity
-                    .set_value(verbosity, ctx)
-            );
+            report_if_error!(accessibility_settings
+                .a11y_verbosity
+                .set_value(verbosity, ctx));
         });
     }
 
@@ -15149,7 +14684,7 @@ impl Workspace {
         let active_environment = tabs
             .get(active_tab_index)
             .and_then(|tab| tab.environment.clone())
-            .or_else(|| self.current_environment.clone())
+            .or_else(|| self.current_environment().clone())
             .or_else(|| {
                 Some(
                     crate::workspace::environment_runtime::terminal_bootstrap_environment_from_tabs(
@@ -17253,6 +16788,7 @@ impl Workspace {
             is_active: false,
             is_pinned: false,
             updated_at_unix_ms: None,
+            is_live_container: false,
         })
     }
 
@@ -17329,6 +16865,7 @@ impl Workspace {
             is_active: false,
             is_pinned: false,
             updated_at_unix_ms: None,
+            is_live_container: false,
         })
     }
 
@@ -17926,7 +17463,6 @@ impl Workspace {
                     conversation_title.clone()
                 };
                 workspace.show_session_bridge_edit_dialog_for_source(
-                    None,
                     source_environment_authority_key.clone(),
                     conversation_title,
                     source_session,
@@ -17949,43 +17485,6 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         self.show_workspace_session_error_toast("当前构建不支持本机会话历史编辑".to_owned(), ctx);
-    }
-
-    #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
-    fn environment_native_write_context_for_authority(
-        &mut self,
-        authority: &str,
-        ctx: &mut ViewContext<Self>,
-    ) -> Option<(
-        Arc<crate::workspace::environment_runtime::EnvironmentRuntimeClient>,
-        String,
-    )> {
-        let Some(target) = self.environment_runtime_target_for_authority(authority) else {
-            self.show_workspace_session_error_toast(
-                "远程运行时未连接，连接后再 Fork".to_owned(),
-                ctx,
-            );
-            return None;
-        };
-        let Some(client) =
-            crate::workspace::environment_runtime::client_for_session(target.session_id, ctx)
-        else {
-            self.reconnect_environment_runtime_authority(authority, ctx);
-            self.show_workspace_session_error_toast(
-                "远程运行时未就绪，已尝试重连；连接后再 Fork".to_owned(),
-                ctx,
-            );
-            return None;
-        };
-        let Some(home_root) = self.environment_runtime_home_root(authority) else {
-            self.show_workspace_session_error_toast(
-                "远程运行时尚未解析 HOME，连接完成后再 Fork".to_owned(),
-                ctx,
-            );
-            return None;
-        };
-
-        Some((client, home_root))
     }
 
     /// Resolve the [`SessionBridgeEnvironment`] that owns `authority` — the
@@ -18801,17 +18300,6 @@ impl Workspace {
                 );
             });
         }
-    }
-
-    fn open_require_login_modal(&mut self, variant: AuthViewVariant, ctx: &mut ViewContext<Self>) {
-        self.require_login_modal.update(ctx, |modal, ctx| {
-            modal.set_variant(ctx, variant);
-        });
-
-        self.close_all_overlays(ctx);
-        self.current_workspace_state.is_require_login_modal_open = true;
-        ctx.focus(&self.require_login_modal);
-        ctx.notify();
     }
 
     fn open_palette(
@@ -21077,18 +20565,6 @@ impl Workspace {
         if self.is_readonly_shared_session_active(ctx) {
             return;
         }
-        if self.auth_state.is_anonymous_or_logged_out()
-            && workflow.as_workflow().is_agent_mode_workflow()
-        {
-            AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
-                auth_manager.attempt_login_gated_feature(
-                    "Run Agent Mode Workflow",
-                    AuthViewVariant::RequireLoginCloseable,
-                    ctx,
-                )
-            });
-            return;
-        }
         if let Some(terminal_view_handle) =
             self.focus_terminal_input(workflow.object_id(), fallback_behavior, ctx)
         {
@@ -21369,9 +20845,7 @@ impl Workspace {
         event: &UpdateManagerEvent,
         ctx: &mut ViewContext<Self>,
     ) {
-        let UpdateManagerEvent::ObjectOperationComplete { result } = event else {
-            return;
-        };
+        let UpdateManagerEvent::ObjectOperationComplete { result } = event;
 
         let object_store_model = ObjectStoreModel::as_ref(ctx);
 
@@ -21408,8 +20882,7 @@ impl Workspace {
                                 let mut new_toast =
                                     DismissibleToast::success(message).with_object_id(object_id);
                                 if let Some(notebook) = cloned_notebook {
-                                    if (matches!(result.operation, ObjectOperation::Create { .. })
-                                        || result.operation == ObjectOperation::Update)
+                                    if result.operation == ObjectOperation::Update
                                         && notebook.model().ai_document_id.is_some()
                                     {
                                         // This is a plan. Only show the "Plan synced" toast if the plan is open in
@@ -21445,9 +20918,7 @@ impl Workspace {
                                 }
 
                                 if let Some(workflow) = cloned_workflow {
-                                    if matches!(result.operation, ObjectOperation::Create { .. })
-                                        || result.operation == ObjectOperation::Update
-                                    {
+                                    if result.operation == ObjectOperation::Update {
                                         new_toast = new_toast.with_link(
                                             ToastLink::new(crate::t!("common-view"))
                                                 .with_onclick_action(
@@ -21471,31 +20942,6 @@ impl Workspace {
                                 }
 
                                 view.add_ephemeral_toast(new_toast, ctx);
-                            }
-                            OperationSuccessType::Failure => {
-                                // Suppress failure toasts for plan notebook updates
-                                // that are not visible in the active pane group.
-                                // Plan notebooks auto-save in the background, and
-                                // showing persistent error toasts for transient
-                                // failures is confusing when the user didn't
-                                // initiate the action.
-                                if let Some(notebook) = &cloned_notebook {
-                                    if result.operation == ObjectOperation::Update
-                                        && notebook.model().ai_document_id.is_some_and(
-                                            |ai_doc_id| {
-                                                !self
-                                                    .active_tab_pane_group()
-                                                    .as_ref(ctx)
-                                                    .contains_ai_document(&ai_doc_id, ctx)
-                                            },
-                                        )
-                                    {
-                                        return;
-                                    }
-                                }
-                                let new_toast =
-                                    DismissibleToast::error(message).with_object_id(object_id);
-                                view.add_persistent_toast(new_toast, ctx);
                             }
                             OperationSuccessType::Rejection => {
                                 let new_toast = if let Some(workflow) = cloned_workflow {
@@ -21531,18 +20977,6 @@ impl Workspace {
                                 };
                                 view.add_persistent_toast(new_toast, ctx);
                             }
-                            OperationSuccessType::FeatureNotAvailable => {
-                                if cloned_workflow.is_some() {
-                                    log::error!(
-                                        "Getting feature not available message for workflows"
-                                    );
-                                }
-                            }
-                            OperationSuccessType::Denied(_) => {
-                                let new_toast =
-                                    DismissibleToast::error(message).with_object_id(object_id);
-                                view.add_persistent_toast(new_toast, ctx);
-                            }
                         });
                 }
             }
@@ -21561,22 +20995,10 @@ impl Workspace {
                             let new_toast = DismissibleToast::success(message);
                             view.add_ephemeral_toast(new_toast, ctx);
                         }
-                        OperationSuccessType::Failure => {
-                            let new_toast: DismissibleToast<WorkspaceAction> =
-                                DismissibleToast::error(message);
-                            view.add_ephemeral_toast(new_toast, ctx);
-                        }
                         OperationSuccessType::Rejection => {
                             let new_toast = DismissibleToast::error(message);
                             view.add_ephemeral_toast(new_toast, ctx);
                         }
-                        OperationSuccessType::FeatureNotAvailable => {
-                            log::error!("Should not get deletion confirmation message when feature is not available. Operation type {:?}", result.operation);
-                        }
-                        OperationSuccessType::Denied(_) => {
-                            let new_toast = DismissibleToast::error(message);
-                            view.add_ephemeral_toast(new_toast, ctx);
-                        },
                     })
             }
         }
@@ -21755,7 +21177,6 @@ impl Workspace {
     #[cfg(feature = "local_fs")]
     fn show_session_bridge_edit_dialog_for_source(
         &mut self,
-        conversation_id: Option<AIConversationId>,
         source_environment_authority_key: Option<String>,
         conversation_title: String,
         source_session: crate::session_bridge::ir::SessionIr,
@@ -21771,7 +21192,6 @@ impl Workspace {
                 SessionBridgeEditDialog::default_fork_target_for_source(&source_session);
             view.set_source(
                 SessionBridgeEditDialogSource {
-                    conversation_id,
                     source_environment_authority_key,
                     conversation_title,
                     available_fork_targets: session_bridge_fork_targets().collect(),
@@ -21835,7 +21255,6 @@ impl Workspace {
                 }
             });
         self.show_session_bridge_edit_dialog_for_source(
-            Some(conversation_id),
             source_environment_authority_key,
             conversation_title,
             source_session,
@@ -22042,11 +21461,9 @@ impl Workspace {
 
     fn reset_zoom(&mut self, ctx: &mut ViewContext<Self>) {
         WindowSettings::handle(ctx).update(ctx, |window_settings, ctx| {
-            report_if_error!(
-                window_settings
-                    .zoom_level
-                    .set_value(ZoomLevel::default_value(), ctx)
-            );
+            report_if_error!(window_settings
+                .zoom_level
+                .set_value(ZoomLevel::default_value(), ctx));
         });
     }
 
@@ -22066,11 +21483,9 @@ impl Workspace {
         };
 
         WindowSettings::handle(ctx).update(ctx, |window_settings, ctx| {
-            report_if_error!(
-                window_settings
-                    .zoom_level
-                    .set_value(crate::window_settings::ZoomLevel::VALUES[next_index], ctx)
-            );
+            report_if_error!(window_settings
+                .zoom_level
+                .set_value(crate::window_settings::ZoomLevel::VALUES[next_index], ctx));
         });
     }
 
@@ -22083,11 +21498,9 @@ impl Workspace {
 
     fn set_terminal_font_size(&mut self, new_font_size: f32, ctx: &mut ViewContext<Self>) {
         FontSettings::handle(ctx).update(ctx, |font_settings, ctx| {
-            report_if_error!(
-                font_settings
-                    .monospace_font_size
-                    .set_value(new_font_size, ctx)
-            );
+            report_if_error!(font_settings
+                .monospace_font_size
+                .set_value(new_font_size, ctx));
         });
     }
 
@@ -22395,14 +21808,6 @@ impl Workspace {
         });
 
         ctx.notify();
-    }
-
-    /// Determines if the changelog is currently being shown or if the changelog request is
-    /// in-flight
-    ///
-    fn is_changelog_open_or_pending(&self, ctx: &mut ViewContext<Self>) -> bool {
-        self.current_workspace_state.is_resource_center_open
-            || self.changelog_model.as_ref(ctx).is_check_pending()
     }
 
     pub(crate) fn focus_active_tab(&mut self, ctx: &mut ViewContext<Self>) {
@@ -23218,7 +22623,7 @@ impl Workspace {
         authority: &str,
         ctx: &AppContext,
     ) -> bool {
-        self.current_environment
+        self.current_environment()
             .as_ref()
             .is_some_and(|environment| environment.authority_key == authority)
             && self.active_tab_contains_environment_runtime_placeholder(ctx)
@@ -23232,7 +22637,7 @@ impl Workspace {
             return;
         }
 
-        let Some(environment) = self.current_environment.clone() else {
+        let Some(environment) = self.current_environment().clone() else {
             return;
         };
         if !Self::supports_environment_runtime_entry(&environment) {
@@ -23251,7 +22656,7 @@ impl Workspace {
     }
 
     fn current_environment_for_strip(&self, ctx: &AppContext) -> EnvironmentSnapshot {
-        match self.current_environment.as_ref() {
+        match self.current_environment().as_ref() {
             Some(environment)
                 if Self::should_preserve_current_environment_for_strip(&environment) =>
             {
@@ -23436,7 +22841,7 @@ impl Workspace {
                 self.close_tab(tab_index, true, false, ctx);
             }
         } else if self
-            .current_environment
+            .current_environment()
             .as_ref()
             .is_some_and(|environment| environment.authority_key == authority_key)
         {
@@ -23446,29 +22851,6 @@ impl Workspace {
         self.update_left_panel_available_views(ctx);
         self.sync_session_navigator_sessions(ctx);
         ctx.notify();
-    }
-
-    fn environment_lifecycle_label(state: &EnvironmentLifecycleState) -> &'static str {
-        match state {
-            EnvironmentLifecycleState::Connected => {
-                crate::t_static!("workspace-environment-state-connected")
-            }
-            EnvironmentLifecycleState::Dormant => {
-                crate::t_static!("workspace-environment-state-dormant")
-            }
-            EnvironmentLifecycleState::Connecting => {
-                crate::t_static!("workspace-environment-state-connecting")
-            }
-            EnvironmentLifecycleState::Installing => {
-                crate::t_static!("workspace-environment-state-installing")
-            }
-            EnvironmentLifecycleState::Reconnecting => {
-                crate::t_static!("workspace-environment-state-reconnecting")
-            }
-            EnvironmentLifecycleState::Error => {
-                crate::t_static!("workspace-environment-state-error")
-            }
-        }
     }
 
     fn environment_lifecycle_color(
@@ -23481,25 +22863,11 @@ impl Workspace {
                 .theme()
                 .sub_text_color(appearance.theme().background())
                 .into(),
-            EnvironmentLifecycleState::Connecting
-            | EnvironmentLifecycleState::Installing
-            | EnvironmentLifecycleState::Reconnecting => appearance.theme().ui_warning_color(),
+            EnvironmentLifecycleState::Connecting | EnvironmentLifecycleState::Installing => {
+                appearance.theme().ui_warning_color()
+            }
             EnvironmentLifecycleState::Error => appearance.theme().ui_error_color(),
         }
-    }
-
-    fn restorable_workspace_sessions(&self) -> Vec<&WorkspaceSessionSnapshot> {
-        self.restored_workspace_sessions
-            .iter()
-            .filter(|session| {
-                matches!(
-                    &session.kind,
-                    WorkspaceSessionKind::Terminal
-                        | WorkspaceSessionKind::AgentTerminal
-                        | WorkspaceSessionKind::Welcome
-                )
-            })
-            .collect()
     }
 
     fn cli_agent_from_session(session: &WorkspaceSessionSnapshot) -> Option<CLIAgent> {
@@ -23514,321 +22882,6 @@ impl Workspace {
                     .as_deref()
                     .and_then(CLIAgent::from_command_prefix)
             })
-    }
-
-    fn restored_session_root_label(session: &WorkspaceSessionSnapshot) -> Option<String> {
-        session
-            .cwd
-            .as_deref()
-            .or(session.startup_directory.as_deref())
-            .map(|root| user_friendly_path(root, None).into_owned())
-    }
-
-    fn cli_agent_origin_label(origin: Option<&CliAgentSessionOrigin>) -> &'static str {
-        match origin {
-            Some(CliAgentSessionOrigin::CommandDetected) => {
-                crate::t_static!("workspace-restored-sessions-origin-command-detected")
-            }
-            Some(CliAgentSessionOrigin::PluginObserved) => {
-                crate::t_static!("workspace-restored-sessions-origin-plugin-observed")
-            }
-            None => crate::t_static!("workspace-restored-sessions-origin-unknown"),
-        }
-    }
-
-    fn render_restored_session_row(
-        &self,
-        session: &WorkspaceSessionSnapshot,
-        appearance: &Appearance,
-    ) -> Box<dyn Element> {
-        let theme = appearance.theme();
-        let title = Self::workspace_session_label(session);
-        let root = Self::restored_session_root_label(session)
-            .unwrap_or_else(|| crate::t!("workspace-restored-sessions-no-root"));
-        let command = session
-            .cli_command
-            .as_deref()
-            .unwrap_or_else(|| crate::t_static!("workspace-restored-sessions-no-command"));
-        let environment = session
-            .environment_authority_key
-            .as_deref()
-            .unwrap_or_else(|| crate::t_static!("workspace-restored-sessions-no-environment"));
-        let origin = Self::cli_agent_origin_label(session.cli_agent_origin.as_ref());
-
-        let title_text = Text::new_inline(title, appearance.ui_font_family(), 12.)
-            .with_color(theme.main_text_color(theme.background()).into())
-            .with_style(Properties::default().weight(Weight::Semibold))
-            .with_clip(ClipConfig::ellipsis())
-            .finish();
-        let root_text = Text::new_inline(root, appearance.ui_font_family(), 11.)
-            .with_color(theme.sub_text_color(theme.background()).into())
-            .with_clip(ClipConfig::ellipsis())
-            .finish();
-        let command_text = Text::new_inline(
-            crate::t!("workspace-restored-sessions-row-command", command = command),
-            appearance.ui_font_family(),
-            10.,
-        )
-        .with_color(theme.sub_text_color(theme.background()).into())
-        .with_clip(ClipConfig::ellipsis())
-        .finish();
-        let environment_text = Text::new_inline(
-            crate::t!(
-                "workspace-restored-sessions-row-environment",
-                environment = environment
-            ),
-            appearance.ui_font_family(),
-            10.,
-        )
-        .with_color(theme.sub_text_color(theme.background()).into())
-        .with_clip(ClipConfig::ellipsis())
-        .finish();
-        let origin_text = Text::new_inline(
-            crate::t!("workspace-restored-sessions-row-origin", origin = origin),
-            appearance.ui_font_family(),
-            10.,
-        )
-        .with_color(theme.sub_text_color(theme.background()).into())
-        .with_clip(ClipConfig::ellipsis())
-        .finish();
-
-        let column = Flex::column()
-            .with_spacing(2.)
-            .with_child(title_text)
-            .with_child(root_text)
-            .with_child(command_text)
-            .with_child(environment_text)
-            .with_child(origin_text)
-            .finish();
-
-        let row = Container::new(column)
-            .with_background(internal_colors::fg_overlay_1(theme))
-            .with_border(Border::all(1.).with_border_fill(ElementFill::None))
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(5.)))
-            .with_padding_left(8.)
-            .with_padding_right(8.)
-            .with_padding_top(7.)
-            .with_padding_bottom(7.)
-            .finish();
-
-        ConstrainedBox::new(row)
-            .with_width(RESTORED_WORKSPACE_SESSIONS_ROW_WIDTH)
-            .finish()
-    }
-
-    fn render_restored_workspace_sessions_popover(
-        &self,
-        sessions: &[&WorkspaceSessionSnapshot],
-        appearance: &Appearance,
-    ) -> Box<dyn Element> {
-        let theme = appearance.theme();
-        let title = Text::new_inline(
-            crate::t!("workspace-restored-sessions-popover-title"),
-            appearance.ui_font_family(),
-            13.,
-        )
-        .with_color(theme.main_text_color(theme.background()).into())
-        .with_style(Properties::default().weight(Weight::Semibold))
-        .finish();
-        let subtitle = Text::new_inline(
-            crate::t!("workspace-restored-sessions-popover-subtitle"),
-            appearance.ui_font_family(),
-            11.,
-        )
-        .with_color(theme.sub_text_color(theme.background()).into())
-        .with_clip(ClipConfig::ellipsis())
-        .finish();
-
-        let mut list = Flex::column()
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_spacing(6.)
-            .with_child(title)
-            .with_child(subtitle);
-        for session in sessions.iter().take(6) {
-            list.add_child(self.render_restored_session_row(session, appearance));
-        }
-        if sessions.len() > 6 {
-            let remaining_session_count = sessions.len().saturating_sub(6);
-            list.add_child(
-                Text::new_inline(
-                    crate::t!(
-                        "workspace-restored-sessions-popover-more",
-                        count = remaining_session_count
-                    ),
-                    appearance.ui_font_family(),
-                    11.,
-                )
-                .with_color(theme.sub_text_color(theme.background()).into())
-                .finish(),
-            );
-        }
-        list.add_child(
-            Text::new_inline(
-                crate::t!("workspace-restored-sessions-popover-footer"),
-                appearance.ui_font_family(),
-                11.,
-            )
-            .with_color(theme.sub_text_color(theme.background()).into())
-            .finish(),
-        );
-
-        ConstrainedBox::new(
-            Container::new(list.finish())
-                .with_background(theme.surface_1())
-                .with_border(Border::all(1.).with_border_color(theme.outline().into()))
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
-                .with_padding_left(RESTORED_WORKSPACE_SESSIONS_POPOVER_HORIZONTAL_PADDING)
-                .with_padding_right(RESTORED_WORKSPACE_SESSIONS_POPOVER_HORIZONTAL_PADDING)
-                .with_padding_top(10.)
-                .with_padding_bottom(10.)
-                .finish(),
-        )
-        .with_width(RESTORED_WORKSPACE_SESSIONS_POPOVER_WIDTH)
-        .finish()
-    }
-
-    fn render_workspace_session_restore_chip(
-        &self,
-        appearance: &Appearance,
-        _ctx: &AppContext,
-    ) -> Option<Box<dyn Element>> {
-        let sessions = self.restorable_workspace_sessions();
-        if sessions.is_empty() {
-            return None;
-        }
-
-        let theme = appearance.theme();
-        let count = sessions.len();
-        let session_labels = sessions
-            .iter()
-            .take(3)
-            .map(|session| Self::workspace_session_label(session))
-            .collect::<Vec<_>>();
-        let label = if count == 1 {
-            crate::t!(
-                "workspace-restored-sessions-chip-single",
-                agent = session_labels
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| crate::t!("workspace-restored-sessions-agent-fallback"))
-            )
-        } else {
-            crate::t!("workspace-restored-sessions-chip-label", count = count)
-        };
-        let detail = if count == 1 {
-            crate::t!("workspace-restored-sessions-state-dormant")
-        } else {
-            session_labels.join(" / ")
-        };
-
-        let label_text = Text::new_inline(label, appearance.ui_font_family(), 12.)
-            .with_color(theme.main_text_color(theme.background()).into())
-            .with_style(Properties::default().weight(Weight::Semibold))
-            .with_clip(ClipConfig::ellipsis())
-            .finish();
-
-        let detail_text = Text::new_inline(detail, appearance.ui_font_family(), 11.)
-            .with_color(
-                appearance
-                    .theme()
-                    .sub_text_color(appearance.theme().background())
-                    .into(),
-            )
-            .with_clip(ClipConfig::ellipsis())
-            .finish();
-
-        let row = Flex::row()
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_spacing(6.)
-            .with_child(label_text)
-            .with_child(detail_text)
-            .finish();
-
-        let chip = ConstrainedBox::new(
-            Container::new(row)
-                .with_background(internal_colors::fg_overlay_1(theme))
-                .with_border(Border::all(1.).with_border_color(theme.outline().into()))
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(5.)))
-                .with_padding_left(8.)
-                .with_padding_right(8.)
-                .with_padding_top(3.)
-                .with_padding_bottom(3.)
-                .finish(),
-        )
-        .with_min_width(140.)
-        .with_max_width(360.)
-        .finish();
-
-        let popover_mouse_state = self.mouse_states.workspace_session_restore_popover.clone();
-        let hoverable = Hoverable::new(
-            self.mouse_states.workspace_session_restore_chip.clone(),
-            |_| chip,
-        )
-        .with_hover_out_delay(Duration::from_millis(250))
-        .on_hover(move |is_hovered, ctx, _, _| {
-            if is_hovered {
-                ctx.dispatch_typed_action(WorkspaceAction::SetWorkspaceSessionRestorePopoverOpen {
-                    open: true,
-                });
-                return;
-            }
-
-            let popover_hovered = popover_mouse_state
-                .lock()
-                .expect("workspace session restore popover mouse state lock poisoned")
-                .is_mouse_over_element();
-            if !popover_hovered {
-                ctx.dispatch_typed_action(WorkspaceAction::SetWorkspaceSessionRestorePopoverOpen {
-                    open: false,
-                });
-            }
-        })
-        .finish();
-
-        if self
-            .current_workspace_state
-            .is_workspace_session_restore_popover_open
-        {
-            let chip_mouse_state = self.mouse_states.workspace_session_restore_chip.clone();
-            let popover = self.render_restored_workspace_sessions_popover(&sessions, appearance);
-            let popover = Hoverable::new(
-                self.mouse_states.workspace_session_restore_popover.clone(),
-                |_| popover,
-            )
-            .with_hover_out_delay(Duration::from_millis(250))
-            .on_hover(move |is_hovered, ctx, _, _| {
-                if is_hovered {
-                    ctx.dispatch_typed_action(
-                        WorkspaceAction::SetWorkspaceSessionRestorePopoverOpen { open: true },
-                    );
-                    return;
-                }
-
-                let chip_hovered = chip_mouse_state
-                    .lock()
-                    .expect("workspace session restore chip mouse state lock poisoned")
-                    .is_mouse_over_element();
-                if !chip_hovered {
-                    ctx.dispatch_typed_action(
-                        WorkspaceAction::SetWorkspaceSessionRestorePopoverOpen { open: false },
-                    );
-                }
-            })
-            .finish();
-            let mut stack = Stack::new().with_child(hoverable);
-            stack.add_positioned_overlay_child(
-                popover,
-                OffsetPositioning::offset_from_parent(
-                    vec2f(0., 6.),
-                    ParentOffsetBounds::WindowByPosition,
-                    ParentAnchor::BottomLeft,
-                    ChildAnchor::TopLeft,
-                ),
-            );
-            Some(stack.finish())
-        } else {
-            Some(hoverable)
-        }
     }
 
     fn environment_display_icon(icon_kind: EnvironmentDisplayIconKind) -> icons::Icon {
@@ -24066,7 +23119,7 @@ impl Workspace {
         let alias = candidate.alias.clone();
         let authority_key = candidate.authority_key.clone();
         let is_current = self
-            .current_environment
+            .current_environment()
             .as_ref()
             .is_some_and(|environment| environment.authority_key == authority_key);
         let is_open = self
@@ -26980,17 +26033,6 @@ impl TypedActionView for Workspace {
         use WorkspaceAction::*;
         let window_id = ctx.window_id();
 
-        if self.auth_state.is_anonymous_or_logged_out() && action.blocked_for_anonymous_user() {
-            AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
-                auth_manager.attempt_login_gated_feature(
-                    action.into(),
-                    AuthViewVariant::RequireLoginCloseable,
-                    ctx,
-                )
-            });
-            return;
-        }
-
         match action {
             ActivateTab(index) => self.activate_tab(*index, ctx),
             ActivateTabByNumber(num) => self.activate_tab(num.saturating_sub(1), ctx),
@@ -27052,16 +26094,12 @@ impl TypedActionView for Workspace {
                         } else {
                             // Config missing or deleted — clear and fall through to Terminal.
                             AISettings::handle(ctx).update(ctx, |settings, ctx| {
-                                report_if_error!(
-                                    settings
-                                        .default_session_mode_internal
-                                        .set_value(DefaultSessionMode::Terminal, ctx)
-                                );
-                                report_if_error!(
-                                    settings
-                                        .default_tab_config_path
-                                        .set_value(String::new(), ctx)
-                                );
+                                report_if_error!(settings
+                                    .default_session_mode_internal
+                                    .set_value(DefaultSessionMode::Terminal, ctx));
+                                report_if_error!(settings
+                                    .default_tab_config_path
+                                    .set_value(String::new(), ctx));
                             });
                             self.add_default_plain_terminal_tab_route_aware(ctx);
                         }
@@ -27276,11 +26314,9 @@ impl TypedActionView for Workspace {
                 AISettings::handle(ctx).update(ctx, |settings, ctx| {
                     report_if_error!(settings.default_session_mode_internal.set_value(*mode, ctx));
                     if let Some(path) = tab_config_path {
-                        report_if_error!(
-                            settings
-                                .default_tab_config_path
-                                .set_value(path.to_string_lossy().into_owned(), ctx)
-                        );
+                        report_if_error!(settings
+                            .default_tab_config_path
+                            .set_value(path.to_string_lossy().into_owned(), ctx));
                     }
                 });
                 #[cfg(feature = "local_tty")]
@@ -27604,13 +26640,7 @@ impl TypedActionView for Workspace {
                                 diff_state_model,
                                 terminal_view,
                             };
-                            self.open_right_panel(
-                                &context,
-                                &pane_group_handle,
-                                CodeReviewPaneEntrypoint::GitDiffChip,
-                                None,
-                                ctx,
-                            );
+                            self.open_right_panel(&context, &pane_group_handle, ctx);
                         }
                     }
                 }
@@ -29407,10 +28437,6 @@ impl View for Workspace {
 
         if self.current_workspace_state.is_ctrl_tab_palette_open {
             stack.add_child(ChildView::new(&self.ctrl_tab_palette).finish());
-        }
-
-        if self.current_workspace_state.is_require_login_modal_open {
-            stack.add_child(ChildView::new(&self.require_login_modal).finish());
         }
 
         if self.current_workspace_state.is_auth_override_modal_open {

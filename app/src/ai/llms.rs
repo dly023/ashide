@@ -604,15 +604,6 @@ impl LLMPreferences {
         self.get_preferred_base_model(app, terminal_view_id)
     }
 
-    /// 默认 title 模型 — 没有独立设置时使用,与 base 模型一致。
-    pub fn get_default_title_model<'a>(
-        &'a self,
-        app: &'a AppContext,
-        terminal_view_id: Option<EntityId>,
-    ) -> &'a LLMInfo {
-        self.get_preferred_base_model(app, terminal_view_id)
-    }
-
     /// 返回当前用于"主动式 AI"(prompt suggestions / NLD / relevant files)的 LLM。
     ///
     /// 优先级:profile 显式设置的 `active_ai_model` → 否则 fallback 到 `base_model`(active)。
@@ -633,15 +624,6 @@ impl LLMPreferences {
         self.get_preferred_base_model(app, terminal_view_id)
     }
 
-    /// 默认 active AI 模型 — 没有独立设置时使用,与 base 模型一致。
-    pub fn get_default_active_ai_model<'a>(
-        &'a self,
-        app: &'a AppContext,
-        terminal_view_id: Option<EntityId>,
-    ) -> &'a LLMInfo {
-        self.get_preferred_base_model(app, terminal_view_id)
-    }
-
     /// 返回当前用于"Next Command"(灰色补全/zero-state 建议)的 LLM。
     ///
     /// 优先级:profile 显式设置的 `next_command_model` → 否则 fallback 到 `base_model`(active)。
@@ -658,15 +640,6 @@ impl LLMPreferences {
             }
         }
 
-        self.get_preferred_base_model(app, terminal_view_id)
-    }
-
-    /// 默认 next command 模型 — 没有独立设置时使用,与 base 模型一致。
-    pub fn get_default_next_command_model<'a>(
-        &'a self,
-        app: &'a AppContext,
-        terminal_view_id: Option<EntityId>,
-    ) -> &'a LLMInfo {
         self.get_preferred_base_model(app, terminal_view_id)
     }
 

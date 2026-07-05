@@ -127,13 +127,6 @@ where
         }
     }
 
-    pub fn set_menu_header_text_override<F>(&mut self, formatter: F)
-    where
-        F: Fn(&str) -> String + 'static,
-    {
-        self.menu_header_text_override = Some(Box::new(formatter));
-    }
-
     pub fn set_footer<F>(&mut self, builder: F, ctx: &mut ViewContext<Self>)
     where
         F: Fn(&AppContext) -> Box<dyn Element> + 'static,
@@ -154,25 +147,8 @@ where
         });
     }
 
-    /// Set the main_axis_size behavior for the dropdown header button.
-    ///
-    /// Default is MainAxisSize::Max, set to MainAxisSize::Min if you want to wrap the dropdown to
-    /// the text that's filling it.
-    pub fn set_main_axis_size(
-        &mut self,
-        main_axis_size: MainAxisSize,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.main_axis_size = main_axis_size;
-        ctx.notify();
-    }
-
     pub fn set_style(&mut self, style: UiComponentStyles) {
         self.style_override = Some(style);
-    }
-
-    pub fn set_button_variant(&mut self, button_variant: ButtonVariant) {
-        self.button_variant = button_variant;
     }
 
     pub fn set_orientation(&mut self, orientation: FilterableDropdownOrientation) {
@@ -297,11 +273,6 @@ where
 
     pub fn set_top_bar_max_width(&mut self, max_width: f32) {
         self.top_bar_max_width = max_width;
-    }
-
-    pub fn set_top_bar_height(&mut self, height: f32, ctx: &mut ViewContext<Self>) {
-        self.top_bar_height = Some(height);
-        ctx.notify();
     }
 
     pub fn set_menu_width(&mut self, width: f32, ctx: &mut ViewContext<Self>) {

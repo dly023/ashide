@@ -17,7 +17,6 @@ use crate::ai::predict::generate_am_query_suggestions::{
     GenerateAMQuerySuggestionsRequest, GenerateAMQuerySuggestionsResponse, Suggestion,
 };
 use crate::ai_assistant::execution_context::AiExecutionContext;
-use crate::app_interaction::PromptSuggestionFallbackReason;
 use crate::network::NetworkStatus;
 use crate::settings::AISettings;
 use crate::terminal::event::{BlockType, UserBlockCompleted};
@@ -27,7 +26,6 @@ use crate::terminal::model::terminal_model::TerminalModel;
 use crate::terminal::model_events::{ModelEvent, ModelEventDispatcher};
 use crate::terminal::view::{AgentModePromptSuggestion, PromptSuggestion};
 use crate::workspaces::user_workspaces::UserWorkspaces;
-use chrono::Utc;
 use parking_lot::FairMutex;
 use serde_json::json;
 use warp_core::features::FeatureFlag;
@@ -48,12 +46,8 @@ pub enum PassiveSuggestionsEvent {
     PromptSuggestionsGenerated {
         prompt_suggestion: AgentModePromptSuggestion,
         block_id: BlockId,
-        command: String,
-        request_duration_ms: u64,
     },
-    PassiveCodeDiffFailed {
-        reason: PromptSuggestionFallbackReason,
-    },
+    PassiveCodeDiffFailed,
 }
 
 pub struct PassiveSuggestionsModel {
@@ -226,15 +220,10 @@ impl PassiveSuggestionsModel {
         ctx: &mut ModelContext<Self>,
     ) {
         let block_id = block_completed.serialized_block.id.clone();
-        let command = block_completed.command.clone();
-        let start_ts_ms = Utc::now().timestamp_millis();
-
         if let Some(suggestion) = fetch_static_prompt_suggestion(&block_completed) {
             ctx.emit(PassiveSuggestionsEvent::PromptSuggestionsGenerated {
                 prompt_suggestion: suggestion.clone(),
                 block_id: block_id.clone(),
-                command,
-                request_duration_ms: 0,
             });
             self.maybe_generate_passive_code_diff(suggestion, block_id, ctx);
             return;
@@ -267,8 +256,6 @@ impl PassiveSuggestionsModel {
         self.prompt_suggestions_future_handle =
             Some(ctx.spawn(request_future, move |me, result, ctx| {
                 me.prompt_suggestions_future_handle = None;
-                let end_ts_ms = Utc::now().timestamp_millis();
-                let request_duration_ms = end_ts_ms.saturating_sub(start_ts_ms) as u64;
                 let prompt_suggestion = match result {
                     Some(response) => map_prompt_suggestions_response(response),
                     None => AgentModePromptSuggestion::Error,
@@ -277,8 +264,6 @@ impl PassiveSuggestionsModel {
                 ctx.emit(PassiveSuggestionsEvent::PromptSuggestionsGenerated {
                     prompt_suggestion: prompt_suggestion.clone(),
                     block_id: block_id.clone(),
-                    command,
-                    request_duration_ms,
                 });
                 me.maybe_generate_passive_code_diff(prompt_suggestion, block_id, ctx);
             }));
@@ -386,12 +371,7 @@ impl PassiveSuggestionsModel {
             .map(|session_type| session_type.uses_environment_runtime())
             .unwrap_or(true);
         if !can_read_file || should_skip_for_environment_runtime {
-            let reason = if !can_read_file {
-                PromptSuggestionFallbackReason::NoReadFilesPermission
-            } else {
-                PromptSuggestionFallbackReason::EnvironmentRuntimeSession
-            };
-            ctx.emit(PassiveSuggestionsEvent::PassiveCodeDiffFailed { reason });
+            ctx.emit(PassiveSuggestionsEvent::PassiveCodeDiffFailed);
             return;
         }
 
@@ -416,18 +396,14 @@ impl PassiveSuggestionsModel {
                                 "Missing files when retrieving file content for suggested code diffs: {:?}",
                                 content.missing_files
                             );
-                            ctx.emit(PassiveSuggestionsEvent::PassiveCodeDiffFailed {
-                                reason: PromptSuggestionFallbackReason::MissingFile,
-                            });
+                            ctx.emit(PassiveSuggestionsEvent::PassiveCodeDiffFailed);
                             return;
                         }
                         content
                     }
                     Err(err) => {
                         log::warn!("Failed to retrieve file content for suggested code diffs: {err}");
-                        ctx.emit(PassiveSuggestionsEvent::PassiveCodeDiffFailed {
-                            reason: PromptSuggestionFallbackReason::FailedToRetrieveFile,
-                        });
+                        ctx.emit(PassiveSuggestionsEvent::PassiveCodeDiffFailed);
                         return;
                     }
                 };
@@ -449,15 +425,7 @@ impl PassiveSuggestionsModel {
                     || total_lines >= PASSIVE_CODE_DIFF_TOTAL_LINE_LIMIT
                     || total_bytes >= PASSIVE_CODE_DIFF_TOTAL_BYTE_LIMIT
                 {
-                    let reason =
-                        if has_large_file && total_lines >= PASSIVE_CODE_DIFF_LONG_FILE_LINE_LIMIT {
-                            PromptSuggestionFallbackReason::FileTooManyLines
-                        } else {
-                            PromptSuggestionFallbackReason::FileTooManyBytes
-                        };
-                    ctx.emit(PassiveSuggestionsEvent::PassiveCodeDiffFailed {
-                        reason,
-                    });
+                    ctx.emit(PassiveSuggestionsEvent::PassiveCodeDiffFailed);
                     return;
                 }
 
@@ -476,9 +444,7 @@ impl PassiveSuggestionsModel {
                         me.start_code_diff_timeout(stream_id, ctx);
                     }
                     Err(_) => {
-                        ctx.emit(PassiveSuggestionsEvent::PassiveCodeDiffFailed {
-                            reason: PromptSuggestionFallbackReason::FailedToSendAIRequest,
-                        });
+                        ctx.emit(PassiveSuggestionsEvent::PassiveCodeDiffFailed);
                     }
                 }
             },
@@ -516,9 +482,7 @@ impl PassiveSuggestionsModel {
                         );
                     });
                     me.pending_code_diff_stream_id = None;
-                    ctx.emit(PassiveSuggestionsEvent::PassiveCodeDiffFailed {
-                        reason: PromptSuggestionFallbackReason::AIQueryTimeout,
-                    });
+                    ctx.emit(PassiveSuggestionsEvent::PassiveCodeDiffFailed);
                 }
             },
         ));

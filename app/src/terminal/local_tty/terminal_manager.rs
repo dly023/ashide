@@ -73,8 +73,6 @@ type EnvironmentRuntimeController =
         mio_channel::Sender<Message>,
     >;
 
-const ACL_UPDATE_FAILURE_RESPONSE: &str = "Something went wrong. Please try again.";
-
 /// The TerminalManager is responsible for
 /// - creating the terminal model
 /// - starting the local PTY

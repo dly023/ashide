@@ -509,12 +509,13 @@ impl super::TerminalView {
                             .entries
                             .into_iter()
                             .map(|entry| {
-                                (
-                                    entry.name,
-                                    entry.kind
-                                        == crate::workspace::environment_runtime::EnvironmentRuntimeFileKind::Directory
-                                        || entry.is_dir,
-                                )
+                                let is_directory_like = match entry.kind {
+                                    crate::workspace::environment_runtime::EnvironmentRuntimeFileKind::Directory => true,
+                                    crate::workspace::environment_runtime::EnvironmentRuntimeFileKind::Symlink => entry.target_kind
+                                        == crate::workspace::environment_runtime::EnvironmentRuntimeFileKind::Directory,
+                                    _ => entry.is_dir,
+                                };
+                                (entry.name, is_directory_like)
                             })
                             .collect();
                         let listing = Arc::new(EnvironmentDirListing::new(cwd_for_store.clone(), entries));

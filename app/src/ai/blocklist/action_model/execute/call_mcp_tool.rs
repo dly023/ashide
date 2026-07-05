@@ -239,48 +239,127 @@ pub(crate) fn coerce_integer_args(
 #[path = "call_mcp_tool_tests.rs"]
 mod tests;
 
+#[cfg(not(target_family = "wasm"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MCPToolCallFailureKind {
+    ToolReturnedError,
+    ServerError,
+    TransportClosed,
+    TransportSendFailed,
+    Timeout,
+    Cancelled,
+    UnexpectedResponse,
+    UnknownServiceError,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl MCPToolCallFailureKind {
+    fn from_service_error(error: &rmcp::ServiceError) -> Self {
+        match error {
+            rmcp::ServiceError::McpError(_) => Self::ServerError,
+            rmcp::ServiceError::TransportSend(_) => Self::TransportSendFailed,
+            rmcp::ServiceError::TransportClosed => Self::TransportClosed,
+            rmcp::ServiceError::UnexpectedResponse => Self::UnexpectedResponse,
+            rmcp::ServiceError::Cancelled { .. } => Self::Cancelled,
+            rmcp::ServiceError::Timeout { .. } => Self::Timeout,
+            _ => Self::UnknownServiceError,
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MCPToolCallFailure {
+    kind: MCPToolCallFailureKind,
+    model_visible_message: String,
+}
+
+#[cfg(not(target_family = "wasm"))]
+enum MCPToolCallOutcome {
+    Success { result: rmcp::model::CallToolResult },
+    Failure(MCPToolCallFailure),
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn classify_call_tool_result(
+    res: Result<rmcp::model::CallToolResult, rmcp::ServiceError>,
+) -> MCPToolCallOutcome {
+    match res {
+        Ok(result) => {
+            if matches!(result.is_error, Some(true)) {
+                MCPToolCallOutcome::Failure(MCPToolCallFailure {
+                    kind: MCPToolCallFailureKind::ToolReturnedError,
+                    model_visible_message: mcp_tool_error_message(result),
+                })
+            } else {
+                MCPToolCallOutcome::Success { result }
+            }
+        }
+        Err(error) => MCPToolCallOutcome::Failure(MCPToolCallFailure {
+            kind: MCPToolCallFailureKind::from_service_error(&error),
+            model_visible_message: error.to_string(),
+        }),
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn mcp_tool_error_message(result: rmcp::model::CallToolResult) -> String {
+    result
+        .structured_content
+        .map(|content| content.to_string())
+        .unwrap_or_else(|| {
+            let content_str = result
+                .content
+                .into_iter()
+                .filter_map(|content| {
+                    use rmcp::model::RawContent::*;
+                    if let Text(raw_text_content) = content.raw {
+                        Some(raw_text_content.text)
+                    } else {
+                        log::warn!("Error content found unsupported content type");
+                        None
+                    }
+                })
+                .collect_vec()
+                .join("\n");
+            if content_str.is_empty() {
+                "MCP tool call returned an error.".to_string()
+            } else {
+                content_str
+            }
+        })
+}
+
 /// Handles the result of a call_tool request, converting it to an AIAgentActionResultType.
 #[cfg(not(target_family = "wasm"))]
 fn handle_call_tool_result(
     res: Result<rmcp::model::CallToolResult, rmcp::ServiceError>,
 ) -> AIAgentActionResultType {
-    let action_result = match res {
-        Ok(result) => {
-            // Even if the call was successful, the response could still be an error so we need to check.
-            if matches!(result.is_error, Some(true)) {
-                let error_message = result
-                    .structured_content
-                    .map(|content| content.to_string())
-                    .unwrap_or_else(|| {
-                        let content_str = result
-                            .content
-                            .into_iter()
-                            .filter_map(|content| {
-                                use rmcp::model::RawContent::*;
-                                if let Text(raw_text_content) = content.raw {
-                                    Some(raw_text_content.text)
-                                } else {
-                                    log::warn!("Error content found unsupported content type");
-                                    None
-                                }
-                            })
-                            .collect_vec()
-                            .join("\n");
-                        if content_str.is_empty() {
-                            "MCP tool call returned an error.".to_string()
-                        } else {
-                            content_str
-                        }
-                    });
-                CallMCPToolResult::Error(error_message)
-            } else {
-                CallMCPToolResult::Success { result }
+    let action_result = match classify_call_tool_result(res) {
+        MCPToolCallOutcome::Success { result } => CallMCPToolResult::Success { result },
+        MCPToolCallOutcome::Failure(failure) => {
+            match failure.kind {
+                MCPToolCallFailureKind::ToolReturnedError => {
+                    log::debug!(
+                        "MCP tool returned model-visible error: {}",
+                        failure.model_visible_message,
+                    );
+                }
+                MCPToolCallFailureKind::ServerError
+                | MCPToolCallFailureKind::TransportClosed
+                | MCPToolCallFailureKind::TransportSendFailed
+                | MCPToolCallFailureKind::Timeout
+                | MCPToolCallFailureKind::Cancelled
+                | MCPToolCallFailureKind::UnexpectedResponse
+                | MCPToolCallFailureKind::UnknownServiceError => {
+                    log::warn!(
+                        "Executing MCP tool resulted in error kind={:?}: {}",
+                        failure.kind,
+                        failure.model_visible_message,
+                    );
+                }
             }
-        }
-        Err(e) => {
-            let error_message = e.to_string();
-            log::warn!("Executing MCP tool resulted in error: {e:?}");
-            CallMCPToolResult::Error(error_message)
+            CallMCPToolResult::Error(failure.model_visible_message)
         }
     };
     AIAgentActionResultType::CallMCPTool(action_result)

@@ -1,9 +1,6 @@
 use super::{
     team::Team,
-    workspace::{
-        AdminEnablementSetting, EnterpriseSecretRegex, HostEnablementSetting,
-        UgcCollectionEnablementSetting, Workspace, WorkspaceUid,
-    },
+    workspace::{EnterpriseSecretRegex, HostEnablementSetting, Workspace, WorkspaceUid},
 };
 use crate::{
     ai::llms::LLMModelHost,
@@ -19,9 +16,7 @@ use warpui::{AppContext, Entity, ModelContext, SingletonEntity, Tracked};
 #[cfg(test)]
 use crate::object_store::ids::StableObjectId;
 #[cfg(test)]
-use crate::workspaces::workspace::{
-    AIAutonomyPolicy, WorkspaceMember, WorkspacePolicyMetadata, WorkspaceSettings,
-};
+use crate::workspaces::workspace::{WorkspaceMember, WorkspacePolicyMetadata, WorkspaceSettings};
 
 #[cfg(test)]
 use super::team::MembershipRole;
@@ -30,8 +25,6 @@ use super::workspace::WorkspaceMemberUsageInfo;
 
 #[derive(Debug)]
 pub enum UserWorkspacesEvent {
-    UpdateWorkspaceSettingsSuccess,
-    UpdateWorkspaceSettingsRejected(anyhow::Error),
     /// Fired whenever the set of teams the user is on changes.
     TeamsChanged,
 }
@@ -72,14 +65,6 @@ impl UserWorkspaces {
     pub fn workspace_from_uid(&self, workspace_uid: WorkspaceUid) -> Option<&Workspace> {
         self.workspaces.iter().find(|w| w.uid == workspace_uid)
     }
-
-    pub fn workspace_from_uid_mut(
-        &mut self,
-        workspace_uid: WorkspaceUid,
-    ) -> Option<&mut Workspace> {
-        self.workspaces.iter_mut().find(|w| w.uid == workspace_uid)
-    }
-
     /// Returns local workspace team metadata when a local policy source provides it.
     pub fn current_team(&self) -> Option<&Team> {
         self.current_workspace()
@@ -91,12 +76,6 @@ impl UserWorkspaces {
         self.current_workspace_uid
             .and_then(|workspace_uid| self.workspace_from_uid(workspace_uid))
     }
-
-    pub fn current_workspace_mut(&mut self) -> Option<&mut Workspace> {
-        self.current_workspace_uid
-            .and_then(|workspace_uid| self.workspace_from_uid_mut(workspace_uid))
-    }
-
     pub fn workspaces(&self) -> &Vec<Workspace> {
         &self.workspaces
     }
@@ -108,23 +87,6 @@ impl UserWorkspaces {
     ) {
         *self.current_workspace_uid = Some(workspace_uid);
         self.notify_and_emit_teams_changed(ctx);
-    }
-
-    /// Returns `true` if active AI is allowed for the current workspace, based on local policy.
-    ///
-    /// In the future, we should store active AI enablement on the policy directly. For now, we
-    /// proxy whether active AI by checking if prompt suggestions, next command, or code suggestions are enabled.
-    pub fn is_active_ai_allowed(&self) -> bool {
-        self.current_team().is_none_or(|team| {
-            team.workspace_policy
-                .policy
-                .ai_assistant_policy
-                .is_none_or(|policy| {
-                    policy.is_prompt_suggestions_toggleable
-                        || policy.is_next_command_enabled
-                        || policy.is_code_suggestions_toggleable
-                })
-        })
     }
 
     /// Local Ashide builds do not gate AI by remote plan/customer state.
@@ -278,11 +240,6 @@ impl UserWorkspaces {
         })
     }
 
-    // Team spaces are collaboration surfaces; local Ashide exposes only Personal space.
-    pub fn team_spaces(&self) -> Vec<Space> {
-        vec![]
-    }
-
     // Local Drive keeps only Personal space. Team / Shared are collaboration surfaces,
     // so stale workspace metadata must not reopen them in Drive or Workflow UI.
     pub fn all_user_spaces(&self, ctx: &AppContext) -> Vec<Space> {
@@ -318,14 +275,17 @@ impl UserWorkspaces {
         Space::Personal
     }
 
+    #[cfg(feature = "integration_tests")]
     pub fn has_teams(&self) -> bool {
         false
     }
 
+    #[cfg(feature = "integration_tests")]
     pub fn has_workspaces(&self) -> bool {
         !self.workspaces.is_empty()
     }
 
+    #[cfg(test)]
     pub fn update_workspaces(&mut self, workspaces: Vec<Workspace>, ctx: &mut ModelContext<Self>) {
         *self.workspaces = workspaces;
         self.notify_and_emit_teams_changed(ctx);
@@ -364,17 +324,6 @@ impl UserWorkspaces {
             .unwrap_or_default()
     }
 
-    pub fn get_ugc_collection_enablement_setting(&self) -> UgcCollectionEnablementSetting {
-        self.current_team()
-            .map(|team| {
-                team.organization_settings
-                    .ugc_collection_settings
-                    .setting
-                    .clone()
-            })
-            .unwrap_or_default()
-    }
-
     pub fn is_ai_allowed_in_non_current_app_environments(&self) -> bool {
         // Local Ashide has no hosted organization policy; non-current-app environments
         // can always use the local Agent capability.
@@ -389,16 +338,6 @@ impl UserWorkspaces {
                     .non_current_app_environment_regex_list
                     .clone()
             })
-            .unwrap_or_default()
-    }
-
-    /// Returns the team-level agent attribution setting.
-    ///
-    /// Use this to decide whether the user's attribution toggle should be locked
-    /// (`Enable`/`Disable`) or editable (`RespectUserSetting`).
-    pub fn get_agent_attribution_setting(&self) -> AdminEnablementSetting {
-        self.current_team()
-            .map(|team| team.organization_settings.enable_agent_attribution.clone())
             .unwrap_or_default()
     }
 }
@@ -495,24 +434,6 @@ impl UserWorkspaces {
             |workspace| {
                 if let Some(team) = workspace.teams.first_mut() {
                     f(&mut team.organization_settings.ai_autonomy_settings);
-                } else {
-                    panic!(
-                        "No team found in current workspace. Did you call setup_test_workspace()?"
-                    );
-                }
-            },
-            ctx,
-        );
-    }
-
-    pub fn update_ai_autonomy_policy_flag(&mut self, enabled: bool, ctx: &mut ModelContext<Self>) {
-        self.update_current_workspace(
-            |workspace| {
-                if let Some(team) = workspace.teams.first_mut() {
-                    team.workspace_policy.policy.ai_autonomy_policy = Some(AIAutonomyPolicy {
-                        is_enabled: enabled,
-                        toggleable: true,
-                    });
                 } else {
                     panic!(
                         "No team found in current workspace. Did you call setup_test_workspace()?"

@@ -168,10 +168,6 @@ impl ReasoningDepthSelector {
         me
     }
 
-    pub fn is_menu_open(&self) -> bool {
-        self.is_menu_open
-    }
-
     fn set_menu_visibility(&mut self, is_open: bool, ctx: &mut ViewContext<Self>) {
         if self.is_menu_open == is_open {
             return;

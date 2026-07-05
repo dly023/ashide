@@ -10,7 +10,6 @@ pub mod numbered_button;
 pub mod pending_user_query_block;
 pub mod secret_redaction;
 pub mod status_bar;
-pub mod toggleable_items;
 pub mod view_impl;
 
 pub use pending_user_query_block::{PendingUserQueryBlock, PendingUserQueryBlockEvent};
@@ -44,7 +43,6 @@ use crate::terminal::model::ansi::color_index;
 use crate::terminal::model::BlockId;
 use crate::terminal::model_events::ModelEvent;
 use crate::terminal::model_events::ModelEventDispatcher;
-use crate::terminal::view::ambient_agent::AmbientAgentViewModel;
 use crate::terminal::TerminalModel;
 use crate::view_components::action_button::{
     ActionButtonTheme, NakedTheme, PrimaryTheme, SecondaryTheme,
@@ -66,7 +64,6 @@ use warp_core::features::FeatureFlag;
 use warpui::elements::get_rich_content_position_id;
 use warpui::elements::ClippedScrollStateHandle;
 use warpui::elements::TableStateHandle;
-use warpui::ui_components::radio_buttons::RadioButtonStateHandle;
 
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent::AIAgentActionResultType;
@@ -362,8 +359,6 @@ pub(super) struct AIBlockStateHandles {
     references_section_collapsible_handle: MouseStateHandle,
 
     autoread_files_speedbump_checkbox_handle: MouseStateHandle,
-    codebase_search_speedbump_option_handles: Vec<MouseStateHandle>,
-    codebase_search_speedbump_radio_button_handle: RadioButtonStateHandle,
     manage_autonomy_settings_link_handle: MouseStateHandle,
 
     /// Mouse state handle for the overflow menu button
@@ -736,7 +731,6 @@ pub struct AIBlock {
     state_handles: AIBlockStateHandles,
     controller: ModelHandle<BlocklistAIController>,
     active_session: ModelHandle<ActiveSession>,
-    ambient_agent_view_model: ModelHandle<AmbientAgentViewModel>,
     terminal_view_id: EntityId,
     window_id: warpui::WindowId,
 
@@ -905,7 +899,6 @@ impl AIBlock {
         context_model: ModelHandle<BlocklistAIContextModel>,
         find_model: ModelHandle<TerminalFindModel>,
         active_session: ModelHandle<ActiveSession>,
-        ambient_agent_view_model: ModelHandle<AmbientAgentViewModel>,
         cli_subagent_controller: &ModelHandle<CLISubagentController>,
         model_event_dispatcher: &ModelHandle<ModelEventDispatcher>,
         agent_view_controller: ModelHandle<AgentViewController>,
@@ -1226,7 +1219,6 @@ impl AIBlock {
             find_model,
             is_references_section_open: false,
             active_session,
-            ambient_agent_view_model,
             autonomy_setting_speedbump: Default::default(),
             suggested_rules: Default::default(),
             suggested_agent_mode_workflow: Default::default(),
@@ -3177,16 +3169,6 @@ impl AIBlock {
                 opened_first = true;
             }
         }
-    }
-
-    fn calculate_renderable_action_index(
-        &self,
-        target_action_id: &AIAgentActionId,
-        app: &AppContext,
-    ) -> Option<usize> {
-        let output = self.model.status(app).output_to_render()?;
-        let output = output.get();
-        output.calculate_action_index(target_action_id)
     }
 
     fn handle_web_search_messages(

@@ -141,16 +141,6 @@ impl TryFrom<PersistedObjectAction> for ObjectAction {
     }
 }
 
-/// ObjectActionHistory 保留历史对象 action 序列化形状:uid、actions(single 或 bundled)
-/// 以及最近 action 的 timestamp。当前仅作为本地 update_manager 可传递的兼容类型。
-#[derive(Clone, Debug, PartialEq)]
-pub struct ObjectActionHistory {
-    pub uid: ObjectUid,
-    pub hashed_sqlite_id: HashedSqliteId,
-    pub latest_processed_at_timestamp: DateTime<Utc>,
-    pub actions: Vec<ObjectAction>,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum ObjectActionSubtype {
     SingleAction {
@@ -243,97 +233,6 @@ impl ObjectActions {
         ctx.notify();
 
         action
-    }
-
-    /// Remove the action from the model with the corresponding object_id, timestamp, and pending=true.
-    pub fn remove_pending_action(
-        &mut self,
-        uid: &ObjectUid,
-        timestamp_of_action: &DateTime<Utc>,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        if let Some(actions) = self.object_actions_by_id.get_mut(uid) {
-            // Remove the action that has a matching timestamp and pending=true
-            if let Some(index) = actions.iter().position(|a| {
-                matches!(
-                    &a.action_subtype,
-                    ObjectActionSubtype::SingleAction {
-                        timestamp,
-                        pending: true,
-                        ..
-                    } if timestamp == timestamp_of_action
-                )
-            }) {
-                actions.remove(index);
-            } else {
-                log::warn!(
-                    "Could not find the pending action to remove from the ObjectActions model"
-                )
-            }
-        } else {
-            log::warn!("Could not find the object id in the ObjectActions model")
-        }
-        ctx.notify();
-    }
-
-    /// Get the processed_at_timestamp of the most recent durably processed
-    /// action we have for a given object. This determines whether or not we
-    /// should accept an incoming local object-store update.
-    pub fn get_latest_processed_at_ts(&self, uid: &ObjectUid) -> Option<DateTime<Utc>> {
-        if let Some(actions) = self.object_actions_by_id.get(uid) {
-            actions
-                .iter()
-                .filter_map(|a| match a.action_subtype {
-                    ObjectActionSubtype::SingleAction {
-                        processed_at_timestamp,
-                        pending: false,
-                        ..
-                    } => processed_at_timestamp,
-                    ObjectActionSubtype::BundledActions {
-                        latest_processed_at_timestamp,
-                        ..
-                    } => Some(latest_processed_at_timestamp),
-                    _ => None,
-                })
-                .max()
-        } else {
-            None
-        }
-    }
-
-    /// Takes a list of ObjectActions for a single object and replaces the
-    /// existing actions for this object with the new ones. Any pending actions
-    /// are preserved so we don't delete local actions that have not finished
-    /// processing.
-    pub fn overwrite_action_history_for_object(
-        &mut self,
-        uid: &ObjectUid,
-        mut actions: Vec<ObjectAction>,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        // Get the pending actions out of the old set.
-        let old_pending_actions: Vec<ObjectAction> = self
-            .object_actions_by_id
-            .get(uid)
-            .map(|actions| {
-                actions
-                    .iter()
-                    .filter(|a| {
-                        matches!(
-                            a.action_subtype,
-                            ObjectActionSubtype::SingleAction { pending: true, .. }
-                        )
-                    })
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        actions.extend(old_pending_actions);
-
-        self.object_actions_by_id
-            .insert(uid.to_string(), actions.clone());
-        ctx.notify();
     }
 
     /// Returns a time-boxed summary of the number of times this action type has occurred on this object.
@@ -436,33 +335,9 @@ impl ObjectActions {
         ))
     }
 
-    /// Returns all the actions on the objects specified by the parameter hashed_object_ids.
-    /// The return value is a HashMap, which represents a subset of the model, filtered to just the actions
-    /// that occurred on the requested objects.
-    pub fn get_actions_for_objects(
-        &self,
-        uids: Vec<&ObjectUid>,
-    ) -> HashMap<ObjectUid, Vec<ObjectAction>> {
-        uids.iter()
-            .map(|&uid| {
-                let actions_on_this_object = self
-                    .object_actions_by_id
-                    .get(uid)
-                    .cloned()
-                    .unwrap_or_default();
-                (uid.clone(), actions_on_this_object)
-            })
-            .collect()
-    }
-
     pub fn delete_actions_for_object(&mut self, uid: &ObjectUid, ctx: &mut ModelContext<Self>) {
         self.object_actions_by_id.remove(uid);
         ctx.notify()
-    }
-
-    #[cfg(test)]
-    pub fn count_actions_for_object(&mut self, uid: &ObjectUid) -> usize {
-        self.object_actions_by_id.get(uid).map_or(0, |v| v.len())
     }
 }
 

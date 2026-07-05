@@ -279,6 +279,7 @@ mod tests {
             is_active: false,
             is_pinned: false,
             updated_at_unix_ms: None,
+            is_live_container: false,
         }
     }
 

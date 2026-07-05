@@ -288,6 +288,7 @@ impl AssistantBuffer {
         self.tool_call_keys.push(key);
     }
 
+    #[cfg(test)]
     fn flush_into(&mut self, messages: &mut Vec<ChatMessage>) {
         let _ = self.flush_into_with_group(messages);
     }
@@ -848,6 +849,7 @@ fn build_serializer_readiness_projection(
     builder.finish()
 }
 
+#[cfg(test)]
 pub(crate) fn classify_byop_controller_readiness(params: &RequestParams) -> ReadinessReport {
     classify_byop_controller_readiness_with_live_tool_calls(params, Vec::new())
 }
@@ -1052,6 +1054,7 @@ fn validate_byop_serializer_readiness(
     )
 }
 
+#[cfg(test)]
 fn validate_serializer_readiness_projection(
     projection: Vec<ProjectionItem>,
 ) -> Result<ReadinessReport, ConvertToAPITypeError> {
@@ -6266,7 +6269,7 @@ mod serializer_readiness_tests {
         assert_blocked_category(
             vec![
                 assistant_calls("task-1", "assistant-1", &["call-1"]),
-                ProjectionItem::other_boundary("task-1", "visible-other"),
+                ProjectionItem::user_boundary("task-1", "visible-other"),
             ],
             "MissingResultWithoutRepairSource",
         );

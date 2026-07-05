@@ -2,13 +2,15 @@ use crate::default_terminal::DefaultTerminal;
 use crate::gpu_state::{GPUState, GPUStateEvent};
 use crate::terminal::input::OPEN_COMPLETIONS_KEYBINDING_NAME;
 
+#[cfg(target_os = "linux")]
+use crate::settings::ForceX11;
 use lazy_static::lazy_static;
 use warpui::platform::GraphicsBackend;
 use warpui::rendering::GPUPowerPreference;
 use warpui::{elements::DispatchEventResult, platform::Cursor};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use {
-    crate::settings::ForceX11, crate::settings::LinuxAppConfiguration,
+    crate::settings::LinuxAppConfiguration,
     warpui::platform::linux::windowing_system_is_customizable,
 };
 
@@ -750,7 +752,6 @@ fn block_maximum_rows_description() -> String {
 #[derive(Default)]
 struct MouseStateHandles {
     local_only_icon_tooltip_states: RefCell<HashMap<String, MouseStateHandle>>,
-    tab_behavior_local_only_icon: MouseStateHandle,
     activation_hotkey_keybinding_editor: MouseStateHandle,
     activation_hotkey_save: MouseStateHandle,
     activation_hotkey_cancel: MouseStateHandle,

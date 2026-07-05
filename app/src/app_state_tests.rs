@@ -394,6 +394,7 @@ fn test_workspace_session_in_environment(
         is_active,
         is_pinned: false,
         updated_at_unix_ms,
+        is_live_container: is_active,
     }
 }
 

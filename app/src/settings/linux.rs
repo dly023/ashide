@@ -6,7 +6,7 @@ define_settings_group!(LinuxAppConfiguration,
         force_x11: ForceX11 {
             type: bool,
             // Default to true on WSL and false on all other platforms.
-            default: !linux::is_wsl(),
+            default: linux::is_wsl(),
             supported_platforms: SupportedPlatforms::LINUX,
             private: false,
             toml_path: "system.force_x11",

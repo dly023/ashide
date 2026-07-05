@@ -7,6 +7,7 @@
 pub mod breadcrumb;
 pub mod browser;
 pub mod context_menu;
+#[cfg(not(any(test, feature = "integration_tests")))]
 pub mod daemon_backend;
 pub mod dialogs;
 pub mod drop_target;

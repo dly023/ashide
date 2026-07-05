@@ -17,7 +17,6 @@ use crate::terminal::shared_session::protocol::SessionSourceType;
 use crate::terminal::shared_session::protocol::{ParticipantId, ParticipantList, Role, SessionId};
 use crate::terminal::view::throttle;
 use crate::ui_components::icons::Icon;
-use chrono::{DateTime, Local};
 use markdown_parser::FormattedTextFragment;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -93,7 +92,6 @@ pub struct Adapter {
     reconnecting_banner: ViewHandle<Banner<TerminalAction>>,
     is_reconnecting_banner_open: bool,
     session_id: SessionId,
-    started_at: DateTime<Local>,
     source_type: SessionSourceType,
 }
 
@@ -102,7 +100,6 @@ impl Adapter {
         kind: Kind,
         presence_manager: ModelHandle<PresenceManager>,
         session_id: SessionId,
-        started_at: DateTime<Local>,
         source_type: SessionSourceType,
         ctx: &mut ViewContext<TerminalView>,
     ) -> Self {
@@ -126,7 +123,6 @@ impl Adapter {
             reconnecting_banner,
             is_reconnecting_banner_open: false,
             session_id,
-            started_at,
             source_type,
         }
     }
@@ -136,7 +132,6 @@ impl Adapter {
         user_uid: UserUid,
         participant_list: Box<ParticipantList>,
         session_id: SessionId,
-        started_at: DateTime<Local>,
         source_type: SessionSourceType,
         ctx: &mut ViewContext<TerminalView>,
     ) -> Self {
@@ -144,21 +139,13 @@ impl Adapter {
             PresenceManager::new_for_viewer(viewer_id, user_uid, *participant_list, ctx)
         });
         let viewer = Kind::Viewer(Viewer::new(ctx));
-        Self::new(
-            viewer,
-            presence_manager,
-            session_id,
-            started_at,
-            source_type,
-            ctx,
-        )
+        Self::new(viewer, presence_manager, session_id, source_type, ctx)
     }
 
     pub fn new_for_sharer(
         sharer_id: ParticipantId,
         user_uid: UserUid,
         session_id: SessionId,
-        started_at: DateTime<Local>,
         source_type: SessionSourceType,
         ctx: &mut ViewContext<TerminalView>,
     ) -> Self {
@@ -179,18 +166,7 @@ impl Adapter {
         }
 
         let sharer = Kind::Sharer(Sharer::new(activity_tx, ctx));
-        Self::new(
-            sharer,
-            presence_manager,
-            session_id,
-            started_at,
-            source_type,
-            ctx,
-        )
-    }
-
-    pub fn started_at(&self) -> &DateTime<Local> {
-        &self.started_at
+        Self::new(sharer, presence_manager, session_id, source_type, ctx)
     }
 
     pub fn presence_manager(&self) -> &ModelHandle<PresenceManager> {

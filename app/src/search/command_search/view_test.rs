@@ -1,9 +1,12 @@
 use warpui::{platform::WindowStyle, App};
 
 use crate::{
-    auth::AuthManager, network::NetworkStatus, object_store::model::persistence::ObjectStoreModel,
+    auth::{AuthManager, AuthStateProvider},
+    network::NetworkStatus,
+    object_store::model::persistence::ObjectStoreModel,
     object_store::update_manager::UpdateManager,
-    settings_view::keybindings::KeybindingChangedNotifier, system::SystemStats,
+    settings_view::keybindings::KeybindingChangedNotifier,
+    system::SystemStats,
     test_util::settings::initialize_settings_for_tests,
     workspaces::user_workspaces::UserWorkspaces,
 };

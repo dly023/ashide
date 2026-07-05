@@ -332,14 +332,12 @@ fn test_relocate_comments_empty_input() {
         ctx.code_review_view.update(&mut app, |_view, view_ctx| {
             let RelocateCommentsResult {
                 comments: relocated,
-                fallback_count: fallbacks,
             } = CodeReviewView::relocate_comments(vec![], &ctx.state, &ctx.repo_path, view_ctx);
 
             assert!(
                 relocated.is_empty(),
                 "Empty input should return empty output"
             );
-            assert_eq!(fallbacks, 0, "Empty input should have no fallbacks");
         });
     });
 }
@@ -359,7 +357,6 @@ fn test_relocate_comments_general_comment_passes_through() {
         ctx.code_review_view.update(&mut app, |_view, view_ctx| {
             let RelocateCommentsResult {
                 comments: relocated,
-                fallback_count: fallbacks,
             } = CodeReviewView::relocate_comments(
                 vec![general_comment],
                 &ctx.state,
@@ -372,10 +369,6 @@ fn test_relocate_comments_general_comment_passes_through() {
             assert!(
                 matches!(relocated[0].target, AttachedReviewCommentTarget::General),
                 "General comment should remain General"
-            );
-            assert_eq!(
-                fallbacks, 0,
-                "General comments should not count as fallbacks"
             );
         });
     });
@@ -394,7 +387,6 @@ fn test_relocate_comments_file_comment_passes_through() {
         ctx.code_review_view.update(&mut app, |_view, view_ctx| {
             let RelocateCommentsResult {
                 comments: relocated,
-                fallback_count: fallbacks,
             } = CodeReviewView::relocate_comments(
                 vec![file_comment],
                 &ctx.state,
@@ -411,7 +403,6 @@ fn test_relocate_comments_file_comment_passes_through() {
                 ),
                 "File comment should remain File"
             );
-            assert_eq!(fallbacks, 0, "File comments should not count as fallbacks");
         });
     });
 }
@@ -435,7 +426,6 @@ fn test_relocate_comments_line_comment_no_matching_editor_marked_outdated() {
         ctx.code_review_view.update(&mut app, |_view, view_ctx| {
             let RelocateCommentsResult {
                 comments: relocated,
-                fallback_count: fallbacks,
             } = CodeReviewView::relocate_comments(
                 vec![line_comment],
                 &ctx.state,
@@ -452,10 +442,6 @@ fn test_relocate_comments_line_comment_no_matching_editor_marked_outdated() {
             assert!(
                 relocated[0].outdated,
                 "Comment should be marked as outdated"
-            );
-            assert_eq!(
-                fallbacks, 0,
-                "Outdated comments should not count as fallbacks"
             );
         });
     });
@@ -479,7 +465,6 @@ fn test_relocate_comments_multiple_comment_types() {
             let comments = vec![general_comment, file_comment, line_comment];
             let RelocateCommentsResult {
                 comments: relocated,
-                fallback_count: _,
             } = CodeReviewView::relocate_comments(comments, &ctx.state, &ctx.repo_path, view_ctx);
 
             assert_eq!(
@@ -522,7 +507,6 @@ fn test_relocate_comments_line_comment_with_absolute_path() {
         ctx.code_review_view.update(&mut app, |_view, view_ctx| {
             let RelocateCommentsResult {
                 comments: relocated,
-                fallback_count: _,
             } = CodeReviewView::relocate_comments(
                 vec![line_comment],
                 &ctx.state,
@@ -691,7 +675,6 @@ fn test_relocate_comments_file_comment_no_matching_editor_marked_outdated() {
         ctx.code_review_view.update(&mut app, |_view, view_ctx| {
             let RelocateCommentsResult {
                 comments: relocated,
-                fallback_count: fallbacks,
             } = CodeReviewView::relocate_comments(
                 vec![file_comment],
                 &ctx.state,
@@ -708,10 +691,6 @@ fn test_relocate_comments_file_comment_no_matching_editor_marked_outdated() {
             assert!(
                 relocated[0].outdated,
                 "Comment should be marked as outdated"
-            );
-            assert_eq!(
-                fallbacks, 0,
-                "Outdated file comments should not count as fallbacks"
             );
         });
     });
@@ -735,7 +714,6 @@ fn test_relocate_comments_line_removed_marked_outdated() {
         ctx.code_review_view.update(&mut app, |_view, view_ctx| {
             let RelocateCommentsResult {
                 comments: relocated,
-                fallback_count: fallbacks,
             } = CodeReviewView::relocate_comments(
                 vec![line_comment],
                 &ctx.state,
@@ -752,10 +730,6 @@ fn test_relocate_comments_line_removed_marked_outdated() {
             assert!(
                 relocated[0].outdated,
                 "Comment should be marked as outdated when line content cannot be found"
-            );
-            assert_eq!(
-                fallbacks, 1,
-                "Should count as a fallback when line content cannot be matched"
             );
         });
     });
@@ -939,7 +913,6 @@ fn test_active_comments_not_marked_outdated() {
         ctx.code_review_view.update(&mut app, |_view, view_ctx| {
             let RelocateCommentsResult {
                 comments: relocated,
-                fallback_count: fallbacks,
             } = CodeReviewView::relocate_comments(
                 vec![line_comment],
                 &ctx.state,
@@ -952,10 +925,6 @@ fn test_active_comments_not_marked_outdated() {
             assert!(
                 !relocated[0].outdated,
                 "Comment should NOT be marked as outdated when line content is found"
-            );
-            assert_eq!(
-                fallbacks, 0,
-                "Should have no fallbacks when content matches"
             );
         });
     });

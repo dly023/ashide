@@ -38,6 +38,7 @@ pub trait SubagentExt {
     fn is_summarization(&self) -> bool;
     fn is_conversation_search(&self) -> bool;
     fn is_warp_documentation_search(&self) -> bool;
+    #[cfg(test)]
     fn type_name(&self) -> &'static str;
 }
 
@@ -197,6 +198,7 @@ impl SubagentExt for api::message::tool_call::Subagent {
         })
     }
 
+    #[cfg(test)]
     fn type_name(&self) -> &'static str {
         use api::message::tool_call::subagent::Metadata;
         match &self.metadata {

@@ -85,23 +85,6 @@ impl NotificationsModel {
         }
     }
 
-    /// 把指定 terminal view 上的所有通知标记为已读。
-    pub(crate) fn mark_items_from_terminal_view_read(
-        &mut self,
-        terminal_view_id: EntityId,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        if !FeatureFlag::HOANotifications.is_enabled() {
-            return;
-        }
-        if self
-            .notifications
-            .mark_all_terminal_view_items_as_read(terminal_view_id)
-        {
-            ctx.emit(NotificationsEvent::NotificationUpdated);
-        }
-    }
-
     fn handle_cli_agent_session_event(
         &mut self,
         event: &CLIAgentSessionsModelEvent,

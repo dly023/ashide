@@ -10,7 +10,6 @@ use crate::ai::agent::AIAgentExchangeId;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::document::ai_document_model::{AIDocumentId, AIDocumentVersion};
 use crate::app_interaction::PaletteSource;
-use crate::auth::LoginGatedFeature;
 use crate::drive::items::LocalDriveItemId;
 use crate::drive::ObjectTypeAndId;
 use crate::object_store::ids::ObjectStoreId;
@@ -720,18 +719,7 @@ pub enum WorkspaceAction {
     },
 }
 
-impl From<&WorkspaceAction> for LoginGatedFeature {
-    fn from(val: &WorkspaceAction) -> LoginGatedFeature {
-        let _ = val;
-        "Unknown reason"
-    }
-}
-
 impl WorkspaceAction {
-    pub fn blocked_for_anonymous_user(&self) -> bool {
-        false
-    }
-
     /// Matches what actions require the app state to be saved, and which don't. We match all
     /// actions directly, rather than using _, so we're forced to make a conscious decision for each
     /// of them, rather than following some default.

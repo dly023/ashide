@@ -475,6 +475,7 @@ impl TextLayoutSystem {
 
     /// Returns the [`Source`] and corresponding font index of a font identified by
     /// [`FontId`].
+    #[allow(dead_code)]
     fn try_read_face_source<T, F: FnOnce(Source, u32) -> T>(
         &self,
         font_id: FontId,

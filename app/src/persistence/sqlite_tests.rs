@@ -314,6 +314,7 @@ fn test_sqlite_round_trips_cli_agent_workspace_session_metadata() {
         is_active: true,
         is_pinned: false,
         updated_at_unix_ms: None,
+        is_live_container: false,
     }];
 
     let app_state = AppState {

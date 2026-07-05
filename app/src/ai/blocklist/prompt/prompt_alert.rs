@@ -23,7 +23,6 @@ const ANONYMOUS_USER_REQUEST_LIMIT_SOFT_GATE_PERCENTAGE: f32 = 0.5;
 
 const NO_CONNECTION_PRIMARY_TEXT: &str = "No internet connection";
 const ANONYMOUS_USER_REQUEST_LIMIT_SOFT_GATE_PRIMARY_TEXT: &str = "";
-const ANONYMOUS_USER_REQUEST_LIMIT_HARD_GATE_PRIMARY_TEXT: &str = "At Limit -";
 const OUT_OF_REQUESTS_PRIMARY_TEXT: &str = "AI usage unavailable";
 
 const ANONYMOUS_USER_REQUEST_LIMIT_ACTION_TEXT: &str = "Configure local AI provider";
@@ -39,8 +38,6 @@ pub enum PromptAlertState {
     /// An anonymous user has reached a certain percentage of requests used.
     /// This doesn't use a primary text to avoid being too in-your-face.
     AnonymousUserRequestLimitSoftGate,
-    /// An anonymous user has reached the request limit.
-    AnonymousUserRequestLimitHardGate,
     /// The user has reached the request limit.
     RequestLimitReached,
     /// No alert should be displayed.
@@ -155,11 +152,6 @@ impl PromptAlertView {
                     ANONYMOUS_USER_REQUEST_LIMIT_SOFT_GATE_PRIMARY_TEXT,
                 ));
             }
-            PromptAlertState::AnonymousUserRequestLimitHardGate => {
-                text_fragments.push(FormattedTextFragment::plain_text(
-                    ANONYMOUS_USER_REQUEST_LIMIT_HARD_GATE_PRIMARY_TEXT,
-                ));
-            }
             PromptAlertState::RequestLimitReached => {
                 text_fragments.push(FormattedTextFragment::plain_text(
                     OUT_OF_REQUESTS_PRIMARY_TEXT,
@@ -177,8 +169,7 @@ impl PromptAlertView {
     ) {
         match state {
             PromptAlertState::NoConnection => {}
-            PromptAlertState::AnonymousUserRequestLimitSoftGate
-            | PromptAlertState::AnonymousUserRequestLimitHardGate => {
+            PromptAlertState::AnonymousUserRequestLimitSoftGate => {
                 text_fragments.push(FormattedTextFragment::plain_text("  "));
                 text_fragments.push(FormattedTextFragment::hyperlink_action(
                     ANONYMOUS_USER_REQUEST_LIMIT_ACTION_TEXT,
@@ -208,9 +199,7 @@ impl PromptAlertView {
 fn does_alert_block_ai_requests(state: &PromptAlertState) -> bool {
     match state {
         PromptAlertState::AnonymousUserRequestLimitSoftGate | PromptAlertState::NoAlert => false,
-        PromptAlertState::NoConnection
-        | PromptAlertState::AnonymousUserRequestLimitHardGate
-        | PromptAlertState::RequestLimitReached => true,
+        PromptAlertState::NoConnection | PromptAlertState::RequestLimitReached => true,
     }
 }
 

@@ -5,11 +5,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use warp_cli::agent::Harness;
 use warp_core::report_error;
-use warp_core::ui::theme::WarpTheme;
-use warpui::color::ColorU;
 
 use crate::ai::artifacts::{deserialize_artifacts, Artifact};
-use crate::ui_components::icons::Icon;
 
 use super::AmbientAgentTaskId;
 
@@ -271,32 +268,6 @@ pub struct AttachmentInput {
     pub data: String, // base64-encoded data
 }
 
-impl AmbientAgentTask {
-    /// Total usage units used (inference + compute).
-    pub fn usage_units(&self) -> Option<f32> {
-        self.request_usage
-            .as_ref()
-            .map(|u| (u.inference_cost.unwrap_or(0.0) + u.compute_cost.unwrap_or(0.0)) as f32)
-    }
-
-    /// Duration from started_at to updated_at.
-    pub fn run_time(&self) -> Option<chrono::Duration> {
-        let started = self.started_at?;
-        let duration = self.updated_at.signed_duration_since(started);
-        (duration.num_seconds() >= 0).then_some(duration)
-    }
-
-    /// Creator's display name, if available.
-    pub fn creator_display_name(&self) -> Option<String> {
-        self.creator.as_ref().and_then(|c| c.display_name.clone())
-    }
-
-    /// Returns true if the underlying session for the ambient agent is no longer running.
-    pub fn is_no_longer_running(&self) -> bool {
-        !self.is_sandbox_running && !self.state.is_working()
-    }
-}
-
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum AmbientAgentTaskState {
@@ -312,75 +283,6 @@ pub enum AmbientAgentTaskState {
     Cancelled,
     #[serde(other)]
     Unknown,
-}
-
-impl AmbientAgentTaskState {
-    pub fn is_working(&self) -> bool {
-        match self {
-            AmbientAgentTaskState::Queued
-            | AmbientAgentTaskState::Pending
-            | AmbientAgentTaskState::Claimed
-            | AmbientAgentTaskState::InProgress => true,
-            AmbientAgentTaskState::Succeeded
-            | AmbientAgentTaskState::Failed
-            | AmbientAgentTaskState::Error
-            | AmbientAgentTaskState::Blocked
-            | AmbientAgentTaskState::Cancelled
-            | AmbientAgentTaskState::Unknown => false,
-        }
-    }
-
-    pub fn is_cancellable(&self) -> bool {
-        self.is_working()
-    }
-
-    pub fn is_failure_like(&self) -> bool {
-        match self {
-            AmbientAgentTaskState::Failed
-            | AmbientAgentTaskState::Error
-            | AmbientAgentTaskState::Blocked
-            | AmbientAgentTaskState::Unknown => true,
-            AmbientAgentTaskState::Queued
-            | AmbientAgentTaskState::Pending
-            | AmbientAgentTaskState::Claimed
-            | AmbientAgentTaskState::InProgress
-            | AmbientAgentTaskState::Succeeded
-            | AmbientAgentTaskState::Cancelled => false,
-        }
-    }
-
-    pub fn is_terminal(&self) -> bool {
-        match self {
-            AmbientAgentTaskState::Succeeded
-            | AmbientAgentTaskState::Failed
-            | AmbientAgentTaskState::Error
-            | AmbientAgentTaskState::Blocked
-            | AmbientAgentTaskState::Cancelled
-            | AmbientAgentTaskState::Unknown => true,
-            AmbientAgentTaskState::Queued
-            | AmbientAgentTaskState::Pending
-            | AmbientAgentTaskState::Claimed
-            | AmbientAgentTaskState::InProgress => false,
-        }
-    }
-
-    pub fn status_icon_and_color(&self, theme: &WarpTheme) -> (Icon, ColorU) {
-        match self {
-            AmbientAgentTaskState::Queued
-            | AmbientAgentTaskState::Pending
-            | AmbientAgentTaskState::Claimed
-            | AmbientAgentTaskState::InProgress => (Icon::ClockLoader, theme.ansi_fg_magenta()),
-            AmbientAgentTaskState::Succeeded => (Icon::Check, theme.ansi_fg_green()),
-            AmbientAgentTaskState::Failed
-            | AmbientAgentTaskState::Error
-            | AmbientAgentTaskState::Unknown => (Icon::Triangle, theme.ansi_fg_red()),
-            AmbientAgentTaskState::Blocked => (Icon::StopFilled, theme.ansi_fg_yellow()),
-            AmbientAgentTaskState::Cancelled => (
-                Icon::Cancelled,
-                theme.disabled_text_color(theme.background()).into_solid(),
-            ),
-        }
-    }
 }
 
 impl std::fmt::Display for AmbientAgentTaskState {

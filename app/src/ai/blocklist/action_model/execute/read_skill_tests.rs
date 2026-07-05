@@ -117,7 +117,7 @@ fn test_read_skill_executor_success() {
 
         let input = ExecuteActionInput {
             action: &action,
-            conversation_id: AIConversationId::new(),
+            conversation_id: AIConversationId::default(),
         };
 
         executor_handle.update(&mut app, |executor, ctx| {
@@ -162,7 +162,7 @@ fn test_read_skill_executor_refuses_current_app_fallback_for_environment_runtime
 
         let input = ExecuteActionInput {
             action: &action,
-            conversation_id: AIConversationId::new(),
+            conversation_id: AIConversationId::default(),
         };
 
         executor_handle.update(&mut app, |executor, ctx| {
@@ -203,7 +203,7 @@ fn test_read_skill_executor_file_not_found() {
 
         let input = ExecuteActionInput {
             action: &action,
-            conversation_id: AIConversationId::new(),
+            conversation_id: AIConversationId::default(),
         };
 
         executor_handle.update(&mut app, |executor, ctx| {
@@ -247,7 +247,7 @@ fn test_read_skill_executor_fallback_reads_disk_on_cache_miss() {
 
         let input = ExecuteActionInput {
             action: &action,
-            conversation_id: AIConversationId::new(),
+            conversation_id: AIConversationId::default(),
         };
 
         let execution = executor_handle.update(&mut app, |executor, ctx| {
@@ -307,7 +307,7 @@ fn test_read_skill_executor_fallback_returns_error_when_file_missing() {
 
         let input = ExecuteActionInput {
             action: &action,
-            conversation_id: AIConversationId::new(),
+            conversation_id: AIConversationId::default(),
         };
 
         let execution = executor_handle.update(&mut app, |executor, ctx| {
@@ -367,7 +367,7 @@ fn test_read_skill_executor_resolves_by_name() {
 
         let input = ExecuteActionInput {
             action: &action,
-            conversation_id: AIConversationId::new(),
+            conversation_id: AIConversationId::default(),
         };
 
         executor_handle.update(&mut app, |executor, ctx| {
@@ -404,7 +404,7 @@ fn test_read_skill_executor_rejects_unknown_name() {
 
         let input = ExecuteActionInput {
             action: &action,
-            conversation_id: AIConversationId::new(),
+            conversation_id: AIConversationId::default(),
         };
 
         executor_handle.update(&mut app, |executor, ctx| {
@@ -446,7 +446,7 @@ fn test_read_skill_executor_rejects_non_skill_path_on_cache_miss() {
 
         let input = ExecuteActionInput {
             action: &action,
-            conversation_id: AIConversationId::new(),
+            conversation_id: AIConversationId::default(),
         };
 
         executor_handle.update(&mut app, |executor, ctx| {

@@ -35,9 +35,6 @@ use crate::ai::skills::{
     clone_repo_for_skill, resolve_skill_spec, ResolveSkillError, ResolvedSkill,
 };
 
-pub(crate) use driver::harness::{
-    task_env_vars, validate_cli_installed, ClaudeHarness, ThirdPartyHarness,
-};
 pub use driver::AgentDriver;
 use warp_cli::agent::{Harness, Prompt, RunAgentArgs};
 
@@ -53,8 +50,6 @@ pub mod output;
 mod profiles;
 mod provider;
 mod session_bridge;
-#[cfg(test)]
-mod test_support;
 
 /// Run a Ashide CLI command.
 pub fn run(

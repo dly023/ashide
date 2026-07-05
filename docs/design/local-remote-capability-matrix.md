@@ -12,14 +12,14 @@
 - `status`：fixed / fixed_pending_validation / healthy / found / closed / pending_audit。
 - `notes`：关联 inconsistencies CSV 编号 + 说明。
 
-## 状态统计（第一版，27 项）
+## 状态统计（第一版，28 项）
 
 - **fixed**：7（#1 cd、#2 open dir、#3 open file、#4 code review pane、#9 tab activation、#10 session navigator、#11 Linear title）。
 - **fixed_pending_validation**：2（#9、#10，已合入 commit f21896f，未编译/未 GUI 验证）。
 - **healthy**：11（12 个 `try_route` 调用点中 10 个对称健康 + cd-to-terminal stale guard + copy path）。
-- **found**：0（#11 已修；本轮编译验证通过）。
+- **found**：1（#16 file browser symlink 语义未统一）。
 - **closed**：4（#5 capability env、#4 session label、#6 error lifecycle、#8 session restore startup command——确认为合理 backend diff）。
-- **pending_audit**：5（file browser FS 操作：delete/rename/new/upload/download——server file browser 是远程专有 UI，本地等价是 OS 级操作，参数对齐待逐项核对 RPC）。
+- **pending_audit**：5（File Browser FS 操作：delete/rename/new/upload/download——当前 terminal/environment backend 已分流，但抽象未收口；本地 OS 操作与远程 RPC 的参数/语义待逐项核对）。
 
 ## 关键结论
 
@@ -36,11 +36,13 @@
 | #13 | `dormant_environment_from_server` 死代码 | source_saved_ssh.rs:325 | low | found | 仅 app_state_tests.rs:116 调用，生产代码未用。疑似"从 saved server 创 dormant env"入口走了别的方式，需甄别是否断路径 |
 | #14 | i18n 孤儿 key 726 个 | app/i18n/*/warp.ftl | low | found | 含菜单改动确认孤儿 `server-file-browser-menu-terminal` / `-other`；大量 `agent-management-*` 疑似整块死 UI，误报率高需人工甄别 |
 | #15 | build.rs panic on missing `MACOSX_DEPLOYMENT_TARGET` | app/build.rs:54 | low(DX) | fixed | 改为 fallback 10.14 + cargo:warning 提示 |
+| #16 | File Browser symlink 语义被 local/remote backend 分裂 | server_file_browser.rs:4201 / server_model.rs:1883 | medium | found | 不应定位成“远程 symlink 识别”特例；需要统一文件浏览器 FS metadata 抽象，让本地 terminal root 和 remote environment root 都返回同一套 `entry_kind + target_kind` 语义。symlink-to-dir 应可展开/进入，symlink-to-file 应可打开，同时 UI 保留 symlink 身份 |
 
 ## 下一轮建议优先级
 
-1. **#12 authority parser 集中化**：抽单一 parser，3 处复用（纯重构，零行为变化）。
-2. **file browser FS 操作 pending_audit 5 项**：逐项核对 remote RPC 与本地 OS 操作的参数/语义对齐。
-3. **#13 dormant_environment_from_server 甄别**：确认是否断路径或纯死代码。
-4. **#14 i18n 孤儿 key**：726 个，含 `agent-management-*` 疑似整块死 UI，需人工甄别后批量清理。
-5. **阶段 3 `EnvironmentBackend` trait**：从根上消除"两遍代码"，高风险大重构，单独 milestone。
+1. **#16 File Browser FS metadata 抽象 + symlink 统一**：先收口 list/resolve 的 entry 语义，再处理 UI 展开/打开行为；不要只 patch remote daemon。
+2. **#12 authority parser 集中化**：抽单一 parser，3 处复用（纯重构，零行为变化）。
+3. **file browser FS 操作 pending_audit 5 项**：在 #16 的 backend seam 上逐项核对 delete/rename/new/upload/download 参数/语义。
+4. **#13 dormant_environment_from_server 甄别**：确认是否断路径或纯死代码。
+5. **#14 i18n 孤儿 key**：726 个，含 `agent-management-*` 疑似整块死 UI，需人工甄别后批量清理。
+6. **阶段 3 `EnvironmentBackend` trait**：从根上消除"两遍代码"，高风险大重构，单独 milestone。

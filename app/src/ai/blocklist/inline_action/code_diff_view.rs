@@ -54,7 +54,7 @@ use crate::{
     ai::{
         agent::{
             icons::{self, yellow_stop_icon},
-            AIAgentActionId, AIIdentifiers, FileEdit, FileLocations, ServerOutputId,
+            AIAgentActionId, AIIdentifiers, FileEdit, FileLocations,
         },
         blocklist::{
             action_model::{AIActionStatus, BlocklistAIActionEvent, BlocklistAIActionModel},
@@ -2179,10 +2179,6 @@ impl CodeDiffView {
                     .update(ctx, |editor, ctx| editor.clear_selection(ctx));
             });
         }
-    }
-
-    fn server_output_id(&self) -> Option<ServerOutputId> {
-        self.identifiers.server_output_id.clone()
     }
 
     /// We are processing unified diff and saving files concurrently. That's why

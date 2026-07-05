@@ -75,7 +75,6 @@ use terminal::TerminalDriverEvent;
 const MCP_SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 const HARNESS_SAVE_INTERVAL: Duration = Duration::from_secs(30);
 pub(crate) const LOCAL_DRIVE_SYNC_TIMEOUT: Duration = Duration::from_secs(60);
-const SETUP_FAILED_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Maximum time to wait for an automatic error resume before propagating the error.
 /// If no follow-up status arrives within this window, the driver terminates with the
 /// original error so the CLI does not hang indefinitely.
@@ -291,11 +290,6 @@ pub enum AgentDriverError {
     BootstrapFailed,
     #[error("Error syncing Ashide Drive")]
     LocalDriveSyncFailed,
-    #[error("Requested environment not found: {0}")]
-    EnvironmentNotFound(String),
-    #[error("Environment setup failed: {0}")]
-    EnvironmentSetupFailed(String),
-
     #[error("Could not resolve working directory {}", path.display())]
     InvalidWorkingDirectory {
         path: PathBuf,
@@ -482,7 +476,6 @@ impl AgentDriver {
     ) -> impl Future<Output = Result<(), AgentDriverError>> {
         let (tx, rx) = oneshot::channel();
         let foreground = ctx.spawner();
-        let idle_on_complete = self.idle_on_complete;
 
         ctx.spawn(
             async move {
@@ -509,19 +502,6 @@ impl AgentDriver {
                     Err(AgentDriverError::InvalidRuntimeState)
                 }
             };
-
-            if let (Some(_task_id), Err(err)) = (task_id, &result) {
-                // Keep the session alive after environment setup failures so
-                // the viewer can connect, receive scrollback, and see the error.
-                if let (Some(idle_timeout), true) = (
-                    idle_on_complete,
-                    matches!(err, AgentDriverError::EnvironmentSetupFailed(_)),
-                ) {
-                    let timeout = idle_timeout.min(SETUP_FAILED_IDLE_TIMEOUT);
-                    log::info!("Environment setup failed; keeping session alive for {timeout:?}");
-                    warpui::r#async::Timer::after(timeout).await;
-                }
-            }
 
             result
         }

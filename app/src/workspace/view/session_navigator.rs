@@ -22,9 +22,9 @@ use super::{
     CLIAgentSessionsModelEvent, ContextFlag, DismissibleToast, EditorEvent, EditorView,
     EnvironmentCliAgentSessionSourceAction, MenuItem, MenuItemFields, ModalButton, PaneId,
     PaneViewLocator, RestoreConversationLayout, SingleLineEditorOptions, TabContextMenuAnchor,
-    TabSnapshot, TerminalView, TextOptions, Vector2F, WORKSPACE_SESSIONS_REFRESH_TOAST_ID,
-    Workspace, WorkspaceAction, WorkspaceSessionActionTarget, WorkspaceSessionKind,
-    WorkspaceSessionSnapshot,
+    TabSnapshot, TerminalView, TextOptions, Vector2F, Workspace, WorkspaceAction,
+    WorkspaceSessionActionTarget, WorkspaceSessionKind, WorkspaceSessionSnapshot,
+    WORKSPACE_SESSIONS_REFRESH_TOAST_ID,
 };
 
 impl Workspace {
@@ -115,6 +115,22 @@ impl Workspace {
     pub(super) fn workspace_session_display_order_key(
         session: &WorkspaceSessionSnapshot,
     ) -> String {
+        // Display order follows the container identity for live containers, so
+        // source merge keeps treating a materialized session as the live tab.
+        // Restore materialization is bridged in
+        // `reconcile_session_navigator_display_order` by copying the durable
+        // agent/conversation order onto this live-container key.
+        if session.is_live_container() {
+            return Self::workspace_session_logical_key(session);
+        }
+
+        Self::workspace_session_durable_display_order_key(session)
+            .unwrap_or_else(|| Self::workspace_session_logical_key(session))
+    }
+
+    fn workspace_session_durable_display_order_key(
+        session: &WorkspaceSessionSnapshot,
+    ) -> Option<String> {
         let environment_key = WorkspaceSessionSnapshot::logical_environment_key(
             session.environment_authority_key.as_deref(),
         );
@@ -124,7 +140,7 @@ impl Workspace {
             .as_deref()
             .filter(|id| !id.trim().is_empty())
         {
-            return format!(
+            return Some(format!(
                 "{environment_key}::agent:{}:{}",
                 session
                     .cli_agent
@@ -132,7 +148,7 @@ impl Workspace {
                     .or(session.cli_command.as_deref())
                     .unwrap_or_default(),
                 cli_agent_session_id
-            );
+            ));
         }
 
         if let Some(conversation_id) = session
@@ -141,10 +157,10 @@ impl Workspace {
             .chain(session.conversation_ids.iter())
             .find(|id| !id.trim().is_empty())
         {
-            return format!("{environment_key}::conversation:{conversation_id}");
+            return Some(format!("{environment_key}::conversation:{conversation_id}"));
         }
 
-        Self::workspace_session_logical_key(session)
+        None
     }
 
     pub(super) fn reconcile_session_navigator_display_order(
@@ -159,6 +175,15 @@ impl Workspace {
             {
                 continue;
             }
+
+            if let Some(display_order) = Self::workspace_session_durable_display_order_key(session)
+                .and_then(|key| self.session_navigator_display_order.get(&key).copied())
+            {
+                self.session_navigator_display_order
+                    .insert(order_key, display_order);
+                continue;
+            }
+
             let display_order = self.next_session_navigator_display_order;
             self.next_session_navigator_display_order += 1;
             self.session_navigator_display_order
@@ -182,11 +207,7 @@ impl Workspace {
                     if let Some((tab_index, _)) =
                         Self::locator_from_restored_session_id(&session.id)
                     {
-                        let order = self
-                            .session_navigator_display_order
-                            .get(&Self::workspace_session_display_order_key(session))
-                            .copied()
-                            .unwrap_or(u64::MAX);
+                        let order = self.session_navigator_display_order_for_session(session);
                         orders
                             .entry(tab_index)
                             .and_modify(|group_order| *group_order = (*group_order).min(order))
@@ -200,16 +221,8 @@ impl Workspace {
             let right_key = Self::workspace_session_display_order_key(right);
             let left_same_window_position = Self::locator_from_restored_session_id(&left.id);
             let right_same_window_position = Self::locator_from_restored_session_id(&right.id);
-            let left_order = self
-                .session_navigator_display_order
-                .get(&left_key)
-                .copied()
-                .unwrap_or(u64::MAX);
-            let right_order = self
-                .session_navigator_display_order
-                .get(&right_key)
-                .copied()
-                .unwrap_or(u64::MAX);
+            let left_order = self.session_navigator_display_order_for_session(left);
+            let right_order = self.session_navigator_display_order_for_session(right);
             let left_original_position = original_positions
                 .get(&left_key)
                 .copied()
@@ -249,6 +262,25 @@ impl Workspace {
                 })
                 .then_with(|| left.id.cmp(&right.id))
         });
+    }
+
+    fn session_navigator_display_order_for_session(
+        &self,
+        session: &WorkspaceSessionSnapshot,
+    ) -> u64 {
+        let primary_order = self
+            .session_navigator_display_order
+            .get(&Self::workspace_session_display_order_key(session))
+            .copied();
+        let durable_order = Self::workspace_session_durable_display_order_key(session)
+            .and_then(|key| self.session_navigator_display_order.get(&key).copied());
+
+        match (primary_order, durable_order) {
+            (Some(primary), Some(durable)) => primary.min(durable),
+            (Some(primary), None) => primary,
+            (None, Some(durable)) => durable,
+            (None, None) => u64::MAX,
+        }
     }
 
     fn tab_is_same_window_split_group(&self, tab_index: usize, ctx: &AppContext) -> bool {
@@ -330,13 +362,63 @@ impl Workspace {
             return Some(restoring_key);
         }
 
-        let live_active_key = sessions
+        let live_active = sessions
             .iter()
-            .find(|session| session.is_active)
-            .map(Self::workspace_session_logical_key);
+            .find(|session| session.is_active && session.is_live_container());
+        let live_active_key = live_active.map(Self::workspace_session_logical_key);
         match live_active_key {
             Some(key) if active_restored_workspace_session_key == key => Some(key),
-            Some(_) => None,
+            Some(key) => {
+                // Container model: the stored active key may belong to a
+                // virtual container that has just been materialized into a
+                // live container (e.g. a historical Ashide conversation
+                // activated into a new tab). If the live container shares a
+                // binding (agent session id or conversation id) with the
+                // stored-key virtual container, track the live container's
+                // key as the new active key so the navigator keeps
+                // highlighting the right row.
+                let stored_session = sessions.iter().find(|session| {
+                    Self::workspace_session_logical_key(session)
+                        == active_restored_workspace_session_key
+                });
+                let Some(stored) = stored_session else {
+                    // The stored-key session is no longer present (e.g. a
+                    // historical conversation that became represented by the
+                    // new live tab and was filtered out of the navigator).
+                    // Assume materialization and track the live container.
+                    return Some(key);
+                };
+                let live = live_active?;
+                let env_matches = WorkspaceSessionSnapshot::logical_environment_key(
+                    stored.environment_authority_key.as_deref(),
+                ) == WorkspaceSessionSnapshot::logical_environment_key(
+                    live.environment_authority_key.as_deref(),
+                );
+                if !env_matches {
+                    return None;
+                }
+                let binding_matches = stored
+                    .cli_agent_session_id
+                    .as_deref()
+                    .filter(|id| !id.trim().is_empty())
+                    .zip(live.cli_agent_session_id.as_deref())
+                    .is_some_and(|(a, b)| a == b)
+                    || stored
+                        .active_conversation_id
+                        .iter()
+                        .chain(stored.conversation_ids.iter())
+                        .any(|conv| {
+                            live.active_conversation_id
+                                .iter()
+                                .chain(live.conversation_ids.iter())
+                                .any(|live_conv| conv == live_conv)
+                        });
+                if binding_matches {
+                    Some(key)
+                } else {
+                    None
+                }
+            }
             None => sessions.iter().find_map(active_key_in_sessions),
         }
     }
@@ -408,7 +490,14 @@ impl Workspace {
         left: &WorkspaceSessionSnapshot,
         right: &WorkspaceSessionSnapshot,
     ) -> bool {
-        Self::workspace_session_logical_key(left) == Self::workspace_session_logical_key(right)
+        if Self::workspace_session_logical_key(left) == Self::workspace_session_logical_key(right) {
+            return true;
+        }
+
+        Self::workspace_session_durable_display_order_key(left).is_some_and(|left_key| {
+            Self::workspace_session_durable_display_order_key(right)
+                .is_some_and(|right_key| left_key == right_key)
+        })
     }
 
     pub(super) fn workspace_session_pin_keys(session: &WorkspaceSessionSnapshot) -> Vec<String> {
@@ -474,10 +563,7 @@ impl Workspace {
                 pinned: Self::pinned_cli_agent_session_ids(),
             };
         }
-        self.indexed_environment_cli_agent_session_user_states
-            .get(authority)
-            .cloned()
-            .unwrap_or_default()
+        self.environments.cli_agent_session_user_state(authority)
     }
 
     pub(super) fn local_cli_agent_session_aliases() -> HashMap<String, String> {
@@ -584,18 +670,15 @@ impl Workspace {
                     format!("environment runtime client is not connected: {authority}")
                 })?;
 
-            let previous_state = self
-                .indexed_environment_cli_agent_session_user_states
-                .get(authority)
-                .cloned();
-            let mut optimistic_state = previous_state.clone().unwrap_or_default();
+            let previous_state = self.environments.cli_agent_session_user_state(authority);
+            let mut optimistic_state = previous_state.clone();
             Self::apply_workspace_session_user_state_mutation(
                 &mut optimistic_state,
                 &keys,
                 &mutation,
             );
-            self.indexed_environment_cli_agent_session_user_states
-                .insert(authority.to_owned(), optimistic_state);
+            self.environments
+                .set_cli_agent_session_user_state(authority.to_owned(), optimistic_state);
 
             let authority = authority.to_owned();
             let future = async move {
@@ -614,15 +697,16 @@ impl Workspace {
                     }
                     Err(error) => {
                         log::warn!("remote session user-state mutation failed: {error}");
-                        if let Some(previous_state) = previous_state {
-                            workspace.remember_indexed_environment_cli_agent_session_user_state(
+                        if previous_state.aliases.is_empty() && previous_state.pinned.is_empty() {
+                            workspace.environments.set_cli_agent_session_user_state(
                                 authority.clone(),
                                 previous_state,
                             );
                         } else {
-                            workspace
-                                .indexed_environment_cli_agent_session_user_states
-                                .remove(&authority);
+                            workspace.remember_indexed_environment_cli_agent_session_user_state(
+                                authority.clone(),
+                                previous_state,
+                            );
                         }
                         workspace.show_workspace_session_error_toast(
                             format!("同步远程会话状态失败：{error}"),
@@ -1201,6 +1285,7 @@ impl Workspace {
                     is_active: focused_pane_index == Some(placeholder_leaf_index),
                     is_pinned: false,
                     updated_at_unix_ms: None,
+                    is_live_container: true,
                 });
             }
         }
@@ -1216,18 +1301,19 @@ impl Workspace {
         if crate::workspace::environment_runtime::authority_uses_terminal_bootstrap(authority) {
             return self.indexed_cli_agent_sessions.clone();
         }
-        self.indexed_environment_cli_agent_sessions
-            .get(authority)
-            .cloned()
-            .unwrap_or_default()
+        self.environments
+            .indexed_cli_agent_sessions_for_authority(authority)
     }
 
     pub(super) fn all_indexed_environment_cli_agent_sessions(
         &self,
     ) -> Vec<WorkspaceSessionSnapshot> {
-        self.indexed_environment_cli_agent_sessions
-            .values()
-            .flat_map(|sessions| sessions.iter().cloned())
+        self.environments
+            .entries()
+            .filter(|(authority, _)| {
+                !crate::workspace::environment_runtime::authority_uses_terminal_bootstrap(authority)
+            })
+            .flat_map(|(_, entry)| entry.indexed_cli_agent_sessions.iter().cloned())
             .collect()
     }
 
@@ -1236,8 +1322,8 @@ impl Workspace {
         authority: String,
         sessions: Vec<WorkspaceSessionSnapshot>,
     ) {
-        self.indexed_environment_cli_agent_sessions
-            .insert(authority, sessions);
+        self.environments
+            .set_indexed_cli_agent_sessions(authority, sessions);
     }
 
     pub(super) fn remember_indexed_environment_cli_agent_session_user_state(
@@ -1245,18 +1331,18 @@ impl Workspace {
         authority: String,
         state: crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserState,
     ) {
-        self.indexed_environment_cli_agent_session_user_states
-            .insert(authority, state);
+        self.environments
+            .set_cli_agent_session_user_state(authority, state);
     }
 
     pub(super) fn clear_indexed_environment_cli_agent_sessions_for_authority(
         &mut self,
         authority: &str,
     ) {
-        self.indexed_environment_cli_agent_sessions
-            .remove(authority);
-        self.indexed_environment_cli_agent_session_user_states
-            .remove(authority);
+        self.environments
+            .clear_indexed_cli_agent_sessions(authority);
+        self.environments
+            .set_cli_agent_session_user_state(authority.to_owned(), Default::default());
     }
 
     // ── 刷新生命周期 · 刷新/反馈 toast ─────────────────────────────────────
@@ -1317,10 +1403,9 @@ impl Workspace {
             })
             .collect::<HashSet<_>>();
 
-        self.restoring_workspace_session_keys
-            .retain(|key| {
-                current_session_keys.contains(key) && !materialized_live_session_keys.contains(key)
-            });
+        self.restoring_workspace_session_keys.retain(|key| {
+            current_session_keys.contains(key) && !materialized_live_session_keys.contains(key)
+        });
     }
 
     pub(super) fn refresh_indexed_cli_agent_sessions(&mut self) {

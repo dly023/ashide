@@ -20,11 +20,3 @@ pub fn estimate(input: &str) -> usize {
     // 这里用 (n + 2) / 4 等价于 round(n / 4) 对正整数。
     (n + CHARS_PER_TOKEN / 2) / CHARS_PER_TOKEN
 }
-
-/// JSON 序列化后估算 — 对齐 opencode `compaction.ts:241`:
-/// `Token.estimate(JSON.stringify(msgs))`
-pub fn estimate_json<T: serde::Serialize>(value: &T) -> usize {
-    serde_json::to_string(value)
-        .map(|s| estimate(&s))
-        .unwrap_or(0)
-}

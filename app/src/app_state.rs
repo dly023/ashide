@@ -55,7 +55,6 @@ pub enum EnvironmentLifecycleState {
     Dormant,
     Connecting,
     Installing,
-    Reconnecting,
     Error,
 }
 
@@ -192,6 +191,15 @@ pub struct WorkspaceSessionSnapshot {
     /// terminal snapshots may leave this empty; provider indexes should fill it.
     #[serde(default)]
     pub updated_at_unix_ms: Option<i64>,
+    /// True only for sessions produced by [`WorkspaceSessionSnapshot::from_tabs`]
+    /// — i.e. backed by a real pane in the current window. Restore targets,
+    /// indexed scans, and historical Ashide conversations are virtual containers
+    /// and keep this `false`. This drives the container model: live containers
+    /// keep a stable `source:tab:...` identity, virtual containers keep an
+    /// `agent:...:session-N` identity, and a virtual container whose binding
+    /// matches a live container is consumed (hidden) by it.
+    #[serde(default, skip)]
+    pub is_live_container: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -393,10 +401,32 @@ impl WorkspaceSessionSnapshot {
         !id.trim().is_empty() && !id.starts_with("tab:")
     }
 
+    /// Stable identity used by the Session Navigator to merge rows.
+    ///
+    /// Container model: a live tab is a *container* with a stable identity
+    /// (`source:tab:X:leaf:Y`) that never changes when the agent inside it
+    /// starts, exits, or switches — the agent is metadata of the container,
+    /// not its identity. This is what keeps "type `codex` in a plain terminal"
+    /// from spawning a duplicate navigator row, and what keeps a failed resume
+    /// from leaving a stale row behind.
+    ///
+    /// A *virtual container* (restore target / indexed / historical session
+    /// that has no live tab) keeps its own stable identity keyed by the agent
+    /// session — `agent:Codex:session-123` — so it shows as a separate,
+    /// resumable row until it is materialized into a real tab.
     pub fn logical_key(&self) -> String {
         let environment_key =
             Self::logical_environment_key(self.environment_authority_key.as_deref());
 
+        // Live containers always use their physical source id. The agent
+        // session id is binding metadata, not identity.
+        if self.is_live_container() {
+            return format!("{environment_key}::source:{}", self.id);
+        }
+
+        // Virtual containers (restore targets, indexed sessions, historical
+        // Ashide conversations) are identified by their agent session id when
+        // available, falling back to their source id otherwise.
         if let Some(cli_agent_session_id) = self
             .cli_agent_session_id
             .as_deref()
@@ -415,22 +445,121 @@ impl WorkspaceSessionSnapshot {
         format!("{environment_key}::source:{}", self.id)
     }
 
+    /// A live container is a session backed by a real pane in the window
+    /// (`tab:...:leaf:...`). Everything else — restored rows, indexed scans,
+    /// historical Ashide conversations — is a virtual container. This is set
+    /// by [`WorkspaceSessionSnapshot::from_tabs`] and carried as a non-persisted
+    /// field so merge logic can distinguish live containers from virtual ones
+    /// even when a virtual row happens to carry a `tab:`-prefixed id (e.g. a
+    /// restored session recording which pane it would materialize into).
+    pub fn is_live_container(&self) -> bool {
+        self.is_live_container
+    }
+
     pub fn merge_for_session_navigator(
         sources: impl IntoIterator<Item = WorkspaceSessionSnapshot>,
         pinned_session_ids: &HashSet<String>,
     ) -> Vec<WorkspaceSessionSnapshot> {
+        let sources = sources.into_iter().collect::<Vec<_>>();
+        // Container model: a virtual container (restore target / indexed /
+        // historical) whose binding matches a live container is *consumed* —
+        // it has been materialized into that tab and should not show as a
+        // separate row. Bindings are matched by agent session id (CLI-agent
+        // sessions) or by Ashide conversation id (historical Ashide
+        // conversations). Collect live bindings first so we can skip the
+        // consumed virtual rows in a single pass.
+        let mut live_agent_bindings: HashMap<(String, String), String> = HashMap::new();
+        let mut live_conversation_bindings: HashMap<(String, String), String> = HashMap::new();
+        for source in sources.iter() {
+            if !source.is_live_container() {
+                continue;
+            }
+            let live_logical_key = source.logical_key();
+            let environment_key =
+                Self::logical_environment_key(source.environment_authority_key.as_deref())
+                    .to_string();
+            if let Some(session_id) = source
+                .cli_agent_session_id
+                .as_deref()
+                .filter(|id| !id.trim().is_empty())
+            {
+                let agent_key = source
+                    .cli_agent
+                    .as_deref()
+                    .or(source.cli_command.as_deref())
+                    .unwrap_or_default()
+                    .to_string();
+                live_agent_bindings.insert(
+                    (environment_key.clone(), format!("{agent_key}:{session_id}")),
+                    live_logical_key.clone(),
+                );
+            }
+            for conversation_id in source
+                .active_conversation_id
+                .iter()
+                .chain(source.conversation_ids.iter())
+                .filter(|id| !id.trim().is_empty())
+            {
+                live_conversation_bindings.insert(
+                    (environment_key.clone(), conversation_id.to_string()),
+                    live_logical_key.clone(),
+                );
+            }
+        }
+
         let mut sessions: Vec<WorkspaceSessionSnapshot> = Vec::new();
         let mut keys = HashMap::<String, usize>::new();
 
         for mut source in sources {
-            let logical_key = source.logical_key();
-            let source_is_live = source.id.starts_with("tab:");
+            // Consume: merge a virtual container whose binding matches a live
+            // container into that live row. The live tab owns identity/focus,
+            // while the virtual/indexed row may still carry the more specific
+            // title and timestamp.
+            let mut consumed_live_key = None;
+            if !source.is_live_container() {
+                let environment_key =
+                    Self::logical_environment_key(source.environment_authority_key.as_deref())
+                        .to_string();
+                if let Some(session_id) = source
+                    .cli_agent_session_id
+                    .as_deref()
+                    .filter(|id| !id.trim().is_empty())
+                {
+                    let agent_key = source
+                        .cli_agent
+                        .as_deref()
+                        .or(source.cli_command.as_deref())
+                        .unwrap_or_default()
+                        .to_string();
+                    consumed_live_key = live_agent_bindings
+                        .get(&(environment_key.clone(), format!("{agent_key}:{session_id}")))
+                        .cloned();
+                }
+                if consumed_live_key.is_none() {
+                    for conversation_id in source
+                        .active_conversation_id
+                        .iter()
+                        .chain(source.conversation_ids.iter())
+                        .filter(|id| !id.trim().is_empty())
+                    {
+                        if let Some(live_key) = live_conversation_bindings
+                            .get(&(environment_key.clone(), conversation_id.to_string()))
+                        {
+                            consumed_live_key = Some(live_key.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+
+            let logical_key = consumed_live_key.unwrap_or_else(|| source.logical_key());
+            let source_is_live = source.is_live_container();
             source.is_active = source_is_live && source.is_active;
             source.is_pinned = source.is_pinned || source.is_pinned_by(pinned_session_ids);
 
             if let Some(index) = keys.get(&logical_key).copied() {
                 let existing = &mut sessions[index];
-                let existing_is_live = existing.id.starts_with("tab:");
+                let existing_is_live = existing.is_live_container();
                 existing.is_active |= source.is_active;
                 existing.is_pinned |= source.is_pinned;
                 existing.updated_at_unix_ms =
@@ -459,7 +588,7 @@ impl WorkspaceSessionSnapshot {
                         .clone()
                         .or_else(|| existing.environment_authority_key.clone());
                 }
-                if source_is_live && !existing.id.starts_with("tab:") {
+                if source_is_live && !existing.is_live_container() {
                     existing.id = source.id;
                 }
                 continue;
@@ -583,6 +712,7 @@ fn workspace_session_from_leaf(
                 is_active: terminal.is_active,
                 is_pinned: false,
                 updated_at_unix_ms: None,
+                is_live_container: true,
             })
         }
         LeafContents::Welcome { startup_directory } => Some(WorkspaceSessionSnapshot {
@@ -603,6 +733,7 @@ fn workspace_session_from_leaf(
             is_active: false,
             is_pinned: false,
             updated_at_unix_ms: None,
+            is_live_container: true,
         }),
         _ => None,
     }

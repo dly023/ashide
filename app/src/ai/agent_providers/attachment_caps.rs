@@ -28,11 +28,6 @@ pub struct AttachmentCaps {
 }
 
 impl AttachmentCaps {
-    /// 任何 multimodal 能力都没有 → 上游必须降级到纯文本路径。
-    pub fn is_text_only(&self) -> bool {
-        !self.images && !self.pdf && !self.audio
-    }
-
     /// 给定 mime,问该模型能否吃下这条 binary 附件。
     pub fn supports_mime(&self, mime: &str) -> bool {
         let lower = mime.trim().to_ascii_lowercase();
@@ -204,7 +199,7 @@ mod tests {
     #[test]
     fn openai_3_5_text_only() {
         let caps = caps_for_by_substring(AgentProviderApiType::OpenAi, "gpt-3.5-turbo");
-        assert!(caps.is_text_only());
+        assert!(!caps.images && !caps.pdf && !caps.audio);
     }
 
     #[test]
@@ -225,7 +220,7 @@ mod tests {
     #[test]
     fn ollama_default_text_only() {
         let caps = caps_for_by_substring(AgentProviderApiType::Ollama, "qwen2.5:7b");
-        assert!(caps.is_text_only());
+        assert!(!caps.images && !caps.pdf && !caps.audio);
     }
 
     #[test]
@@ -238,7 +233,7 @@ mod tests {
     #[test]
     fn deepseek_chat_text_only() {
         let caps = caps_for_by_substring(AgentProviderApiType::DeepSeek, "deepseek-chat");
-        assert!(caps.is_text_only());
+        assert!(!caps.images && !caps.pdf && !caps.audio);
     }
 
     #[test]

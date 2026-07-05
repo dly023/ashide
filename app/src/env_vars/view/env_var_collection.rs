@@ -924,11 +924,6 @@ impl EnvVarCollectionView {
                 self.update_breadcrumbs(ctx);
                 ctx.notify()
             }
-            ActiveEnvVarCollectionDataEvent::TrashStatusChanged => {
-                self.pane_configuration.update(ctx, |pane_config, ctx| {
-                    pane_config.refresh_pane_header_overflow_menu_items(ctx)
-                });
-            }
         }
     }
 

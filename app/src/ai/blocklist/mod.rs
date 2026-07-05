@@ -23,8 +23,8 @@ pub(super) mod view_util;
 
 #[cfg_attr(target_family = "wasm", allow(unused_imports))]
 pub(crate) use action_model::{
-    apply_edits, read_current_app_file_context, BlocklistAIActionEvent, BlocklistAIActionModel,
-    FileReadResult, PromptSuggestionExecutor, PromptSuggestionExecutorEvent, ReadFileContextResult,
+    read_current_app_file_context, BlocklistAIActionEvent, BlocklistAIActionModel,
+    PromptSuggestionExecutor, PromptSuggestionExecutorEvent, ReadFileContextResult,
     ShellCommandExecutor, ShellCommandExecutorEvent,
 };
 
@@ -48,8 +48,8 @@ pub(crate) use input_model::{
     BlocklistAIInputEvent, BlocklistAIInputModel, InputConfig, InputType,
 };
 pub(crate) use passive_suggestions::{
-    LegacyPassiveSuggestionsEvent, LegacyPassiveSuggestionsModel, MaaPassiveSuggestionsEvent,
-    MaaPassiveSuggestionsModel, PassiveSuggestionsModels,
+    LegacyPassiveSuggestionsEvent, LegacyPassiveSuggestionsModel, MaaPassiveSuggestionsModel,
+    PassiveSuggestionsModels,
 };
 #[cfg_attr(target_family = "wasm", allow(unused))]
 pub(crate) use persistence::PersistedAIInputType;
@@ -64,7 +64,6 @@ pub(crate) use view_util::format_usage_units;
 
 pub use crate::ai::blocklist::block::{secret_redaction, TextLocation};
 pub use block::keyboard_navigable_buttons;
-pub use block::toggleable_items;
 pub(crate) use controller::input_context::{
     drive_object_attachment_for_reference, plan_attachment_for_reference,
 };

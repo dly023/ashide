@@ -7,7 +7,6 @@ use warpui::{
 };
 
 use crate::{
-    app_interaction::CloseTarget,
     code::editor_management::{CodeEditorStatus, CodeEditorSummary},
     pane_group::{CodePane, PaneGroup, PaneId, TerminalPane},
     report_if_error,
@@ -186,16 +185,6 @@ impl QuitScope<'_> {
                 .unwrap_or_default(),
             Self::App => crate::session_management::num_shared_sessions(ctx),
             Self::EditorTab { .. } => 0,
-        }
-    }
-
-    fn close_target(&self) -> CloseTarget {
-        match self {
-            Self::Pane { .. } => CloseTarget::Pane,
-            Self::Tabs(_) => CloseTarget::Tab,
-            Self::Window(_) => CloseTarget::Window,
-            Self::App => CloseTarget::App,
-            Self::EditorTab { .. } => CloseTarget::EditorTab,
         }
     }
 }

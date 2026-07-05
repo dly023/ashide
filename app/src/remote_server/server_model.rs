@@ -74,6 +74,7 @@ pub type ConnectionId = uuid::Uuid;
 use super::protocol::RequestId;
 use crate::ai::agent::FileLocations;
 use crate::ai::blocklist::{read_current_app_file_context, ReadFileContextResult};
+use crate::terminal::capability_environment::terminal_capability_environment_variables_to_remove;
 use crate::terminal::model::session::command_executor::{
     ExecuteCommandOptions, LocalCommandExecutor,
 };
@@ -1075,6 +1076,9 @@ impl ServerModel {
         if !req.working_directory.is_empty() {
             cmd.current_dir(&req.working_directory);
         }
+        for key in terminal_capability_environment_variables_to_remove() {
+            cmd.env_remove(*key);
+        }
         for (key, value) in req.environment_variables {
             cmd.env(key, value);
         }
@@ -1890,7 +1894,9 @@ impl ServerModel {
                     let file_type = entry.file_type().ok();
                     let metadata = entry.metadata().ok();
                     let kind = entry_kind(file_type.as_ref(), metadata.as_ref());
-                    let is_dir = kind == FileSystemEntryKind::Directory as i32;
+                    let target_kind = entry_target_kind(file_type.as_ref(), &entry.path());
+                    let is_dir = kind == FileSystemEntryKind::Directory as i32
+                        || target_kind == FileSystemEntryKind::Directory as i32;
                     let size_bytes = metadata.as_ref().filter(|m| m.is_file()).map(|m| m.len());
                     let modified_epoch_millis = metadata
                         .as_ref()
@@ -1900,6 +1906,7 @@ impl ServerModel {
                         name,
                         is_dir,
                         kind,
+                        target_kind,
                         size_bytes,
                         modified_epoch_millis,
                     });
@@ -1934,6 +1941,7 @@ impl ServerModel {
             Ok(metadata) => {
                 let file_type = metadata.file_type();
                 let kind = entry_kind(Some(&file_type), Some(&metadata));
+                let target_kind = entry_target_kind(Some(&file_type), path.as_path());
                 let canonical_path = path
                     .canonicalize()
                     .unwrap_or(path)
@@ -1942,6 +1950,7 @@ impl ServerModel {
                 resolve_path_response::Result::Success(ResolvePathSuccess {
                     canonical_path,
                     kind,
+                    target_kind,
                     size_bytes: metadata.is_file().then_some(metadata.len()),
                 })
             }
@@ -2285,6 +2294,27 @@ fn entry_kind(file_type: Option<&std::fs::FileType>, metadata: Option<&std::fs::
         return FileSystemEntryKind::File as i32;
     }
     FileSystemEntryKind::Other as i32
+}
+
+/// For a symlink entry, follows the link and classifies the resolved target.
+/// Returns `MISSING` for broken symlinks. Returns `UNSPECIFIED` for non-symlink
+/// entries (target kind is not applicable).
+fn entry_target_kind(file_type: Option<&std::fs::FileType>, path: &std::path::Path) -> i32 {
+    if !file_type.is_some_and(|ft| ft.is_symlink()) {
+        return FileSystemEntryKind::Unspecified as i32;
+    }
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            if metadata.is_dir() {
+                FileSystemEntryKind::Directory as i32
+            } else if metadata.is_file() {
+                FileSystemEntryKind::File as i32
+            } else {
+                FileSystemEntryKind::Other as i32
+            }
+        }
+        Err(_) => FileSystemEntryKind::Missing as i32,
+    }
 }
 
 #[cfg(feature = "local_fs")]

@@ -4,14 +4,10 @@ use crate::drive::ObjectTypeAndId;
 use crate::object_store::ids::ObjectStoreId;
 use crate::object_store::model::generic_string_model::GenericStringObjectId;
 use crate::object_store::model::persistence::{ObjectStoreEvent, ObjectStoreModel};
-use crate::object_store::update_manager::{
-    ObjectOperation, OperationSuccessType, UpdateManagerEvent,
-};
 use crate::view_components::action_button::{ActionButton, ActionButtonTheme, SecondaryTheme};
 use crate::{
     ai::facts::{AIFact, AIMemory},
     object_store::ids::ClientId,
-    object_store::update_manager::UpdateManager,
     ui_components::{blended_colors, icons::Icon},
 };
 use pathfinder_color::ColorU;
@@ -248,46 +244,10 @@ impl SuggestionChipView {
     }
 
     fn listen_for_local_drive_events(ctx: &mut ViewContext<Self>) {
-        let update_manager = UpdateManager::handle(ctx);
-        ctx.subscribe_to_model(&update_manager, |me, _, event, ctx| {
-            me.handle_update_manager_event(event, ctx);
-        });
-
         let object_model = ObjectStoreModel::handle(ctx);
         ctx.subscribe_to_model(&object_model, |me, _, event, ctx| {
             me.handle_object_store_event(event, ctx);
         });
-    }
-
-    fn handle_update_manager_event(
-        &mut self,
-        event: &UpdateManagerEvent,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        let UpdateManagerEvent::ObjectOperationComplete { result } = event else {
-            return;
-        };
-
-        if let (ObjectOperation::Create { .. }, OperationSuccessType::Success) =
-            (&result.operation, &result.success_type)
-        {
-            if self.object_store_id.into_client() == result.client_id {
-                if let Some(stable_id) = result.stable_id {
-                    self.object_store_id = ObjectStoreId::StableId(stable_id);
-                    // Reload the rule from the local object store.
-                    match &mut self.suggestion {
-                        Suggestion::Rule { .. } => {
-                            self.load_suggestion(ctx);
-                        }
-                        Suggestion::AgentModeWorkflow { .. } => {
-                            // Loading agent mode workflows is not supported
-                            // as there is no editing flow for them.
-                        }
-                    }
-                    self.on_add_suggestion(ctx);
-                }
-            }
-        }
     }
 
     fn handle_object_store_event(&mut self, event: &ObjectStoreEvent, ctx: &mut ViewContext<Self>) {
@@ -350,9 +310,12 @@ impl SuggestionChipView {
                 {
                     let AIFact::Memory(AIMemory { content, .. }) =
                         rule.model().string_model.clone();
+                    self.is_saved = true;
                     self.chip.update(ctx, |chip, ctx| {
+                        chip.set_icon(Some(Icon::Check), ctx);
                         chip.set_label(content.clone(), ctx);
                         chip.set_tooltip(Some(tooltip.clone()), ctx);
+                        chip.set_theme(SuggestionButtonTheme, ctx);
                     });
                     ctx.notify();
                 }
@@ -361,16 +324,6 @@ impl SuggestionChipView {
                 // Loading agent mode workflows is not yet supported as there is no editing flow.
             }
         }
-    }
-
-    /// Updates the UI state to reflect that a rule has been added.
-    fn on_add_suggestion(&mut self, ctx: &mut ViewContext<Self>) {
-        self.is_saved = true;
-        self.chip.update(ctx, |chip, ctx| {
-            chip.set_icon(Some(Icon::Check), ctx);
-            chip.set_theme(SuggestionButtonTheme, ctx);
-        });
-        ctx.notify();
     }
 }
 

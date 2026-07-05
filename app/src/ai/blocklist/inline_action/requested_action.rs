@@ -175,11 +175,6 @@ impl RenderableAction {
         self
     }
 
-    pub fn with_content_item_spacing(mut self) -> Self {
-        self.should_override_with_content_item_spacing = true;
-        self
-    }
-
     /// Renders the requested action with the current configuration.
     pub fn render(self, app: &AppContext) -> Container {
         let appearance = Appearance::as_ref(app);

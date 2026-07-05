@@ -8,6 +8,7 @@ pub mod delete_conversation_confirmation_dialog;
 pub(crate) mod environment_backend;
 pub(crate) mod environment_provider;
 pub(crate) mod environment_runtime;
+pub(crate) mod environment_table;
 mod global_actions;
 pub mod header_toolbar_editor;
 pub mod header_toolbar_item;
@@ -133,6 +134,7 @@ impl SkillManagerEnvironmentScope {
 /// Returns the `HostId` only when that window's workspace has a runtime in the
 /// Connected state for authority `ssh:{node_id}`; otherwise `None` (the browser
 /// then shows a "connect the environment first" state).
+#[cfg(not(any(test, feature = "integration_tests")))]
 pub(crate) fn connected_environment_runtime_host_id_for_node(
     window_id: warpui::WindowId,
     node_id: &str,

@@ -76,6 +76,14 @@ pub enum AIAgentActionResultType {
     AskUserQuestion(AskUserQuestionResult),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionResultContinuationDecision {
+    /// Send the action result back to the model so the conversation can continue.
+    SendFollowUpRequest,
+    /// Do not auto-send a follow-up request after this result.
+    Stop,
+}
+
 impl AIAgentActionResultType {
     /// Returns the effective command string for command-related results, if any.
     ///
@@ -737,9 +745,13 @@ impl AIAgentActionResultType {
         }) if exit_code.value() == 130)
     }
 
-    /// Returns `true` if this completion of this action result should trigger a follow-up request.
-    pub fn should_trigger_request_upon_completion(&self) -> bool {
-        !self.is_cancelled()
+    /// Decides whether this action result should trigger a follow-up request.
+    pub fn continuation_decision(&self) -> ActionResultContinuationDecision {
+        if self.is_cancelled() {
+            ActionResultContinuationDecision::Stop
+        } else {
+            ActionResultContinuationDecision::SendFollowUpRequest
+        }
     }
 
     pub fn is_requested_command(&self) -> bool {
@@ -766,6 +778,35 @@ impl AIAgentActionResultType {
                 TransferShellCommandControlToUserResult::Snapshot { .. }
             )
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn continuation_decision_sends_follow_up_for_tool_errors() {
+        let result = AIAgentActionResultType::CallMCPTool(CallMCPToolResult::Error(
+            "transport failed after retry".to_owned(),
+        ));
+
+        assert_eq!(
+            result.continuation_decision(),
+            ActionResultContinuationDecision::SendFollowUpRequest
+        );
+    }
+
+    #[test]
+    fn continuation_decision_stops_after_cancelled_results() {
+        let result = AIAgentActionResultType::RequestCommandOutput(
+            RequestCommandOutputResult::CancelledBeforeExecution,
+        );
+
+        assert_eq!(
+            result.continuation_decision(),
+            ActionResultContinuationDecision::Stop
+        );
     }
 }
 

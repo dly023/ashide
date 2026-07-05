@@ -1,5 +1,5 @@
 use super::hoa_onboarding;
-use crate::auth::{AuthManager, AuthManagerEvent};
+use crate::auth::AuthManager;
 use crate::channel::{Channel, ChannelState};
 // Ashide(本地化,Phase 5):`PreferencesSyncer` 已物理删除。
 use crate::settings::CodeSettings;
@@ -26,11 +26,7 @@ pub struct OneTimeModalModel {
 
 impl OneTimeModalModel {
     pub fn new(ctx: &mut ModelContext<Self>) -> Self {
-        ctx.subscribe_to_model(&AuthManager::handle(ctx), |me, event, ctx| {
-            let AuthManagerEvent::AuthComplete = event else {
-                return;
-            };
-
+        ctx.subscribe_to_model(&AuthManager::handle(ctx), |me, _, ctx| {
             let auth_state = crate::auth::AuthStateProvider::as_ref(ctx).get().clone();
             let is_existing_user = auth_state.is_onboarded().unwrap_or_default();
             if is_existing_user {

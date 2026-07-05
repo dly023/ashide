@@ -17,7 +17,6 @@ pub(super) mod env_var_collection_pane;
 pub(super) mod environment_runtime_placeholder_pane;
 // Legacy environment-management pane module was removed with the ambient-agent UI subsystem.
 #[cfg(not(target_family = "wasm"))]
-pub(super) mod current_app_harness_launch;
 pub(super) mod execution_profile_editor_pane;
 pub(super) mod file_pane;
 pub(super) mod get_started_pane;

@@ -25,9 +25,7 @@ use crate::ai::{
     blocklist::action_model::execute::suggest_new_conversation::SuggestNewConversationExecutor,
 };
 use chrono::Local;
-pub(crate) use execute::apply_edits;
 pub(crate) use execute::coerce_integer_args;
-pub(crate) use execute::FileReadResult;
 pub use execute::{
     read_current_app_file_context, NewConversationDecision, PromptSuggestionExecutor,
     PromptSuggestionExecutorEvent, ReadFileContextResult, RequestFileEditsExecutor,
@@ -863,12 +861,10 @@ impl BlocklistAIActionModel {
     fn preprocess_action(
         &mut self,
         action: &AIAgentAction,
-        conversation_id: AIConversationId,
         ctx: &mut ModelContext<Self>,
     ) -> BoxFuture<'static, ()> {
-        self.executor.update(ctx, |executor, ctx| {
-            executor.preprocess_action(action, conversation_id, ctx)
-        })
+        self.executor
+            .update(ctx, |executor, ctx| executor.preprocess_action(action, ctx))
     }
 
     /// Queues the `actions` in the given iterator for the given conversation,
@@ -912,7 +908,7 @@ impl BlocklistAIActionModel {
 
         for action in actions.iter() {
             action_ids.insert(action.id.clone());
-            preprocess_future.push(self.preprocess_action(action, conversation_id, ctx));
+            preprocess_future.push(self.preprocess_action(action, ctx));
         }
 
         let preprocess_id = self

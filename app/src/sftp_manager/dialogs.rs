@@ -508,34 +508,6 @@ fn render_file_details(
     wrap_dismiss(dialog_body)
 }
 
-/// 渲染移动对话框
-fn render_move_dialog(
-    source: &PathBuf,
-    target_dir: &PathBuf,
-    appearance: &Appearance,
-    confirm_btn_state: MouseStateHandle,
-    cancel_btn_state: MouseStateHandle,
-    close_btn_state: MouseStateHandle,
-) -> Box<dyn Element> {
-    let source_name = source
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let target_display = target_dir.display();
-    let desc = format!("Move \"{source_name}\" to {target_display}");
-
-    render_confirm_dialog(
-        "Move Item",
-        &desc,
-        "Move",
-        SftpBrowserAction::ConfirmMove,
-        appearance,
-        confirm_btn_state,
-        cancel_btn_state,
-        close_btn_state,
-    )
-}
-
 /// 渲染覆盖确认对话框
 fn render_overwrite_confirm(
     _source: &PathBuf,
@@ -610,14 +582,6 @@ pub fn render_dialog(
         Dialog::FileDetails { entry } => {
             render_file_details(entry, appearance, cancel_btn_state, close_btn_state)
         }
-        Dialog::Move { source, target_dir } => render_move_dialog(
-            source,
-            target_dir,
-            appearance,
-            confirm_btn_state,
-            cancel_btn_state,
-            close_btn_state,
-        ),
         Dialog::OverwriteConfirm {
             source,
             target,

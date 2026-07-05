@@ -1,5 +1,3 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::fmt::Display;
 
 use markdown_parser::{FormattedText, FormattedTextFragment, FormattedTextLine};
@@ -620,7 +618,6 @@ struct SSHWidget {
     tmux_warpification_switch_state: SwitchStateHandle,
     enable_ssh_warpification_switch_state: SwitchStateHandle,
     additional_info_mouse_state: MouseStateHandle,
-    local_only_icon_tooltip_states: RefCell<HashMap<String, MouseStateHandle>>,
 }
 
 impl SettingsWidget for SSHWidget {
