@@ -627,6 +627,17 @@ impl EnvironmentTable {
         }
     }
 
+    pub(crate) fn retain_indexed_cli_agent_sessions(
+        &mut self,
+        mut retain: impl FnMut(&WorkspaceSessionSnapshot) -> bool,
+    ) {
+        for entry in self.entries.values_mut() {
+            entry
+                .indexed_cli_agent_sessions
+                .retain(|session| retain(session));
+        }
+    }
+
     pub(crate) fn cli_agent_session_user_state(
         &self,
         authority: &str,

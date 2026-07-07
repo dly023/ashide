@@ -151,7 +151,12 @@ pub(crate) fn delete_current_app_cli_agent_session(snapshot_id: &str) -> Result<
             }
         }
     }
-    set_session_pinned(snapshot_id, false)
+    if let Err(error) = set_session_pinned(snapshot_id, false) {
+        log::warn!(
+            "delete_current_app_cli_agent_session: failed to clear pinned state for {snapshot_id}: {error}"
+        );
+    }
+    Ok(())
 }
 
 /// Returns whether the on-disk JSONL backing an `external:{agent}:{hex}` snapshot
@@ -291,11 +296,8 @@ fn write_session_user_state(state: &SessionUserState) -> Result<(), String> {
     }
     let contents = serde_json::to_string_pretty(&sanitize_session_user_state(state.clone()))
         .map_err(|error| format!("failed to encode session user state: {error}"))?;
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, contents)
-        .map_err(|error| format!("failed to write {}: {error}", tmp.display()))?;
-    fs::rename(&tmp, &path)
-        .map_err(|error| format!("failed to replace {}: {error}", path.display()))
+    fs::write(&path, contents)
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))
 }
 
 pub(crate) fn scan_claude_sessions(home_dir: &Path, limit: usize) -> Vec<IndexedSession> {
@@ -536,7 +538,12 @@ fn path_from_external_session_snapshot_id(snapshot_id: &str) -> Option<PathBuf> 
 
 fn delete_codex_session_index_entry(snapshot_id: &str) -> Result<(), String> {
     remove_codex_session_index_entry(snapshot_id)?;
-    set_session_pinned(snapshot_id, false)
+    if let Err(error) = set_session_pinned(snapshot_id, false) {
+        log::warn!(
+            "delete_codex_session_index_entry: failed to clear pinned state for {snapshot_id}: {error}"
+        );
+    }
+    Ok(())
 }
 
 fn remove_codex_session_index_entry(snapshot_id: &str) -> Result<String, String> {

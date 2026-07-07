@@ -102,9 +102,13 @@ impl SshTransport {
 
     fn remote_proxy_command(&self) -> String {
         let binary = remote_server::setup::remote_server_binary();
+        let channel = warp_core::channel::ChannelState::channel().to_string();
         let identity_key = self.auth_context.remote_server_identity_key();
+        let quoted_channel = shell_words::quote(&channel);
         let quoted_identity_key = shell_words::quote(&identity_key);
-        format!("{binary} environment-runtime-proxy --identity-key {quoted_identity_key}")
+        format!(
+            "ASHIDE_CHANNEL={quoted_channel} {binary} environment-runtime-proxy --identity-key {quoted_identity_key}"
+        )
     }
 }
 
@@ -392,6 +396,7 @@ mod tests {
 
         let command = transport.remote_proxy_command();
 
+        assert!(command.starts_with("ASHIDE_CHANNEL="));
         assert!(command.contains("environment-runtime-proxy --identity-key"));
         assert!(command.contains("'user id/with spaces'"));
     }

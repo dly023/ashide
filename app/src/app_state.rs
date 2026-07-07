@@ -552,10 +552,20 @@ impl WorkspaceSessionSnapshot {
                 }
             }
 
+            let source_was_consumed_by_live = consumed_live_key.is_some();
             let logical_key = consumed_live_key.unwrap_or_else(|| source.logical_key());
             let source_is_live = source.is_live_container();
             source.is_active = source_is_live && source.is_active;
-            source.is_pinned = source.is_pinned || source.is_pinned_by(pinned_session_ids);
+            // A live tab is a physical container. Durable agent/conversation pin
+            // keys belong to virtual/history rows and must not make the live tab
+            // look newly pinned just because the user clicked Resume/Focus. That
+            // was especially visible for remote Environment sessions: every
+            // materialized row whose durable key existed in remote user-state
+            // jumped into the pinned group. Consumed virtual rows also must not
+            // transfer their pinned state onto the live container.
+            if !source_is_live && !source_was_consumed_by_live {
+                source.is_pinned = source.is_pinned || source.is_pinned_by(pinned_session_ids);
+            }
 
             if let Some(index) = keys.get(&logical_key).copied() {
                 let existing = &mut sessions[index];
@@ -602,7 +612,7 @@ impl WorkspaceSessionSnapshot {
             right
                 .is_pinned
                 .cmp(&left.is_pinned)
-                .then_with(|| left.updated_at_unix_ms.cmp(&right.updated_at_unix_ms))
+                .then_with(|| right.updated_at_unix_ms.cmp(&left.updated_at_unix_ms))
                 .then_with(|| {
                     left.label
                         .as_deref()

@@ -3040,6 +3040,195 @@ fn test_session_navigator_activation_never_reuses_current_terminal_for_resume() 
                 Some("Codex history target".to_string()),
                 "restoring a CLI-agent session must carry the indexed/restored title into the live tab title fallback"
             );
+
+            let user_state = workspace.workspace_session_user_state_for_authority(
+                &workspace.current_environment_authority_key(ctx),
+            );
+            assert!(
+                user_state.pinned.is_empty(),
+                "resuming a session must not persist a pinned state mutation"
+            );
+            let resumed_rows = workspace
+                .session_navigator_sessions(ctx)
+                .into_iter()
+                .filter(|session| {
+                    session.cli_agent_session_id.as_deref() == Some("codex-history-switch-target")
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                resumed_rows.iter().all(|session| !session.is_pinned),
+                "resuming a session must not make the materialized live row appear pinned"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_session_navigator_resume_preserves_clicked_row_position_without_prior_reconcile() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let first = test_session_navigator_order_session("order-key-resume-a", "A", 10);
+            let second = test_session_navigator_order_session("order-key-resume-b", "B", 20);
+            let third = test_session_navigator_order_session("order-key-append-c", "C", 30);
+            let target = WorkspaceSessionActionTarget::new(
+                second.id.clone(),
+                second.environment_authority_key.clone(),
+            );
+            workspace.restored_workspace_sessions.push(first);
+            workspace.restored_workspace_sessions.push(second);
+            workspace.restored_workspace_sessions.push(third);
+
+            assert_eq!(
+                test_session_navigator_displayed_order(workspace, ctx),
+                vec![
+                    "order-key-append-c",
+                    "order-key-resume-b",
+                    "order-key-resume-a"
+                ],
+                "baseline order should match the list the user sees before clicking resume"
+            );
+
+            workspace.activate_restored_workspace_session(&target, ctx);
+
+            let order_after_resume = workspace
+                .session_navigator_sessions(ctx)
+                .iter()
+                .filter_map(|session| match session.cli_agent_session_id.as_deref() {
+                    Some("order-key-resume-a-provider-session") => Some("order-key-resume-a"),
+                    Some("order-key-resume-b-provider-session") => Some("order-key-resume-b"),
+                    Some("order-key-append-c-provider-session") => Some("order-key-append-c"),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                order_after_resume,
+                vec![
+                    "order-key-append-c",
+                    "order-key-resume-b",
+                    "order-key-resume-a"
+                ],
+                "resuming a middle row must not move it to the pinned/top position"
+            );
+            let user_state = workspace.workspace_session_user_state_for_authority(
+                &workspace.current_environment_authority_key(ctx),
+            );
+            assert!(
+                user_state.pinned.is_empty(),
+                "resuming a row must not persist pinned state"
+            );
+            let resumed_rows = workspace
+                .session_navigator_sessions(ctx)
+                .into_iter()
+                .filter(|session| {
+                    session.cli_agent_session_id.as_deref()
+                        == Some("order-key-resume-b-provider-session")
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                resumed_rows.iter().all(|session| !session.is_pinned),
+                "resuming a row must not render it as pinned"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_environment_runtime_resume_preserves_clicked_row_position() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let server = test_ssh_server_for_environment_tests();
+            let environment = crate::workspace::environment_provider::source_saved_ssh::runtime_transport_snapshot(
+                "dnyx216".to_string(),
+                &server,
+                Some("/root/project".to_string()),
+                EnvironmentLifecycleState::Connected,
+            );
+            let authority = environment.authority_key.clone();
+            let session_id = CoreSessionId::from(9921);
+            workspace.environments_mut().mark_connecting(
+                environment.clone(),
+                session_id,
+                PathBuf::from("/tmp/ashide-test-ssh-control-remote-order.sock"),
+            );
+            workspace
+                .environments_mut()
+                .mark_connected_session(session_id, HostId::new("remote-order-host".to_string()));
+            workspace.set_active_tab_environment(environment);
+
+            let make_session = |id: &str, label: &str, provider_session_id: &str| {
+                WorkspaceSessionSnapshot {
+                    id: id.to_string(),
+                    kind: WorkspaceSessionKind::AgentTerminal,
+                    label: Some(label.to_string()),
+                    environment_authority_key: Some(authority.clone()),
+                    cwd: Some("/root/project".to_string()),
+                    startup_directory: None,
+                    cli_agent: Some(CLIAgent::Codex.to_serialized_name()),
+                    cli_command: Some("codex".to_string()),
+                    cli_agent_origin: Some(CliAgentSessionOrigin::PluginObserved),
+                    conversation_ids: Vec::new(),
+                    active_conversation_id: None,
+                    cli_agent_session_id: Some(provider_session_id.to_string()),
+                    is_active: false,
+                    is_pinned: false,
+                    updated_at_unix_ms: None,
+                    is_live_container: false,
+                }
+            };
+
+            let first = make_session("remote-order-a", "A", "remote-order-provider-a");
+            let second = make_session("remote-order-b", "B", "remote-order-provider-b");
+            let third = make_session("remote-order-c", "C", "remote-order-provider-c");
+            let target = WorkspaceSessionActionTarget::new(
+                second.id.clone(),
+                second.environment_authority_key.clone(),
+            );
+            workspace.restored_workspace_sessions.push(first);
+            workspace.restored_workspace_sessions.push(second);
+            workspace.restored_workspace_sessions.push(third);
+
+            let baseline = workspace
+                .session_navigator_sessions(ctx)
+                .iter()
+                .filter_map(|session| match session.cli_agent_session_id.as_deref() {
+                    Some("remote-order-provider-a") => Some("remote-order-a"),
+                    Some("remote-order-provider-b") => Some("remote-order-b"),
+                    Some("remote-order-provider-c") => Some("remote-order-c"),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(baseline, vec!["remote-order-a", "remote-order-b", "remote-order-c"]);
+
+            workspace.activate_restored_workspace_session(&target, ctx);
+
+            let order_after_resume = workspace
+                .session_navigator_sessions(ctx)
+                .iter()
+                .filter_map(|session| match session.cli_agent_session_id.as_deref() {
+                    Some("remote-order-provider-a") => Some("remote-order-a"),
+                    Some("remote-order-provider-b") => Some("remote-order-b"),
+                    Some("remote-order-provider-c") => Some("remote-order-c"),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                order_after_resume,
+                vec!["remote-order-a", "remote-order-b", "remote-order-c"],
+                "resuming a remote Environment row must not move it to the pinned/top position"
+            );
+            let user_state = workspace.workspace_session_user_state_for_authority(&authority);
+            assert!(
+                user_state.pinned.is_empty(),
+                "remote resume must not persist pinned state"
+            );
         });
     });
 }
@@ -3059,7 +3248,7 @@ fn test_session_navigator_refresh_preserves_order_when_resume_updates_timestamp(
             workspace.sync_session_navigator_sessions(ctx);
             assert_eq!(
                 test_session_navigator_displayed_order(workspace, ctx),
-                vec!["order-key-resume-a", "order-key-resume-b"]
+                vec!["order-key-resume-b", "order-key-resume-a"]
             );
 
             workspace.active_restored_workspace_session_key =
@@ -3074,7 +3263,7 @@ fn test_session_navigator_refresh_preserves_order_when_resume_updates_timestamp(
 
             assert_eq!(
                 test_session_navigator_displayed_order(workspace, ctx),
-                vec!["order-key-resume-a", "order-key-resume-b"],
+                vec!["order-key-resume-b", "order-key-resume-a"],
                 "resume/status refresh must not reorder existing Session Navigator rows"
             );
         });
@@ -3096,7 +3285,7 @@ fn test_session_navigator_refresh_preserves_order_when_restore_becomes_live_cont
             workspace.sync_session_navigator_sessions(ctx);
             assert_eq!(
                 test_session_navigator_displayed_order(workspace, ctx),
-                vec!["order-key-resume-a", "order-key-resume-b"]
+                vec!["order-key-resume-b", "order-key-resume-a"]
             );
 
             workspace
@@ -3117,8 +3306,8 @@ fn test_session_navigator_refresh_preserves_order_when_restore_becomes_live_cont
                         _ => None,
                     })
                     .collect::<Vec<_>>(),
-                vec!["materialized-a", "order-key-resume-b"],
-                "clicking/restoring a row must not append it after older rows when the restored snapshot becomes a live container"
+                vec!["order-key-resume-b", "materialized-a"],
+                "clicking/restoring a row must keep the materialized row in its existing durable slot instead of moving it to the top"
             );
         });
     });
@@ -3139,7 +3328,7 @@ fn test_session_navigator_sort_preserves_materialized_order_without_reconcile() 
             workspace.sync_session_navigator_sessions(ctx);
             assert_eq!(
                 test_session_navigator_displayed_order(workspace, ctx),
-                vec!["order-key-resume-a", "order-key-resume-b"]
+                vec!["order-key-resume-b", "order-key-resume-a"]
             );
 
             let mut materialized_first = first;
@@ -3153,8 +3342,8 @@ fn test_session_navigator_sort_preserves_materialized_order_without_reconcile() 
                     .iter()
                     .map(|session| session.id.as_str())
                     .collect::<Vec<_>>(),
-                vec!["tab:99:leaf:0", "order-key-resume-b"],
-                "a restored row that materializes into a live container must keep its old slot even when the render path sorts before display-order reconciliation"
+                vec!["order-key-resume-b", "tab:99:leaf:0"],
+                "a restored row that materializes into a live container must keep its durable slot even when the render path sorts before display-order reconciliation"
             );
         });
     });
@@ -3167,13 +3356,14 @@ fn test_session_navigator_live_row_delete_keeps_materialized_backing_source() {
 
         let workspace = mock_workspace(&mut app);
 
-        workspace.update(&mut app, |workspace, _| {
+        workspace.update(&mut app, |workspace, ctx| {
             let indexed = test_session_navigator_order_session("order-key-resume-a", "A", 10);
             let mut live = indexed.clone();
             live.id = "tab:99:leaf:0".to_string();
             live.is_active = true;
             live.is_live_container = true;
             workspace.indexed_cli_agent_sessions.push(indexed.clone());
+            workspace.restored_workspace_sessions.push(indexed.clone());
 
             assert!(
                 workspace
@@ -3181,6 +3371,65 @@ fn test_session_navigator_live_row_delete_keeps_materialized_backing_source() {
                     .iter()
                     .any(|session| session.id == indexed.id),
                 "deleting a materialized live row must still target the indexed/restored provider source; otherwise the UI reports success but the scan brings the row back"
+            );
+
+            let plan = workspace.workspace_session_delete_plan(live, false);
+            workspace.begin_workspace_session_delete_plan(&plan, ctx);
+
+            assert!(
+                workspace
+                    .session_navigator_sessions(ctx)
+                    .into_iter()
+                    .all(|session| session.id != indexed.id),
+                "accepted deletes must hide all visible aliases of the row immediately; stale indexed/restored sources must not remain as broken restore targets while provider deletion is in flight"
+            );
+
+            workspace.rollback_workspace_session_delete_plan(&plan, ctx);
+            assert!(
+                workspace
+                    .session_navigator_sessions(ctx)
+                    .into_iter()
+                    .any(|session| session.id == indexed.id),
+                "if provider deletion fails, the transient delete tombstone must roll back instead of permanently hiding the source"
+            );
+
+            workspace.begin_workspace_session_delete_plan(&plan, ctx);
+            workspace.finish_workspace_session_delete_plan(&plan, ctx);
+            workspace.sync_session_navigator_sessions(ctx);
+
+            assert!(
+                workspace
+                    .session_navigator_sessions(ctx)
+                    .into_iter()
+                    .all(|session| session.id != indexed.id),
+                "after delete succeeds, cached indexed/restored rows must be removed immediately so the deleted row does not linger as a broken restore target"
+            );
+
+            workspace.restored_workspace_sessions.push(indexed.clone());
+            workspace.sync_session_navigator_sessions(ctx);
+
+            assert!(
+                workspace
+                    .session_navigator_sessions(ctx)
+                    .into_iter()
+                    .all(|session| session.id != indexed.id),
+                "successful delete keeps the durable identity tombstoned, so stale restored/history sources cannot immediately resurrect the deleted row"
+            );
+
+            let mut unrelated_live = test_session_navigator_order_session(
+                "order-key-unrelated-live",
+                "Unrelated",
+                30,
+            );
+            unrelated_live.id = "tab:99:leaf:0".to_string();
+            unrelated_live.cli_agent_session_id = Some("different-provider-session".to_string());
+            unrelated_live.is_live_container = true;
+            let mut sessions = vec![unrelated_live.clone()];
+            workspace.filter_deleting_workspace_sessions(&mut sessions);
+            assert_eq!(
+                sessions.len(),
+                1,
+                "successful delete must release volatile tab identity keys so a later live row reusing tab coordinates is not hidden"
             );
         });
     });
@@ -9603,6 +9852,58 @@ fn test_transferred_ssh_tab_keeps_environment() {
 }
 
 #[test]
+fn test_delete_confirmation_uses_resolved_session_snapshot() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let server = test_ssh_server_for_environment_tests();
+            let environment = crate::workspace::environment_provider::source_saved_ssh::runtime_transport_snapshot(
+                "dnyx216".to_string(),
+                &server,
+                Some("/root/project".to_string()),
+                EnvironmentLifecycleState::Connected,
+            );
+            let authority = environment.authority_key.clone();
+            workspace.add_restored_environment_runtime_tab(
+                environment,
+                Some("root@dnyx216".to_string()),
+                ctx,
+            );
+
+            let live_session = workspace
+                .live_workspace_sessions(ctx)
+                .into_iter()
+                .find(|session| {
+                    session.is_active
+                        && session.environment_authority_key.as_deref() == Some(authority.as_str())
+                })
+                .expect("expected active environment live session");
+
+            let plan = workspace.workspace_session_delete_plan(live_session.clone(), true);
+            workspace.begin_workspace_session_delete_plan(&plan, ctx);
+            workspace.delete_workspace_session_for_session(&live_session, ctx);
+        });
+
+        futures_lite::future::yield_now().await;
+
+        workspace.update(&mut app, |workspace, ctx| {
+            assert!(
+                workspace
+                    .session_navigator_sessions(ctx)
+                    .into_iter()
+                    .all(|session| {
+                        session.id != "tab:99:leaf:0"
+                            || session.environment_authority_key.as_deref() != Some("ssh:dnyx216")
+                    }),
+                "confirming delete must remove the resolved live session even after the row has been tombstoned before confirm"
+            );
+        });
+    });
+}
+
+#[test]
 fn test_deleting_only_live_environment_session_keeps_environment_selected() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
@@ -9880,6 +10181,172 @@ fn test_deleting_active_environment_session_does_not_jump_to_next_environment() 
 }
 
 #[test]
+fn test_environment_runtime_live_placeholder_keeps_registered_cli_agent_session_after_tab_switch() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let server = test_ssh_server_for_environment_tests();
+            let environment = crate::workspace::environment_provider::source_saved_ssh::runtime_transport_snapshot(
+                "dnyx216".to_string(),
+                &server,
+                Some("/root/project".to_string()),
+                EnvironmentLifecycleState::Connected,
+            );
+            let authority = environment.authority_key.clone();
+            let terminal_options = test_environment_runtime_pty_options(CoreSessionId::from(9101), ctx);
+            workspace.add_tab_with_pane_layout(
+                PanesLayout::SingleTerminal(Box::new(terminal_options)),
+                Arc::new(HashMap::new()),
+                Some("root@dnyx216".to_string()),
+                ctx,
+            );
+            workspace.apply_active_tab_environment(environment, ctx);
+            let environment_tab_index = workspace.active_tab_index();
+            let terminal_view = workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .active_session_view(ctx)
+                .expect("environment runtime terminal should be active");
+
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                sessions.set_session(
+                    terminal_view.id(),
+                    CLIAgentSession {
+                        agent: CLIAgent::Codex,
+                        status: CLIAgentSessionStatus::InProgress,
+                        session_context: CLIAgentSessionContext {
+                            cwd: Some("/root/project".to_string()),
+                            session_id: Some("codex-remote-live-session".to_string()),
+                            fallback_title: Some("Fixed Remote Codex".to_string()),
+                            ..Default::default()
+                        },
+                        input_state: CLIAgentInputState::Closed,
+                        should_auto_toggle_input: false,
+                        listener: None,
+                        plugin_version: None,
+                        environment_host_key: Some("root@dnyx216".to_string()),
+                        draft_text: None,
+                        custom_command_prefix: Some("codex".to_string()),
+                    },
+                    ctx,
+                );
+            });
+
+            workspace.activate_tab_internal(0, ctx);
+            workspace.activate_tab_internal(environment_tab_index, ctx);
+
+            let live_session = workspace
+                .live_workspace_sessions(ctx)
+                .into_iter()
+                .find(|session| session.environment_authority_key.as_deref() == Some(authority.as_str()))
+                .expect("expected the remote environment live session after switching tabs");
+
+            assert!(
+                live_session.is_live_container,
+                "the row must stay bound to the physical tab/pane live container"
+            );
+            assert_eq!(live_session.kind, WorkspaceSessionKind::AgentTerminal);
+            assert_eq!(
+                live_session.cli_agent_session_id.as_deref(),
+                Some("codex-remote-live-session"),
+                "switching tabs must not degrade the restored CLI-agent pane into a plain environment terminal"
+            );
+            assert_eq!(live_session.cli_agent.as_deref(), Some("Codex"));
+            assert_eq!(live_session.cli_command.as_deref(), Some("codex"));
+            assert_eq!(live_session.label.as_deref(), Some("Fixed Remote Codex"));
+            assert_eq!(
+                Workspace::workspace_session_display_order_key(&live_session),
+                Workspace::workspace_session_logical_key(&live_session),
+                "live rows keep physical identity; durable agent state is bridged through metadata and aliases"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_environment_runtime_live_placeholder_uses_durable_alias_instead_of_environment_name() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let server = test_ssh_server_for_environment_tests();
+            let environment = crate::workspace::environment_provider::source_saved_ssh::runtime_transport_snapshot(
+                "dnyx216".to_string(),
+                &server,
+                Some("/root/project".to_string()),
+                EnvironmentLifecycleState::Connected,
+            );
+            let authority = environment.authority_key.clone();
+            let terminal_options = test_environment_runtime_pty_options(CoreSessionId::from(9102), ctx);
+            workspace.add_tab_with_pane_layout(
+                PanesLayout::SingleTerminal(Box::new(terminal_options)),
+                Arc::new(HashMap::new()),
+                Some("root@dnyx216".to_string()),
+                ctx,
+            );
+            workspace.apply_active_tab_environment(environment, ctx);
+            let terminal_view = workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .active_session_view(ctx)
+                .expect("environment runtime terminal should be active");
+
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                sessions.set_session(
+                    terminal_view.id(),
+                    CLIAgentSession {
+                        agent: CLIAgent::Codex,
+                        status: CLIAgentSessionStatus::InProgress,
+                        session_context: CLIAgentSessionContext {
+                            cwd: Some("/root/project".to_string()),
+                            session_id: Some("codex-remote-live-session".to_string()),
+                            fallback_title: Some("Environment Codex".to_string()),
+                            ..Default::default()
+                        },
+                        input_state: CLIAgentInputState::Closed,
+                        should_auto_toggle_input: false,
+                        listener: None,
+                        plugin_version: None,
+                        environment_host_key: Some("root@dnyx216".to_string()),
+                        draft_text: None,
+                        custom_command_prefix: Some("codex".to_string()),
+                    },
+                    ctx,
+                );
+            });
+
+            let durable_key = format!(
+                "{}::agent:Codex:codex-remote-live-session",
+                WorkspaceSessionSnapshot::logical_environment_key(Some(authority.as_str()))
+            );
+            workspace.environments_mut().set_cli_agent_session_user_state(
+                authority.clone(),
+                crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserState {
+                    aliases: HashMap::from([(durable_key, "固定远程名".to_string())]),
+                    pinned: HashSet::new(),
+                },
+            );
+
+            let session = workspace
+                .session_navigator_sessions(ctx)
+                .into_iter()
+                .find(|session| session.environment_authority_key.as_deref() == Some(authority.as_str()))
+                .expect("expected merged remote live session");
+
+            assert_eq!(session.label.as_deref(), Some("固定远程名"));
+            assert_ne!(
+                session.label.as_deref(),
+                Some("dnyx216"),
+                "clicking or refreshing a materialized remote agent tab must not reset its fixed name to the environment label"
+            );
+        });
+    });
+}
+
+#[test]
 fn test_workspace_session_active_detection_uses_focused_live_pane_when_row_is_stale() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
@@ -9992,6 +10459,120 @@ fn test_deleting_inactive_environment_session_keeps_current_app_selected() {
                         != Some(authority.as_str())
                         || !session.is_active),
                 "inactive Environment delete must not leave or create an active row for the deleted Environment"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_deleting_active_current_app_session_with_neighbor_tab_does_not_create_empty_replacement() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(workspace.tab_count(), 1);
+            let current_app_tab_index = workspace.active_tab_index();
+
+            let server = test_ssh_server_for_environment_tests();
+            let environment = crate::workspace::environment_provider::source_saved_ssh::runtime_transport_snapshot(
+                "dnyx216".to_string(),
+                &server,
+                Some("/root/project".to_string()),
+                EnvironmentLifecycleState::Connected,
+            );
+            let authority = environment.authority_key.clone();
+            workspace.add_restored_environment_runtime_tab(
+                environment,
+                Some("root@dnyx216".to_string()),
+                ctx,
+            );
+            assert_eq!(workspace.tab_count(), 2);
+            workspace.activate_tab_internal(current_app_tab_index, ctx);
+
+            let deleted_session = workspace
+                .live_workspace_sessions(ctx)
+                .into_iter()
+                .find(|session| {
+                    session.is_active
+                        && session.environment_authority_key.as_deref().is_none_or(
+                            crate::workspace::environment_runtime::authority_uses_terminal_bootstrap,
+                        )
+                })
+                .expect("expected active current-app live session");
+
+            workspace.delete_workspace_session_for_session(&deleted_session, ctx);
+
+            assert_eq!(
+                workspace.tab_count(),
+                1,
+                "deleting a current-app live session with an existing neighbor tab must not create an empty replacement tab"
+            );
+            assert_eq!(
+                workspace.tabs[workspace.active_tab_index()]
+                    .environment
+                    .as_ref()
+                    .map(|environment| environment.authority_key.as_str()),
+                Some(authority.as_str())
+            );
+            assert!(
+                workspace.tabs.iter().all(|tab| tab.environment.is_some()),
+                "no replacement current-app tab should be left behind"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_deleting_only_live_current_app_session_creates_replacement_before_close() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(
+                workspace.tab_count(),
+                1,
+                "test starts with exactly one current-app tab"
+            );
+            assert_eq!(
+                workspace.current_environment_snapshot()
+                    .as_ref()
+                    .map(|environment| &environment.kind),
+                Some(&EnvironmentKind::Local)
+            );
+
+            let deleted_session = workspace
+                .live_workspace_sessions(ctx)
+                .into_iter()
+                .find(|session| {
+                    session.is_active
+                        && session.environment_authority_key.as_deref().is_none_or(
+                            crate::workspace::environment_runtime::authority_uses_terminal_bootstrap,
+                        )
+                })
+                .expect("expected active current-app live session");
+
+            workspace.delete_workspace_session_for_session(&deleted_session, ctx);
+
+            assert!(
+                workspace.tab_count() >= 1,
+                "deleting the first/current-app live row must not leave the workspace with no visible tab"
+            );
+            assert_eq!(workspace.active_tab_index(), 0);
+            assert_eq!(
+                workspace.tabs[workspace.active_tab_index()]
+                    .environment
+                    .as_ref()
+                    .map(|environment| &environment.kind),
+                Some(&EnvironmentKind::Local),
+                "delete fallback should keep a replacement current-app tab active instead of letting window close/minimize"
+            );
+            assert_eq!(
+                workspace.current_environment_snapshot()
+                    .as_ref()
+                    .map(|environment| &environment.kind),
+                Some(&EnvironmentKind::Local)
             );
         });
     });

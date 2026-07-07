@@ -27,6 +27,18 @@ use super::{
     WORKSPACE_SESSIONS_REFRESH_TOAST_ID,
 };
 
+#[derive(Debug)]
+pub(super) struct WorkspaceSessionDeletePlan {
+    requested_session: WorkspaceSessionSnapshot,
+    backing_sessions: Vec<WorkspaceSessionSnapshot>,
+    cache_sessions: Vec<WorkspaceSessionSnapshot>,
+    identity_keys: Vec<String>,
+    alias_keys: Vec<String>,
+    pin_keys: Vec<String>,
+    user_state_authority: String,
+    deleted_session_was_active: bool,
+}
+
 impl Workspace {
     pub(super) fn session_navigator_sessions(
         &self,
@@ -74,6 +86,7 @@ impl Workspace {
             });
         let mut sessions =
             WorkspaceSessionSnapshot::merge_for_session_navigator(sources, &user_state.pinned);
+        self.filter_deleting_workspace_sessions(&mut sessions);
         let preferred_active_key =
             self.preferred_active_restored_workspace_session_key_for_sessions(&sessions);
         for session in &mut sessions {
@@ -115,11 +128,10 @@ impl Workspace {
     pub(super) fn workspace_session_display_order_key(
         session: &WorkspaceSessionSnapshot,
     ) -> String {
-        // Display order follows the container identity for live containers, so
-        // source merge keeps treating a materialized session as the live tab.
-        // Restore materialization is bridged in
-        // `reconcile_session_navigator_display_order` by copying the durable
-        // agent/conversation order onto this live-container key.
+        // Live containers keep their physical identity. Materialized restore rows
+        // inherit their old durable order in `reconcile_session_navigator_display_order`,
+        // but the row identity remains the pane/tab container so switching tabs does
+        // not turn an existing live tab back into a resumable virtual row.
         if session.is_live_container() {
             return Self::workspace_session_logical_key(session);
         }
@@ -161,6 +173,69 @@ impl Workspace {
         }
 
         None
+    }
+
+    fn workspace_session_identity_keys(session: &WorkspaceSessionSnapshot) -> Vec<String> {
+        let mut keys = vec![
+            session.id.clone(),
+            Self::workspace_session_logical_key(session),
+        ];
+        if let Some(durable_key) = Self::workspace_session_durable_display_order_key(session) {
+            keys.push(durable_key);
+        }
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    fn workspace_session_volatile_identity_keys(session: &WorkspaceSessionSnapshot) -> Vec<String> {
+        let mut keys = Vec::new();
+        if session.id.starts_with("tab:") {
+            keys.push(session.id.clone());
+        }
+        let logical_key = Self::workspace_session_logical_key(session);
+        if logical_key.contains("::source:tab:") {
+            keys.push(logical_key);
+        }
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    fn workspace_session_identity_keys_for_sessions(
+        sessions: &[WorkspaceSessionSnapshot],
+    ) -> Vec<String> {
+        let mut keys = sessions
+            .iter()
+            .flat_map(Self::workspace_session_identity_keys)
+            .collect::<Vec<_>>();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    fn workspace_session_matches_identity_keys(
+        session: &WorkspaceSessionSnapshot,
+        identity_keys: &HashSet<String>,
+    ) -> bool {
+        Self::workspace_session_identity_keys(session)
+            .into_iter()
+            .any(|key| identity_keys.contains(&key))
+    }
+
+    pub(super) fn filter_deleting_workspace_sessions(
+        &self,
+        sessions: &mut Vec<WorkspaceSessionSnapshot>,
+    ) {
+        if self.deleting_workspace_session_keys.is_empty() {
+            return;
+        }
+        sessions.retain(|session| {
+            !Self::workspace_session_matches_identity_keys(
+                session,
+                &self.deleting_workspace_session_keys,
+            )
+        });
     }
 
     pub(super) fn reconcile_session_navigator_display_order(
@@ -511,6 +586,9 @@ impl Workspace {
             session.id.clone(),
             Self::workspace_session_logical_key(session),
         ];
+        if let Some(durable_key) = Self::workspace_session_durable_display_order_key(session) {
+            keys.push(durable_key);
+        }
         keys.sort();
         keys.dedup();
         keys
@@ -1260,6 +1338,16 @@ impl Workspace {
                     }
                     session.id = format!("tab:{tab_index}:leaf:{pane_index}");
                     session.is_active = focused_pane_index == Some(pane_index);
+                    if let Some(terminal_view) = pane_group
+                        .pane_id_from_index(pane_index)
+                        .and_then(|pane_id| pane_group.terminal_view_from_pane_id(pane_id, ctx))
+                    {
+                        Self::apply_registered_cli_agent_session_to_live_snapshot(
+                            &mut session,
+                            &terminal_view,
+                            ctx,
+                        );
+                    }
                 } else {
                     session.is_active = false;
                 }
@@ -1267,29 +1355,112 @@ impl Workspace {
             }
 
             if let Some(placeholder_leaf_index) = placeholder_leaf_index {
-                sessions.push(WorkspaceSessionSnapshot {
+                let terminal_view = pane_group
+                    .pane_id_from_index(placeholder_leaf_index)
+                    .and_then(|pane_id| pane_group.terminal_view_from_pane_id(pane_id, ctx));
+                let cli_agent_session = terminal_view.as_ref().and_then(|terminal_view| {
+                    CLIAgentSessionsModel::as_ref(ctx)
+                        .session(terminal_view.id())
+                        .cloned()
+                });
+                let label = cli_agent_session
+                    .as_ref()
+                    .and_then(|session| session.session_context.display_title())
+                    .or_else(|| pane_group.custom_title(ctx))
+                    .or_else(|| Some(tab_environment.label.clone()));
+                let cwd = cli_agent_session
+                    .as_ref()
+                    .and_then(|session| session.session_context.cwd.clone())
+                    .or_else(|| tab_environment.active_workspace_root.clone());
+                let cli_agent = cli_agent_session
+                    .as_ref()
+                    .map(|session| session.agent.to_serialized_name());
+                let cli_command = cli_agent_session.as_ref().map(|session| {
+                    session
+                        .custom_command_prefix
+                        .clone()
+                        .unwrap_or_else(|| session.agent.command_prefix().to_string())
+                });
+                let cli_agent_origin = cli_agent_session.as_ref().map(|session| {
+                    if session.listener.is_some() {
+                        crate::app_state::CliAgentSessionOrigin::PluginObserved
+                    } else {
+                        crate::app_state::CliAgentSessionOrigin::CommandDetected
+                    }
+                });
+                let cli_agent_session_id = cli_agent_session
+                    .as_ref()
+                    .and_then(|session| session.session_context.session_id.clone());
+                let mut session = WorkspaceSessionSnapshot {
                     id: format!("tab:{tab_index}:leaf:{placeholder_leaf_index}"),
-                    kind: WorkspaceSessionKind::Terminal,
-                    label: pane_group
-                        .custom_title(ctx)
-                        .or_else(|| Some(tab_environment.label.clone())),
+                    kind: if cli_agent_session.is_some() {
+                        WorkspaceSessionKind::AgentTerminal
+                    } else {
+                        WorkspaceSessionKind::Terminal
+                    },
+                    label,
                     environment_authority_key: Some(tab_environment.authority_key.clone()),
-                    cwd: tab_environment.active_workspace_root.clone(),
+                    cwd,
                     startup_directory: None,
-                    cli_agent: None,
-                    cli_command: None,
-                    cli_agent_origin: None,
+                    cli_agent,
+                    cli_command,
+                    cli_agent_origin,
                     conversation_ids: Vec::new(),
                     active_conversation_id: None,
-                    cli_agent_session_id: None,
+                    cli_agent_session_id,
                     is_active: focused_pane_index == Some(placeholder_leaf_index),
                     is_pinned: false,
                     updated_at_unix_ms: None,
                     is_live_container: true,
-                });
+                };
+                if let Some(terminal_view) = terminal_view.as_ref() {
+                    Self::apply_registered_cli_agent_session_to_live_snapshot(
+                        &mut session,
+                        terminal_view,
+                        ctx,
+                    );
+                }
+                sessions.push(session);
             }
         }
         sessions
+    }
+
+    fn apply_registered_cli_agent_session_to_live_snapshot(
+        session: &mut WorkspaceSessionSnapshot,
+        terminal_view: &ViewHandle<TerminalView>,
+        ctx: &AppContext,
+    ) {
+        let Some(cli_agent_session) = CLIAgentSessionsModel::as_ref(ctx)
+            .session(terminal_view.id())
+            .cloned()
+        else {
+            return;
+        };
+
+        session.kind = WorkspaceSessionKind::AgentTerminal;
+        session.label = cli_agent_session
+            .session_context
+            .display_title()
+            .or_else(|| session.label.clone());
+        session.cwd = cli_agent_session
+            .session_context
+            .cwd
+            .clone()
+            .or_else(|| session.cwd.clone());
+        session.cli_agent = Some(cli_agent_session.agent.to_serialized_name());
+        session.cli_command = Some(
+            cli_agent_session
+                .custom_command_prefix
+                .clone()
+                .unwrap_or_else(|| cli_agent_session.agent.command_prefix().to_string()),
+        );
+        session.cli_agent_origin = Some(if cli_agent_session.listener.is_some() {
+            crate::app_state::CliAgentSessionOrigin::PluginObserved
+        } else {
+            crate::app_state::CliAgentSessionOrigin::CommandDetected
+        });
+        session.cli_agent_session_id = cli_agent_session.session_context.session_id.clone();
     }
 
     // ── 已索引的 CLI-agent 会话（本地 current-app / 各环境）──────────────────
@@ -1410,6 +1581,133 @@ impl Workspace {
 
     pub(super) fn refresh_indexed_cli_agent_sessions(&mut self) {
         self.indexed_cli_agent_sessions = Self::scan_terminal_cli_agent_sessions(80);
+    }
+
+    fn remove_workspace_session_from_cached_sources(
+        &mut self,
+        deleted_sessions: &[WorkspaceSessionSnapshot],
+    ) {
+        self.indexed_cli_agent_sessions.retain(|candidate| {
+            !deleted_sessions
+                .iter()
+                .any(|deleted| Self::is_same_workspace_session(deleted, candidate))
+        });
+        self.environments
+            .retain_indexed_cli_agent_sessions(|candidate| {
+                !deleted_sessions
+                    .iter()
+                    .any(|deleted| Self::is_same_workspace_session(deleted, candidate))
+            });
+        self.restored_workspace_sessions.retain(|candidate| {
+            !deleted_sessions
+                .iter()
+                .any(|deleted| Self::is_same_workspace_session(deleted, candidate))
+        });
+    }
+
+    pub(super) fn workspace_session_delete_plan(
+        &self,
+        session: WorkspaceSessionSnapshot,
+        deleted_session_was_active: bool,
+    ) -> WorkspaceSessionDeletePlan {
+        let backing_sessions = self.backing_sessions_for_workspace_session(&session);
+        let mut cache_sessions = backing_sessions.clone();
+        cache_sessions.push(session.clone());
+
+        let identity_keys = Self::workspace_session_identity_keys_for_sessions(&cache_sessions);
+
+        let mut alias_keys = cache_sessions
+            .iter()
+            .flat_map(Self::workspace_session_alias_keys_for_session)
+            .collect::<Vec<_>>();
+        alias_keys.sort();
+        alias_keys.dedup();
+
+        let pin_keys = cache_sessions
+            .iter()
+            .flat_map(Self::workspace_session_pin_keys)
+            .collect::<Vec<_>>();
+
+        let user_state_authority =
+            crate::workspace::environment_runtime::session_authority_or_terminal_bootstrap(
+                session.environment_authority_key.as_deref(),
+            )
+            .to_owned();
+
+        WorkspaceSessionDeletePlan {
+            requested_session: session,
+            backing_sessions,
+            cache_sessions,
+            identity_keys,
+            alias_keys,
+            pin_keys,
+            user_state_authority,
+            deleted_session_was_active,
+        }
+    }
+
+    pub(super) fn begin_workspace_session_delete_plan(
+        &mut self,
+        plan: &WorkspaceSessionDeletePlan,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.deleting_workspace_session_keys
+            .extend(plan.identity_keys.iter().cloned());
+        self.sync_session_navigator_sessions(ctx);
+    }
+
+    pub(super) fn rollback_workspace_session_delete_plan(
+        &mut self,
+        plan: &WorkspaceSessionDeletePlan,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        for key in &plan.identity_keys {
+            self.deleting_workspace_session_keys.remove(key);
+        }
+        self.sync_session_navigator_sessions(ctx);
+    }
+
+    pub(super) fn finish_workspace_session_delete_plan(
+        &mut self,
+        plan: &WorkspaceSessionDeletePlan,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.remove_workspace_session_from_cached_sources(&plan.cache_sessions);
+        self.clear_workspace_session_delete_plan_user_state(plan, ctx);
+        self.refresh_indexed_cli_agent_sessions();
+        for key in Self::workspace_session_volatile_identity_keys(&plan.requested_session) {
+            self.deleting_workspace_session_keys.remove(&key);
+        }
+        if plan.deleted_session_was_active {
+            self.reselect_workspace_session_after_delete(&plan.requested_session, ctx);
+        } else {
+            self.sync_session_navigator_sessions(ctx);
+        }
+    }
+
+    fn clear_workspace_session_delete_plan_user_state(
+        &mut self,
+        plan: &WorkspaceSessionDeletePlan,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if !plan.pin_keys.is_empty() {
+            if let Err(error) = self.mutate_workspace_session_user_state_for_authority(
+                &plan.user_state_authority,
+                &plan.pin_keys,
+                crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserStateMutation::ClearPinned,
+                ctx,
+            ) {
+                log::warn!("delete_workspace_session: failed to clear pin keys: {error}");
+            }
+        }
+        if let Err(error) = self.mutate_workspace_session_user_state_for_authority(
+            &plan.user_state_authority,
+            &plan.alias_keys,
+            crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserStateMutation::ClearAlias,
+            ctx,
+        ) {
+            log::warn!("delete_workspace_session: failed to clear alias keys: {error}");
+        }
     }
 
     fn prune_restored_workspace_sessions_with_missing_cli_sources(&mut self) {
@@ -1594,7 +1892,11 @@ impl Workspace {
         target: &WorkspaceSessionActionTarget,
         ctx: &mut ViewContext<Self>,
     ) {
-        let Some(session) = self.workspace_session_for_action_target(target, ctx) else {
+        let sessions = self.session_navigator_sessions_for_display_update(ctx);
+        let Some(session) = sessions
+            .into_iter()
+            .find(|session| Self::workspace_session_matches_action_target(session, target))
+        else {
             log::warn!(
                 "activate_restored_workspace_session: missing session {} in {:?}",
                 target.session_id,
@@ -1759,13 +2061,13 @@ impl Workspace {
                 crate::t!("workspace-delete-session-dialog-confirm"),
             )
         };
-        let confirm_target = Self::workspace_session_action_target(&session);
+        let confirm_session = session.clone();
         let dialog = AlertDialogWithCallbacks::for_view(
             dialog_title,
             dialog_message,
             vec![
                 ModalButton::for_view(confirm_label, move |workspace: &mut Workspace, ctx| {
-                    workspace.delete_workspace_session(&confirm_target, ctx);
+                    workspace.delete_workspace_session_for_session(&confirm_session, ctx);
                 }),
                 ModalButton::for_view(crate::t!("common-cancel"), |_: &mut Workspace, _| {}),
             ],
@@ -1774,50 +2076,32 @@ impl Workspace {
         ctx.show_native_platform_modal(dialog);
     }
 
-    pub(super) fn delete_workspace_session(
+    pub(super) fn delete_workspace_session_for_session(
         &mut self,
-        target: &WorkspaceSessionActionTarget,
+        session: &WorkspaceSessionSnapshot,
         ctx: &mut ViewContext<Self>,
     ) {
-        let Some(session) = self.workspace_session_for_action_target(target, ctx) else {
-            log::warn!(
-                "delete_workspace_session: missing session {} in {:?}",
-                target.session_id,
-                target.environment_authority_key
-            );
-            self.show_workspace_session_error_toast("会话不存在，已刷新后请重试".to_owned(), ctx);
-            return;
-        };
-
-        self.clear_workspace_session_restoring(&session);
-        let deleted_session_was_active = self.workspace_session_is_active_selection(&session, ctx);
-        let backing_sessions = self.backing_sessions_for_workspace_session(&session);
-        let mut alias_keys = self.workspace_session_alias_keys(&session);
-        if !self.close_live_workspace_session_for_delete(&session, ctx) {
+        self.clear_workspace_session_restoring(session);
+        let deleted_session_was_active = self.workspace_session_is_active_selection(session, ctx);
+        let plan = self.workspace_session_delete_plan(session.clone(), deleted_session_was_active);
+        if deleted_session_was_active {
+            self.preselect_workspace_session_before_delete(&plan.requested_session, ctx);
+        }
+        if !self.close_live_workspace_session_for_delete(&plan.requested_session, ctx) {
             self.show_workspace_session_error_toast(
                 "无法关闭当前唯一会话窗口，删除已取消".to_owned(),
                 ctx,
             );
+            ctx.notify();
             return;
         }
+        self.begin_workspace_session_delete_plan(&plan, ctx);
 
-        for backing_session in &backing_sessions {
-            alias_keys.extend(Self::workspace_session_alias_keys_for_session(
-                backing_session,
-            ));
-        }
-        alias_keys.sort();
-        alias_keys.dedup();
-
-        // Delete each CLI source in its environment FIRST; only clear Ashide
-        // side-state once the provider delete confirms. Scan results remain
-        // the source of truth, so failed deletes must not hide rows via a UI
-        // side-state filter.
         #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
         {
             let mut seen = HashSet::new();
             let mut mutations = Vec::new();
-            for backing in &backing_sessions {
+            for backing in &plan.backing_sessions {
                 if !seen.insert(backing.id.clone()) {
                     continue;
                 }
@@ -1836,56 +2120,19 @@ impl Workspace {
                 }
             }
 
-            let remove_ids: Vec<String> = backing_sessions.iter().map(|s| s.id.clone()).collect();
-            let pin_keys: Vec<String> = backing_sessions
-                .iter()
-                .flat_map(Self::workspace_session_pin_keys)
-                .collect();
-            let session_for_reselect = session.clone();
-            let user_state_authority =
-                crate::workspace::environment_runtime::session_authority_or_terminal_bootstrap(
-                    session.environment_authority_key.as_deref(),
-                )
-                .to_owned();
-
             let future = async move { futures::future::join_all(mutations).await };
             ctx.spawn(future, move |workspace, results, ctx| {
                 if let Some(error) = results.into_iter().filter_map(Result::err).next() {
                     log::warn!("delete_workspace_session: {error}");
+                    workspace.rollback_workspace_session_delete_plan(&plan, ctx);
                     workspace.show_workspace_session_error_toast(
                         format!("删除会话来源失败，未改动本地状态：{error}"),
                         ctx,
                     );
+                    ctx.notify();
                     return;
                 }
-                let remove_set: HashSet<&str> = remove_ids.iter().map(String::as_str).collect();
-                workspace
-                    .restored_workspace_sessions
-                    .retain(|restored| !remove_set.contains(restored.id.as_str()));
-                if !pin_keys.is_empty() {
-                    if let Err(error) = workspace.mutate_workspace_session_user_state_for_authority(
-                        &user_state_authority,
-                        &pin_keys,
-                        crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserStateMutation::ClearPinned,
-                        ctx,
-                    ) {
-                        log::warn!("delete_workspace_session: failed to clear pin keys: {error}");
-                    }
-                }
-                if let Err(error) = workspace.mutate_workspace_session_user_state_for_authority(
-                    &user_state_authority,
-                    &alias_keys,
-                    crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserStateMutation::ClearAlias,
-                    ctx,
-                ) {
-                    log::warn!("delete_workspace_session: failed to clear alias keys: {error}");
-                }
-                workspace.refresh_indexed_cli_agent_sessions();
-                if deleted_session_was_active {
-                    workspace.reselect_workspace_session_after_delete(&session_for_reselect, ctx);
-                } else {
-                    workspace.sync_session_navigator_sessions(ctx);
-                }
+                workspace.finish_workspace_session_delete_plan(&plan, ctx);
                 workspace.show_workspace_session_success_toast("已永久删除会话".to_owned(), ctx);
                 ctx.notify();
             });
@@ -1895,7 +2142,7 @@ impl Workspace {
         {
             let mut session_source_delete_errors = Vec::new();
             let mut seen_source_ids = HashSet::new();
-            for backing_session in &backing_sessions {
+            for backing_session in &plan.backing_sessions {
                 if !seen_source_ids.insert(backing_session.id.clone()) {
                     continue;
                 }
@@ -1920,6 +2167,7 @@ impl Workspace {
                 }
             }
             if let Some(error) = session_source_delete_errors.first() {
+                self.rollback_workspace_session_delete_plan(&plan, ctx);
                 self.show_workspace_session_error_toast(
                     format!("删除会话来源失败，未改动会话状态：{error}"),
                     ctx,
@@ -1928,49 +2176,27 @@ impl Workspace {
                 return;
             }
 
-            let user_state_authority =
-                crate::workspace::environment_runtime::session_authority_or_terminal_bootstrap(
-                    session.environment_authority_key.as_deref(),
-                )
-                .to_owned();
-            let remove_ids = backing_sessions
-                .iter()
-                .map(|session| session.id.as_str())
-                .collect::<HashSet<_>>();
-            self.restored_workspace_sessions
-                .retain(|restored_session| !remove_ids.contains(restored_session.id.as_str()));
-            let pin_keys = backing_sessions
-                .iter()
-                .flat_map(Self::workspace_session_pin_keys)
-                .collect::<Vec<_>>();
-            if !pin_keys.is_empty() {
-                if let Err(error) = self.mutate_workspace_session_user_state_for_authority(
-                    &user_state_authority,
-                    &pin_keys,
-                    crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserStateMutation::ClearPinned,
-                    ctx,
-                ) {
-                    log::warn!("delete_workspace_session: failed to clear pin keys: {error}");
-                }
-            }
-            if let Err(error) = self.mutate_workspace_session_user_state_for_authority(
-                &user_state_authority,
-                &alias_keys,
-                crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserStateMutation::ClearAlias,
-                ctx,
-            ) {
-                log::warn!("delete_workspace_session: failed to clear alias keys: {error}");
-            }
-
-            self.refresh_indexed_cli_agent_sessions();
-            if deleted_session_was_active {
-                self.reselect_workspace_session_after_delete(&session, ctx);
-            } else {
-                self.sync_session_navigator_sessions(ctx);
-            }
+            self.finish_workspace_session_delete_plan(&plan, ctx);
             self.show_workspace_session_success_toast("已永久删除会话".to_owned(), ctx);
             ctx.notify();
         }
+    }
+
+    pub(super) fn delete_workspace_session(
+        &mut self,
+        target: &WorkspaceSessionActionTarget,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(session) = self.workspace_session_for_action_target(target, ctx) else {
+            log::warn!(
+                "delete_workspace_session: missing session {} in {:?}",
+                target.session_id,
+                target.environment_authority_key
+            );
+            self.show_workspace_session_error_toast("会话不存在，已刷新后请重试".to_owned(), ctx);
+            return;
+        };
+        self.delete_workspace_session_for_session(&session, ctx);
     }
 
     pub(super) fn workspace_session_is_active_selection(
@@ -1994,6 +2220,81 @@ impl Workspace {
                                     == locator.pane_id
                         })
                 })
+    }
+
+    fn preselect_workspace_session_before_delete(
+        &mut self,
+        deleted_session: &WorkspaceSessionSnapshot,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        let target_authority =
+            crate::workspace::environment_runtime::session_authority_or_terminal_bootstrap(
+                deleted_session.environment_authority_key.as_deref(),
+            );
+        let deleted_key = Self::workspace_session_logical_key(deleted_session);
+        let deleted_live_tab_index = Self::locator_from_restored_session_id(&deleted_session.id)
+            .and_then(|(tab_index, _)| {
+                self.locator_for_workspace_session_snapshot(deleted_session, ctx)
+                    .map(|_| tab_index)
+            });
+
+        if let Some(locator) = self
+            .live_workspace_sessions(ctx)
+            .into_iter()
+            .filter(|candidate| {
+                Self::session_matches_current_environment(candidate, target_authority)
+                    && Self::workspace_session_logical_key(candidate) != deleted_key
+            })
+            .filter_map(|candidate| self.locator_for_workspace_session_snapshot(&candidate, ctx))
+            .next()
+        {
+            self.focus_pane(locator, ctx);
+            self.sync_session_navigator_sessions(ctx);
+            return true;
+        }
+
+        if let Some(tab_index) = self
+            .tab_index_for_environment_authority(target_authority)
+            .filter(|tab_index| Some(*tab_index) != deleted_live_tab_index)
+        {
+            self.activate_tab(tab_index, ctx);
+            self.sync_session_navigator_sessions(ctx);
+            return true;
+        }
+
+        if crate::workspace::environment_runtime::authority_uses_terminal_bootstrap(
+            target_authority,
+        ) {
+            if let Some(local_tab_index) =
+                self.tabs.iter().enumerate().find_map(|(tab_index, tab)| {
+                    (tab.environment.is_none() && Some(tab_index) != deleted_live_tab_index)
+                        .then_some(tab_index)
+                })
+            {
+                self.activate_tab(local_tab_index, ctx);
+                self.sync_session_navigator_sessions(ctx);
+                return true;
+            }
+
+            let deleting_only_visible_tab = self.tabs.len() == 1
+                && deleted_live_tab_index == Some(self.active_tab_index())
+                && !ContextFlag::CloseWindow.is_enabled();
+            if deleting_only_visible_tab {
+                self.add_explicit_terminal_bootstrap_default_tab(None, ctx);
+                self.sync_session_navigator_sessions(ctx);
+                return true;
+            }
+
+            return false;
+        }
+
+        if self.ensure_environment_tab_for_authority(target_authority, ctx) {
+            self.prepare_active_environment_after_visible_tab_activation(ctx);
+            self.sync_session_navigator_sessions(ctx);
+            return true;
+        }
+
+        false
     }
 
     pub(super) fn reselect_workspace_session_after_delete(
@@ -2030,12 +2331,9 @@ impl Workspace {
             target_authority,
         ) {
             // 删除的是本地 / terminal-bootstrap 会话:它所在的 tab `environment == None`,
-            // `tab_index_for_environment_authority` 永远匹配不到。`close_live_workspace_session_for_delete`
-            // 关掉该 tab 后,标准 close_tab 行为可能已把焦点自动切到相邻的**远程环境** tab。
-            // 若当前激活 tab 已不是本地,把焦点拉回一个本地(environment == None)tab——
-            // 避免「删本地 tab 的会话却跳到其它环境」的回归。
-            // SSTAB-008:若已无任何本地 tab 可回(被删会话独占唯一本地 tab),新开一个本地
-            // terminal-bootstrap tab,绝不把用户留在远程环境 tab 上。
+            // `tab_index_for_environment_authority` 永远匹配不到。若还有其它本地 tab,切回本地;
+            // 若没有,不要在删除完成阶段再凭空创建空 terminal tab。唯一可见 tab 的防关窗兜底
+            // 已在 preselect_workspace_session_before_delete 中处理。
             let active_is_local = self
                 .tabs
                 .get(self.active_tab_index)
@@ -2045,9 +2343,6 @@ impl Workspace {
                     self.tabs.iter().position(|tab| tab.environment.is_none())
                 {
                     self.activate_tab(local_tab_index, ctx);
-                } else {
-                    // 无本地 tab 可回 —— 开一个新的本地 terminal-bootstrap tab。
-                    self.add_explicit_terminal_bootstrap_default_tab(None, ctx);
                 }
             }
         } else {

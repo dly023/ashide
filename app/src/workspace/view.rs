@@ -1487,6 +1487,13 @@ pub struct Workspace {
     /// in this window. This gives the left rail immediate click feedback and
     /// prevents duplicate resume commands while the live tab is being created.
     restoring_workspace_session_keys: HashSet<String>,
+    /// Session Navigator identities that are being permanently deleted. The
+    /// navigator is assembled from live panes, local indexes, remote indexes,
+    /// restored metadata, and historical conversations; while provider deletes
+    /// are in flight, stale sources may still be present. Keep one tombstone set
+    /// at the display boundary so deleted rows disappear immediately without
+    /// making every source cache responsible for UI correctness.
+    deleting_workspace_session_keys: HashSet<String>,
     /// Logical row that should receive the transient Session Navigator active
     /// highlight while a restore is being materialized. This is deliberately
     /// single-value: keepalive/live-state belongs to panes/runtimes, not to the
@@ -3678,6 +3685,7 @@ impl Workspace {
             next_session_navigator_display_order: 0,
             workspace_sessions_refresh_state: WorkspaceSessionsRefreshState::default(),
             restoring_workspace_session_keys: HashSet::new(),
+            deleting_workspace_session_keys: HashSet::new(),
             active_restored_workspace_session_key: None,
             suppress_detach_panes_on_window_close: false,
             is_tab_drag_preview: false,

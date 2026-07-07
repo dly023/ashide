@@ -1305,10 +1305,17 @@ pub(crate) async fn run_environment_cli_agent_session_source_action(
                 crate::environment_runtime_transport::proto::mutate_cli_agent_session_response::Result::Error(
                     error,
                 ),
-            ) => Err(format!(
-                "environment session source action failed: {}",
-                error.message
-            )),
+            ) => {
+                let message = error.message;
+                if environment_file_missing_error(&message) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "environment session source action failed: {}",
+                        message
+                    ))
+                }
+            }
         })
 }
 
@@ -1671,7 +1678,7 @@ pub(crate) async fn scan_environment_cli_agent_sessions(
             })
         })
         .collect::<Vec<_>>();
-    records.sort_by(|left, right| left.modified_ms.cmp(&right.modified_ms));
+    records.sort_by(|left, right| right.modified_ms.cmp(&left.modified_ms));
     Ok(records)
 }
 
@@ -2590,6 +2597,15 @@ mod tests {
         assert_eq!(target.source, "/root/.codex/sessions/session.jsonl");
         assert_eq!(target.agent, Some(CLIAgent::Codex));
         assert_eq!(target.provider_session_id, Some("codex-session".to_owned()));
+    }
+
+    #[test]
+    fn runtime_session_source_delete_treats_missing_source_as_success() {
+        let error = "session source file not found";
+        assert!(
+            environment_file_missing_error(error),
+            "delete should classify missing sources as already gone"
+        );
     }
 
     #[test]

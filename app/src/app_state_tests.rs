@@ -628,7 +628,43 @@ fn test_session_navigator_ignores_volatile_tab_pin_keys() {
 }
 
 #[test]
-fn test_session_navigator_uses_stable_agent_pin_key_for_resumed_tab() {
+fn test_session_navigator_consumed_live_row_does_not_inherit_virtual_pin_state() {
+    let live_source = test_workspace_session_in_environment(
+        "tab:7:leaf:0",
+        Some("Codex"),
+        Some("remote-session-1"),
+        true,
+        None,
+        Some("ssh:dnyx216"),
+    );
+    let indexed_source = test_workspace_session_in_environment(
+        "remote-index:codex-session-1",
+        Some("Codex"),
+        Some("remote-session-1"),
+        false,
+        Some(100),
+        Some("ssh:dnyx216"),
+    );
+    let mut pinned_ids = std::collections::HashSet::new();
+    pinned_ids.insert("ssh:dnyx216::agent:Codex:remote-session-1".to_string());
+
+    let sessions = WorkspaceSessionSnapshot::merge_for_session_navigator(
+        vec![live_source, indexed_source],
+        &pinned_ids,
+    );
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, "tab:7:leaf:0");
+    assert!(sessions[0].is_active);
+    assert!(sessions[0].is_live_container());
+    assert!(
+        !sessions[0].is_pinned,
+        "a consumed indexed/virtual row must not make its materialized live tab look pinned just because a durable agent pin key exists"
+    );
+}
+
+#[test]
+fn test_session_navigator_ignores_stable_agent_pin_key_for_live_tab() {
     let live_agent = test_workspace_session(
         "tab:4:leaf:0",
         Some("Codex"),
@@ -643,7 +679,10 @@ fn test_session_navigator_uses_stable_agent_pin_key_for_resumed_tab() {
         WorkspaceSessionSnapshot::merge_for_session_navigator(vec![live_agent], &pinned_ids);
 
     assert_eq!(sessions.len(), 1);
-    assert!(sessions[0].is_pinned);
+    assert!(
+        !sessions[0].is_pinned,
+        "durable agent pin keys apply to virtual/history rows, not to physical live tabs"
+    );
 }
 
 #[test]
@@ -661,7 +700,7 @@ fn test_session_navigator_keeps_plain_terminal_without_agent() {
 }
 
 #[test]
-fn test_session_navigator_sorts_pinned_then_updated_asc_without_active_jump() {
+fn test_session_navigator_sorts_pinned_then_recent_without_active_jump() {
     let older = test_workspace_session("older", Some("Claude"), Some("older"), false, Some(10));
     let newer = test_workspace_session("newer", Some("Claude"), Some("newer"), false, Some(20));
     let active = test_workspace_session("active", Some("Claude"), Some("active"), true, Some(1));
@@ -678,5 +717,5 @@ fn test_session_navigator_sorts_pinned_then_updated_asc_without_active_jump() {
         .iter()
         .map(|session| session.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(ids, vec!["pinned", "active", "older", "newer"]);
+    assert_eq!(ids, vec!["pinned", "newer", "older", "active"]);
 }
