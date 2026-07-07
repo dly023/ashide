@@ -557,8 +557,19 @@ fn remove_codex_session_index_entry(snapshot_id: &str) -> Result<String, String>
     }
     let home_dir = dirs::home_dir().ok_or_else(|| "home directory is unavailable".to_owned())?;
     let index_path = home_dir.join(".codex/session_index.jsonl");
-    let contents = fs::read_to_string(&index_path)
-        .map_err(|error| format!("failed to read {}: {error}", index_path.display()))?;
+    let contents = match fs::read_to_string(&index_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            log::info!(
+                "codex session index already absent during delete: {}",
+                index_path.display()
+            );
+            return Ok(String::new());
+        }
+        Err(error) => {
+            return Err(format!("failed to read {}: {error}", index_path.display()));
+        }
+    };
     let mut removed_line = None;
     let mut kept_lines = Vec::new();
     for line in contents.lines() {
@@ -572,10 +583,11 @@ fn remove_codex_session_index_entry(snapshot_id: &str) -> Result<String, String>
         }
     }
     let Some(removed_line) = removed_line else {
-        return Err(format!(
-            "session {session_id} not found in {}",
+        log::info!(
+            "session {session_id} already absent in {} during delete",
             index_path.display()
-        ));
+        );
+        return Ok(String::new());
     };
     let mut rewritten = kept_lines.join("\n");
     if !rewritten.is_empty() {
@@ -716,6 +728,20 @@ mod tests {
         );
 
         cleanup_test_dir(&projects_dir);
+    }
+
+    #[test]
+    fn delete_codex_index_entry_treats_missing_session_as_success() {
+        ensure_session_user_state_dir();
+        let unique = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let session_id = format!("ashide-test-missing-{unique}");
+        let snapshot_id = external_index_session_snapshot_id(CLIAgent::Codex, &session_id);
+
+        // 无论 ~/.codex/session_index.jsonl 是否存在、是否含该 session,
+        // 删除一个不存在的 index 条目都应视为成功
+        // (与 remote 端 cli_agent_sessions.rs 及本文件 jsonl 路径一致)。
+        delete_current_app_cli_agent_session(&snapshot_id)
+            .expect("deleting a non-existent codex index entry succeeds");
     }
 
     #[test]

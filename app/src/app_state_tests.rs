@@ -664,6 +664,50 @@ fn test_session_navigator_consumed_live_row_does_not_inherit_virtual_pin_state()
 }
 
 #[test]
+fn test_session_navigator_consumed_live_row_does_not_inherit_preassigned_virtual_pin() {
+    // 模拟生产路径:view.rs::environment_cli_agent_session_records_to_snapshots
+    // 和 cli_agent_session_index.rs 在构建 indexed/virtual row 时就通过
+    // `snapshot.is_pinned = snapshot.is_pinned_by(...)` 预置了 is_pinned=true。
+    // 被 live consume 后,这个预置的 pin 状态不得泄漏到 live container ——
+    // 这正是"远程点击会话自动置顶"的根因。
+    let live_source = test_workspace_session_in_environment(
+        "tab:7:leaf:0",
+        Some("Codex"),
+        Some("remote-session-1"),
+        true,
+        None,
+        Some("ssh:dnyx216"),
+    );
+    let mut indexed_source = test_workspace_session_in_environment(
+        "remote-index:codex-session-1",
+        Some("Codex"),
+        Some("remote-session-1"),
+        false,
+        Some(100),
+        Some("ssh:dnyx216"),
+    );
+    // 关键:模拟 view.rs:9137 / cli_agent_session_index.rs:118 的预赋值
+    indexed_source.is_pinned = true;
+
+    let pinned_ids = std::collections::HashSet::new();
+
+    let sessions = WorkspaceSessionSnapshot::merge_for_session_navigator(
+        vec![live_source, indexed_source],
+        &pinned_ids,
+    );
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, "tab:7:leaf:0");
+    assert!(sessions[0].is_live_container());
+    assert!(
+        !sessions[0].is_pinned,
+        "a consumed indexed row that was pre-assigned is_pinned=true (as the \
+         production snapshot builders do) must not transfer that pin state \
+         onto its materialized live tab"
+    );
+}
+
+#[test]
 fn test_session_navigator_ignores_stable_agent_pin_key_for_live_tab() {
     let live_agent = test_workspace_session(
         "tab:4:leaf:0",

@@ -556,14 +556,21 @@ impl WorkspaceSessionSnapshot {
             let logical_key = consumed_live_key.unwrap_or_else(|| source.logical_key());
             let source_is_live = source.is_live_container();
             source.is_active = source_is_live && source.is_active;
-            // A live tab is a physical container. Durable agent/conversation pin
-            // keys belong to virtual/history rows and must not make the live tab
-            // look newly pinned just because the user clicked Resume/Focus. That
-            // was especially visible for remote Environment sessions: every
-            // materialized row whose durable key existed in remote user-state
-            // jumped into the pinned group. Consumed virtual rows also must not
-            // transfer their pinned state onto the live container.
-            if !source_is_live && !source_was_consumed_by_live {
+            // live tab 是物理容器。durable agent/conversation pin key 属于
+            // virtual/history row,不应因为用户点了 Resume/Focus 就让 live tab
+            // 看起来被新钉住。这在远程 Environment 会话上尤其明显:每个 durable
+            // key 存在于远程 user-state 的物化 row 都会跳进 pinned 组。被 consume
+            // 的 virtual row 也不能把 pinned 状态转移到 live 容器上。
+            //
+            // virtual/indexed row 在构建时就被预置 is_pinned=true
+            // (view.rs::environment_cli_agent_session_records_to_snapshots /
+            // cli_agent_session_index.rs,通过 `snapshot.is_pinned = is_pinned_by(...)`)。
+            // 只拦截 is_pinned_by 重查是不够的:被 consume 的 row 已经带着
+            // is_pinned=true,仍会经由下方 `existing.is_pinned |= source.is_pinned`
+            // 泄漏到 live 容器。在此强制清零。
+            if source_was_consumed_by_live {
+                source.is_pinned = false;
+            } else if !source_is_live {
                 source.is_pinned = source.is_pinned || source.is_pinned_by(pinned_session_ids);
             }
 
@@ -608,6 +615,11 @@ impl WorkspaceSessionSnapshot {
             sessions.push(source);
         }
 
+        // 首次排序:pinned 优先,其余按最近更新时间(updated_at 降序)。
+        // 这决定 reconcile 分配 display_order 的初始顺序——最近更新的行
+        // 获得更小 order 号,在 Session Navigator 中排前面。之后
+        // sort_session_navigator_sessions_by_display_order 用 display_order
+        // 稳定排序,保证 refresh/resume 不乱跳(updated_at 变化不重排)。
         sessions.sort_by(|left, right| {
             right
                 .is_pinned

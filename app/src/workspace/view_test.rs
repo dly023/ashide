@@ -3468,8 +3468,8 @@ fn test_session_navigator_refresh_appends_new_rows_after_existing_order() {
             assert_eq!(
                 test_session_navigator_displayed_order(workspace, ctx),
                 vec![
-                    "order-key-append-a",
                     "order-key-append-b",
+                    "order-key-append-a",
                     "order-key-append-c"
                 ],
                 "manual refresh should reconcile rows and append newly discovered sessions"
@@ -3596,8 +3596,8 @@ fn test_session_navigator_refresh_preserves_temporarily_hidden_order_keys() {
             assert_eq!(
                 test_session_navigator_displayed_order(workspace, ctx),
                 vec![
-                    "order-key-hidden-a",
                     "order-key-hidden-b",
+                    "order-key-hidden-a",
                     "order-key-hidden-c"
                 ],
                 "a row returning after a tab/environment switch must regain its original slot instead of drifting after newer rows"
@@ -3638,7 +3638,7 @@ fn test_session_navigator_pin_only_changes_group_not_display_order() {
             workspace.sync_session_navigator_sessions(ctx);
             assert_eq!(
                 test_session_navigator_displayed_order(workspace, ctx),
-                vec!["order-key-pin-a", "order-key-pin-b", "order-key-pin-c"]
+                vec!["order-key-pin-c", "order-key-pin-b", "order-key-pin-a"]
             );
 
             workspace
@@ -3650,7 +3650,7 @@ fn test_session_navigator_pin_only_changes_group_not_display_order() {
             workspace.sync_session_navigator_sessions(ctx);
             assert_eq!(
                 test_session_navigator_displayed_order(workspace, ctx),
-                vec!["order-key-pin-b", "order-key-pin-a", "order-key-pin-c"],
+                vec!["order-key-pin-b", "order-key-pin-c", "order-key-pin-a"],
                 "pin should move the row into the pinned group without reallocating order"
             );
 
@@ -3663,7 +3663,7 @@ fn test_session_navigator_pin_only_changes_group_not_display_order() {
             workspace.sync_session_navigator_sessions(ctx);
             assert_eq!(
                 test_session_navigator_displayed_order(workspace, ctx),
-                vec!["order-key-pin-a", "order-key-pin-b", "order-key-pin-c"],
+                vec!["order-key-pin-c", "order-key-pin-b", "order-key-pin-a"],
                 "unpin should return the row to its original unpinned position"
             );
         });

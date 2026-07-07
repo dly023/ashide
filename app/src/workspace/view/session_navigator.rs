@@ -328,6 +328,10 @@ impl Workspace {
                     },
                 )
                 .then_with(|| left_order.cmp(&right_order))
+                // order 相同时(典型场景:尚未 sync/reconcile,所有行 order=MAX)
+                // 按 updated_at 降序——"最近更新排前面"。这是首次显示的初始顺序;
+                // sync 后 reconcile 分配稳定 order,此 fallback 不再生效。
+                .then_with(|| right.updated_at_unix_ms.cmp(&left.updated_at_unix_ms))
                 .then_with(|| left_original_position.cmp(&right_original_position))
                 .then_with(|| {
                     left.label
