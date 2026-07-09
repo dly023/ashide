@@ -1,0 +1,162 @@
+# Ashide Session Navigator 语义规范
+#
+# 这是 Session Navigator 排序、合并、置顶、删除、生命周期行为的唯一权威定义。
+# 代码实现 (app_state.rs / session_navigator.rs / cli_agent_session_index.rs)
+# 和所有测试 (app_state_tests.rs / view_test.rs) 必须与此 spec 一致。
+# 当 spec 与代码冲突时,以 spec 为准;修改行为先改 spec 再改代码。
+#
+# 版本: 2  (v1 = codex commit 8aef2d2 的隐式语义,已废弃)
+
+spec_version: 2
+last_updated: "2026-01-08"
+
+# ─────────────────────────────────────────────────────────
+# 1. 容器模型 (Container Model)
+# ─────────────────────────────────────────────────────────
+container_model:
+  live_container:
+    description: "由真实 pane 支撑的会话 (from_tabs 产出, id=tab:X:leaf:Y)"
+    identity: "物理身份 source:tab:X:leaf:Y,不随 agent 变化"
+    is_live_container: true
+    is_pinned_initial: false  # live container 永不预赋值 pin
+    pin_inheritance: "不继承 durable pin key —— 即使用户 pin 了 durable 行,
+      物化到 live tab 后 tab 本身不被 pin"
+
+  virtual_container:
+    description: "无真实 pane 支撑的会话 (restored / indexed / historical)"
+    identity: "durable 身份 agent:{agent}:{session_id} 或 conversation:{id}"
+    is_live_container: false
+    is_pinned_initial: "由 snapshot 构建器通过 is_pinned_by(&pinned_set) 预赋值"
+    pin_inheritance: "virtual row 保留自己的 pin 状态,直到被 live consume"
+
+  consume_rule:
+    description: "virtual row 的 binding (agent session id 或 conversation id)
+      匹配到 live container 时,被 consume (合并到 live row,不单独显示)"
+    pin_transfer: "被 consume 的 virtual row 强制 is_pinned=false,
+      其 pin 状态不泄漏到 live container"
+
+# ─────────────────────────────────────────────────────────
+# 2. 排序意图链 (Sort Intent Chain)
+# ─────────────────────────────────────────────────────────
+# 排序由 sort_session_navigator_sessions_by_display_order 执行。
+# 多个排序键按优先级从高到低排列,前一个相等才比下一个。
+# 这是最终权威 —— 任何关于"行应该排在哪里"的争议都对照此链。
+sort_intent_chain:
+  - key: "is_pinned (降序)"
+    intent: "pinned 行优先,始终排在 unpinned 行前面"
+    applies_when: "always"
+
+  - key: "display_order (升序)"
+    intent: "同 pin 组内按稳定序号排序。序号由 reconcile 分配,
+      一旦分配不因 updated_at 变化而重排"
+    applies_when: "已 sync/reconcile 的行"
+    fallback_when_empty: "order=u64::MAX (未分配),回退到下一个 key"
+
+  - key: "same_window_split_group (升序)"
+    intent: "同一 tab 的 split pane 相邻"
+    applies_when: "id 可解析为 tab:X:leaf:Y"
+
+  - key: "display_order (升序, 再比一次)"
+    intent: "group order 相同时用行自身 order"
+    applies_when: "always"
+
+  - key: "updated_at_unix_ms (降序)"
+    intent: "最近更新排前面 —— 仅在 order 未分配时生效(首次显示,尚未 sync)"
+    applies_when: "order == u64::MAX (所有行都未 reconcile)"
+
+  - key: "original_position (升序)"
+    intent: "merge 后的原始位置作为最终 tiebreaker"
+    applies_when: "always"
+
+  - key: "label (升序)"
+    intent: "字典序标签兜底"
+    applies_when: "always"
+
+  - key: "id (升序)"
+    intent: "最终确定性兜底"
+    applies_when: "always"
+
+# ─────────────────────────────────────────────────────────
+# 3. display_order 分配策略 (Reconcile Strategy)
+# ─────────────────────────────────────────────────────────
+reconcile_strategy:
+  description: "reconcile_session_navigator_display_order 负责为新行分配稳定序号"
+  allocation_order: "按 pinned 优先 + updated_at 降序排序后,依次分配递增序号"
+  not_depends_on: "不依赖 merge_for_session_navigator 的输出顺序
+    (merge 不排序,只合并去重)"
+  existing_row: "已有 order 的行跳过 (contains_key 检查)"
+  durable_bridging: "新行先查 durable key 是否已有 order (从 virtual 物化为 live
+    时继承旧序号);都没有才分配 next_session_navigator_display_order"
+
+# ─────────────────────────────────────────────────────────
+# 4. display_order 键策略 (Key Strategy)
+# ─────────────────────────────────────────────────────────
+# 用 SessionDisplayOrderStrategy 枚举显式决定,不靠字符串隐式相等。
+key_strategy:
+  Physical:
+    description: "live container"
+    primary_key: "logical_key (source:tab:X:leaf:Y)"
+    durable_key: "agent:{agent}:{session_id} (如果有的话,用于继承旧序号)"
+    order_lookup: "min(primary_order, durable_order) —— 继承 virtual 时期的序号"
+
+  Durable:
+    description: "virtual row 有 agent session id 或 conversation id"
+    primary_key: "durable_key (== primary_key, 两者相同)"
+    order_lookup: "只查一次 primary_key"
+
+  Bridged:
+    description: "virtual row 无 agent/conversation 绑定"
+    primary_key: "logical_key (fallback)"
+    order_lookup: "只查一次 primary_key"
+
+# ─────────────────────────────────────────────────────────
+# 5. merge_for_session_navigator 职责
+# ─────────────────────────────────────────────────────────
+merge_responsibility:
+  does:
+    - "合并去重:按 logical_key 合并同源行"
+    - "consume:virtual row 的 binding 匹配 live container 时合并到 live row"
+    - "pin 守卫:被 consume 的 virtual row 强制 is_pinned=false"
+    - "pin 补齐:未被 consume 的 virtual row 执行 is_pinned_by 补齐"
+  does_not:
+    - "排序 —— merge 不排序,返回 sources 原始顺序"
+    - "分配 display_order —— 由 reconcile 负责"
+
+# ─────────────────────────────────────────────────────────
+# 6. 删除语义 (Delete Semantics)
+# ─────────────────────────────────────────────────────────
+delete_semantics:
+  source_not_found: "视为成功 (Ok) —— source/session 文件或 index 条目不存在
+    说明已被删除,不报错不 rollback"
+  pinned_state_clear_failure: "只 log::warn,不阻断删除"
+  session_state_write_failure: "返回 Err 但不 panic —— tmp rename 的
+    NotFound 等视为可恢复"
+  navigator_cache_cleanup: "删除中的 session 从 deleting_workspace_session_keys
+    过滤,避免删完又冒回来"
+
+# ─────────────────────────────────────────────────────────
+# 7. 标签名解析 (Label Resolution)
+# ─────────────────────────────────────────────────────────
+label_resolution:
+  priority_chain:
+    - "durable alias (user_state.aliases, 通过 durable key 查找)"
+    - "display_title (agent session 的 query → summary → fallback_title)"
+    - "custom_title (pane group 自定义标题)"
+    - "environment_label (环境名,最后兜底)"
+  remote_specific: "远程 placeholder/materialized row 回填 cli_agent_session_id 后,
+    durable key 可算 → alias 可查 → 覆盖环境名"
+
+# ─────────────────────────────────────────────────────────
+# 8. 测试约束 (Test Constraints)
+# ─────────────────────────────────────────────────────────
+test_constraints:
+  isolation: "所有测试用 tempfile::TempDir 隔离,不触碰真实 ~/.claude ~/.codex"
+  snapshot_helper:
+    test_workspace_session_in_environment: "is_live_container 由 id.starts_with('tab:')
+      决定,不由 is_active 推断 —— 与生产 from_tabs 一致"
+    test_indexed_session_snapshot: "构建后立即 is_pinned_by 预赋值,
+      模拟 view.rs / cli_agent_session_index.rs 的生产路径"
+  merge_test_rule: "merge 测试断言 sources 原始顺序,不断言排序结果
+    (排序由 reconcile + sort 负责)"
+  sort_test_rule: "排序测试在 view_test.rs 的 session_navigator 测试中验证,
+    覆盖: pin 组切换不重排 / refresh append 不跳 / resume 不跳 / hidden 恢复原位"
