@@ -202,6 +202,20 @@ pub struct WorkspaceSessionSnapshot {
     pub is_live_container: bool,
 }
 
+/// display_order 的键策略。让排序逻辑 match 枚举,而非靠字符串 key 的隐式相等。
+///
+/// - `Physical`: live container,用 `source:tab:...` 物理身份作为 order key。
+/// - `Durable`: virtual row(有 agent session id 或 conversation id),用 durable
+///   key 作为 order key;被 live consume 后,其 durable order 可被 live container
+///   继承以保持原位。
+/// - `Bridged`: virtual row 无 agent/conversation 绑定,fallback 到 logical key。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionDisplayOrderStrategy {
+    Physical,
+    Durable,
+    Bridged,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum WorkspaceSessionLabelQuality {
     Missing,
@@ -456,6 +470,33 @@ impl WorkspaceSessionSnapshot {
         self.is_live_container
     }
 
+    /// 返回该 snapshot 在 display_order 体系中的键策略。
+    ///
+    /// - live container → `Physical`(用 logical_key)
+    /// - virtual row 有 cli_agent_session_id 或 conversation_id → `Durable`
+    /// - 其余 virtual row → `Bridged`(fallback 到 logical_key)
+    ///
+    /// 排序逻辑 match 此枚举决定 primary/durable key 取法,不靠字符串隐式相等。
+    pub fn display_order_strategy(&self) -> SessionDisplayOrderStrategy {
+        if self.is_live_container() {
+            return SessionDisplayOrderStrategy::Physical;
+        }
+        let has_agent_session = self
+            .cli_agent_session_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty());
+        let has_conversation = self
+            .active_conversation_id
+            .iter()
+            .chain(self.conversation_ids.iter())
+            .any(|id| !id.trim().is_empty());
+        if has_agent_session || has_conversation {
+            SessionDisplayOrderStrategy::Durable
+        } else {
+            SessionDisplayOrderStrategy::Bridged
+        }
+    }
+
     pub fn merge_for_session_navigator(
         sources: impl IntoIterator<Item = WorkspaceSessionSnapshot>,
         pinned_session_ids: &HashSet<String>,
@@ -615,25 +656,9 @@ impl WorkspaceSessionSnapshot {
             sessions.push(source);
         }
 
-        // 首次排序:pinned 优先,其余按最近更新时间(updated_at 降序)。
-        // 这决定 reconcile 分配 display_order 的初始顺序——最近更新的行
-        // 获得更小 order 号,在 Session Navigator 中排前面。之后
-        // sort_session_navigator_sessions_by_display_order 用 display_order
-        // 稳定排序,保证 refresh/resume 不乱跳(updated_at 变化不重排)。
-        sessions.sort_by(|left, right| {
-            right
-                .is_pinned
-                .cmp(&left.is_pinned)
-                .then_with(|| right.updated_at_unix_ms.cmp(&left.updated_at_unix_ms))
-                .then_with(|| {
-                    left.label
-                        .as_deref()
-                        .unwrap_or_default()
-                        .cmp(right.label.as_deref().unwrap_or_default())
-                })
-                .then_with(|| left.id.cmp(&right.id))
-        });
-
+        // merge 只负责合并去重 + consume,不排序。首次排序语义(pinned 优先
+        // + updated_at 降序)由 reconcile_session_navigator_display_order
+        // 在分配 display_order 时自行排序实现,不再隐式依赖 merge 的输出顺序。
         sessions
     }
 

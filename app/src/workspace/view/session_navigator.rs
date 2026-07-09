@@ -26,6 +26,7 @@ use super::{
     WorkspaceSessionActionTarget, WorkspaceSessionKind, WorkspaceSessionSnapshot,
     WORKSPACE_SESSIONS_REFRESH_TOAST_ID,
 };
+use crate::app_state::SessionDisplayOrderStrategy;
 
 #[derive(Debug)]
 pub(super) struct WorkspaceSessionDeletePlan {
@@ -128,16 +129,17 @@ impl Workspace {
     pub(super) fn workspace_session_display_order_key(
         session: &WorkspaceSessionSnapshot,
     ) -> String {
-        // Live containers keep their physical identity. Materialized restore rows
-        // inherit their old durable order in `reconcile_session_navigator_display_order`,
-        // but the row identity remains the pane/tab container so switching tabs does
-        // not turn an existing live tab back into a resumable virtual row.
-        if session.is_live_container() {
-            return Self::workspace_session_logical_key(session);
+        // 用枚举显式决定 key 策略,不靠字符串隐式相等。
+        match session.display_order_strategy() {
+            SessionDisplayOrderStrategy::Physical => Self::workspace_session_logical_key(session),
+            SessionDisplayOrderStrategy::Durable => {
+                Self::workspace_session_durable_display_order_key(session)
+                    .unwrap_or_else(|| Self::workspace_session_logical_key(session))
+            }
+            SessionDisplayOrderStrategy::Bridged => {
+                Self::workspace_session_logical_key(session)
+            }
         }
-
-        Self::workspace_session_durable_display_order_key(session)
-            .unwrap_or_else(|| Self::workspace_session_logical_key(session))
     }
 
     fn workspace_session_durable_display_order_key(
@@ -242,7 +244,25 @@ impl Workspace {
         &mut self,
         sessions: &[WorkspaceSessionSnapshot],
     ) {
-        for session in sessions {
+        // 按 pinned 优先 + updated_at 降序排序后再分配 order,不依赖 merge
+        // 的输出顺序。这保证"最近更新的行获得更小 order 号"的语义来自
+        // reconcile 自身,而非隐式继承上游排序——改 merge 不会影响 order 分配。
+        let mut sorted = sessions.to_vec();
+        sorted.sort_by(|left, right| {
+            right
+                .is_pinned
+                .cmp(&left.is_pinned)
+                .then_with(|| right.updated_at_unix_ms.cmp(&left.updated_at_unix_ms))
+                .then_with(|| {
+                    left.label
+                        .as_deref()
+                        .unwrap_or_default()
+                        .cmp(right.label.as_deref().unwrap_or_default())
+                })
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
+        for session in &sorted {
             let order_key = Self::workspace_session_display_order_key(session);
             if self
                 .session_navigator_display_order
@@ -347,18 +367,40 @@ impl Workspace {
         &self,
         session: &WorkspaceSessionSnapshot,
     ) -> u64 {
-        let primary_order = self
-            .session_navigator_display_order
-            .get(&Self::workspace_session_display_order_key(session))
-            .copied();
-        let durable_order = Self::workspace_session_durable_display_order_key(session)
-            .and_then(|key| self.session_navigator_display_order.get(&key).copied());
-
-        match (primary_order, durable_order) {
-            (Some(primary), Some(durable)) => primary.min(durable),
-            (Some(primary), None) => primary,
-            (None, Some(durable)) => durable,
-            (None, None) => u64::MAX,
+        // 用枚举显式决定 primary/durable key 取法,不靠 min 的隐式假设。
+        match session.display_order_strategy() {
+            SessionDisplayOrderStrategy::Physical => {
+                // live container:用 physical key。若该行是从 virtual 物化来的,
+                // 其 durable key(agent/conversation)可能已有 order——继承它
+                // 以保持原位。取 min 让 physical order 不晚于 durable order。
+                let primary = self
+                    .session_navigator_display_order
+                    .get(&Self::workspace_session_display_order_key(session))
+                    .copied();
+                let durable = Self::workspace_session_durable_display_order_key(session)
+                    .and_then(|key| self.session_navigator_display_order.get(&key).copied());
+                match (primary, durable) {
+                    (Some(primary), Some(durable)) => primary.min(durable),
+                    (Some(primary), None) => primary,
+                    (None, Some(durable)) => durable,
+                    (None, None) => u64::MAX,
+                }
+            }
+            SessionDisplayOrderStrategy::Durable => {
+                // virtual row with agent/conversation binding:primary key == durable key,
+                // 只查一次。
+                self.session_navigator_display_order
+                    .get(&Self::workspace_session_display_order_key(session))
+                    .copied()
+                    .unwrap_or(u64::MAX)
+            }
+            SessionDisplayOrderStrategy::Bridged => {
+                // virtual row without binding:fallback 到 logical key。
+                self.session_navigator_display_order
+                    .get(&Self::workspace_session_display_order_key(session))
+                    .copied()
+                    .unwrap_or(u64::MAX)
+            }
         }
     }
 

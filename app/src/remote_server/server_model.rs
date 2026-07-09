@@ -187,14 +187,12 @@ impl PendingFileOps {
     }
 }
 
-#[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
-const TIOCSCTTY_REQUEST: libc::c_int = libc::TIOCSCTTY;
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+// Linux libc::ioctl 的 request 参数是 c_ulong(u64),macOS 是 c_int(i32)。
+// 统一用 c_ulong 以兼容两者——c_ulong 在 macOS 上也能传给 ioctl。
+#[cfg(unix)]
 const TIOCSCTTY_REQUEST: libc::c_ulong = libc::TIOCSCTTY as libc::c_ulong;
 
-#[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
-const TIOCSWINSZ_REQUEST: libc::c_int = libc::TIOCSWINSZ;
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+#[cfg(unix)]
 const TIOCSWINSZ_REQUEST: libc::c_ulong = libc::TIOCSWINSZ as libc::c_ulong;
 
 #[cfg(unix)]

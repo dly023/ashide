@@ -374,6 +374,11 @@ fn test_workspace_session_in_environment(
     updated_at_unix_ms: Option<i64>,
     environment_authority_key: Option<&str>,
 ) -> WorkspaceSessionSnapshot {
+    // 与生产一致:live container 由 id 的 tab: 前缀决定(from_tabs 产出的
+    // snapshot id 都是 tab:X:leaf:Y),不由 is_active 推断。一个 live container
+    // 可以 is_active=false(非聚焦 pane),一个 virtual container 永远
+    // is_live_container=false。
+    let is_live_container = id.starts_with("tab:");
     WorkspaceSessionSnapshot {
         id: id.to_string(),
         kind: if cli_agent.is_some() {
@@ -394,8 +399,35 @@ fn test_workspace_session_in_environment(
         is_active,
         is_pinned: false,
         updated_at_unix_ms,
-        is_live_container: is_active,
+        is_live_container,
     }
+}
+
+/// 构建一个模拟生产路径预赋值 pin 的 indexed/virtual snapshot。
+///
+/// 生产中 `view.rs::environment_cli_agent_session_records_to_snapshots` 和
+/// `cli_agent_session_index.rs` 在构建 snapshot 后立即执行
+/// `snapshot.is_pinned = snapshot.is_pinned_by(&pinned_ids)`。此 helper 复现
+/// 该路径,让测试默认覆盖“virtual row 携带预置 pin 进入 merge”的场景,
+/// 而不是手搓 is_pinned=false 绕过它。
+fn test_indexed_session_snapshot(
+    id: &str,
+    cli_agent: &str,
+    native_session_id: &str,
+    updated_at_unix_ms: Option<i64>,
+    environment_authority_key: Option<&str>,
+    pinned_session_ids: &std::collections::HashSet<String>,
+) -> WorkspaceSessionSnapshot {
+    let mut snapshot = test_workspace_session_in_environment(
+        id,
+        Some(cli_agent),
+        Some(native_session_id),
+        false,
+        updated_at_unix_ms,
+        environment_authority_key,
+    );
+    snapshot.is_pinned = snapshot.is_pinned_by(pinned_session_ids);
+    snapshot
 }
 
 #[test]
@@ -678,18 +710,25 @@ fn test_session_navigator_consumed_live_row_does_not_inherit_preassigned_virtual
         None,
         Some("ssh:dnyx216"),
     );
-    let mut indexed_source = test_workspace_session_in_environment(
+    let mut pinned_ids = std::collections::HashSet::new();
+    pinned_ids.insert("ssh:dnyx216::agent:Codex:remote-session-1".to_string());
+    // 用 test_indexed_session_snapshot 模拟生产预赋值路径:
+    // view.rs::environment_cli_agent_session_records_to_snapshots 和
+    // cli_agent_session_index.rs 在构建 snapshot 后立即
+    // `snapshot.is_pinned = snapshot.is_pinned_by(&pinned_ids)`。
+    let indexed_source = test_indexed_session_snapshot(
         "remote-index:codex-session-1",
-        Some("Codex"),
-        Some("remote-session-1"),
-        false,
+        "Codex",
+        "remote-session-1",
         Some(100),
         Some("ssh:dnyx216"),
+        &pinned_ids,
     );
-    // 关键:模拟 view.rs:9137 / cli_agent_session_index.rs:118 的预赋值
-    indexed_source.is_pinned = true;
-
-    let pinned_ids = std::collections::HashSet::new();
+    // 确认 helper 正确预置了 pin(与生产一致)
+    assert!(
+        indexed_source.is_pinned,
+        "test_indexed_session_snapshot should pre-assign is_pinned via is_pinned_by, matching production"
+    );
 
     let sessions = WorkspaceSessionSnapshot::merge_for_session_navigator(
         vec![live_source, indexed_source],
@@ -744,7 +783,10 @@ fn test_session_navigator_keeps_plain_terminal_without_agent() {
 }
 
 #[test]
-fn test_session_navigator_sorts_pinned_then_recent_without_active_jump() {
+fn test_session_navigator_merge_preserves_source_order_and_marks_pinned() {
+    // merge 不排序,只负责合并去重。排序语义(pinned 优先 + updated_at 降序)
+    // 由 reconcile_session_navigator_display_order 在分配 display_order 时实现。
+    // 这里验证 merge 保持 sources 原始顺序,且 pinned 行被正确标记。
     let older = test_workspace_session("older", Some("Claude"), Some("older"), false, Some(10));
     let newer = test_workspace_session("newer", Some("Claude"), Some("newer"), false, Some(20));
     let active = test_workspace_session("active", Some("Claude"), Some("active"), true, Some(1));
@@ -761,5 +803,20 @@ fn test_session_navigator_sorts_pinned_then_recent_without_active_jump() {
         .iter()
         .map(|session| session.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(ids, vec!["pinned", "newer", "older", "active"]);
+    // sources 原始顺序保留
+    assert_eq!(ids, vec!["older", "newer", "active", "pinned"]);
+    assert!(
+        sessions
+            .iter()
+            .find(|session| session.id == "pinned")
+            .expect("pinned session exists")
+            .is_pinned
+    );
+    assert!(
+        !sessions
+            .iter()
+            .find(|session| session.id == "older")
+            .expect("older session exists")
+            .is_pinned
+    );
 }

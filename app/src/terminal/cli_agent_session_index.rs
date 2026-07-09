@@ -54,43 +54,52 @@ pub(crate) struct IndexedSession {
 pub(crate) fn scan_current_app_cli_agent_sessions(
     limit_per_agent: usize,
 ) -> Vec<WorkspaceSessionSnapshot> {
+    let Some(home_dir) = dirs::home_dir() else {
+        log::warn!("Session Navigator current-app scan skipped: home directory unavailable");
+        return Vec::new();
+    };
+    let config_dir = warp_core::paths::warp_home_config_dir();
+    scan_current_app_cli_agent_sessions_with_dirs(limit_per_agent, &home_dir, config_dir.as_deref())
+}
+
+fn scan_current_app_cli_agent_sessions_with_dirs(
+    limit_per_agent: usize,
+    home_dir: &Path,
+    config_dir: Option<&Path>,
+) -> Vec<WorkspaceSessionSnapshot> {
     if limit_per_agent == 0 {
         return Vec::new();
     }
 
     let mut sessions = Vec::new();
-    if let Some(home_dir) = dirs::home_dir() {
-        let scanned = session_bridge_adapters()
-            .iter()
-            .filter(|adapter| adapter.capabilities.can_scan_current_app_history)
-            .filter_map(|adapter| {
-                adapter
-                    .current_app_scanner
-                    .map(|scanner| (adapter, scanner))
-            })
-            .map(|(adapter, scanner)| {
-                let sessions = scanner(&home_dir, limit_per_agent);
-                log::info!(
-                    "Session Navigator current-app scan found {} {} sessions",
-                    sessions.len(),
-                    adapter.label
-                );
-                sessions
-            })
-            .collect::<Vec<_>>();
-        for agent_sessions in scanned {
-            sessions.extend(agent_sessions);
-        }
-        log::info!(
-            "Session Navigator current-app scan found {} registered SessionBridge sessions",
-            sessions.len()
-        );
-    } else {
-        log::warn!("Session Navigator current-app scan skipped: home directory unavailable");
+    let scanned = session_bridge_adapters()
+        .iter()
+        .filter(|adapter| adapter.capabilities.can_scan_current_app_history)
+        .filter_map(|adapter| {
+            adapter
+                .current_app_scanner
+                .map(|scanner| (adapter, scanner))
+        })
+        .map(|(adapter, scanner)| {
+            let sessions = scanner(home_dir, limit_per_agent);
+            log::info!(
+                "Session Navigator current-app scan found {} {} sessions",
+                sessions.len(),
+                adapter.label
+            );
+            sessions
+        })
+        .collect::<Vec<_>>();
+    for agent_sessions in scanned {
+        sessions.extend(agent_sessions);
     }
+    log::info!(
+        "Session Navigator current-app scan found {} registered SessionBridge sessions",
+        sessions.len()
+    );
 
     sessions.sort_by(|left, right| right.modified.cmp(&left.modified));
-    let pinned_session_ids = pinned_session_ids();
+    let pinned_session_ids = pinned_session_ids_with_config(config_dir);
     sessions
         .into_iter()
         .map(|session| {
@@ -122,13 +131,27 @@ pub(crate) fn scan_current_app_cli_agent_sessions(
 }
 
 pub(crate) fn delete_current_app_cli_agent_session(snapshot_id: &str) -> Result<(), String> {
+    let home_dir = dirs::home_dir().ok_or_else(|| "home directory is unavailable".to_owned())?;
+    let config_dir = warp_core::paths::warp_home_config_dir();
+    delete_current_app_cli_agent_session_with_dirs(
+        snapshot_id,
+        &home_dir,
+        config_dir.as_deref(),
+    )
+}
+
+fn delete_current_app_cli_agent_session_with_dirs(
+    snapshot_id: &str,
+    home_dir: &Path,
+    config_dir: Option<&Path>,
+) -> Result<(), String> {
     if snapshot_id.starts_with("external-index:") {
-        return delete_codex_session_index_entry(snapshot_id);
+        return delete_codex_session_index_entry_with_dirs(snapshot_id, home_dir, config_dir);
     }
 
     let path = path_from_external_session_snapshot_id(snapshot_id)
         .ok_or_else(|| format!("not an indexed CLI agent session id: {snapshot_id}"))?;
-    validate_mutable_session_path_location(&path)?;
+    validate_mutable_session_path_location(&path, home_dir)?;
     match fs::remove_file(&path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -151,7 +174,7 @@ pub(crate) fn delete_current_app_cli_agent_session(snapshot_id: &str) -> Result<
             }
         }
     }
-    if let Err(error) = set_session_pinned(snapshot_id, false) {
+    if let Err(error) = set_session_pinned_with_config(snapshot_id, false, config_dir) {
         log::warn!(
             "delete_current_app_cli_agent_session: failed to clear pinned state for {snapshot_id}: {error}"
         );
@@ -206,7 +229,7 @@ pub(crate) fn current_app_cli_agent_session_source_target_from_id(
 }
 
 pub(crate) fn session_aliases() -> HashMap<String, String> {
-    read_session_user_state().aliases
+    read_session_user_state(None).aliases
 }
 
 pub(crate) fn set_session_alias(key: &str, alias: Option<&str>) -> Result<(), String> {
@@ -215,7 +238,7 @@ pub(crate) fn set_session_alias(key: &str, alias: Option<&str>) -> Result<(), St
         return Err("session alias key is empty".to_owned());
     }
 
-    let mut state = read_session_user_state();
+    let mut state = read_session_user_state(None);
     match alias.map(str::trim).filter(|alias| !alias.is_empty()) {
         Some(alias) => {
             state.aliases.insert(key.to_owned(), alias.to_owned());
@@ -224,26 +247,38 @@ pub(crate) fn set_session_alias(key: &str, alias: Option<&str>) -> Result<(), St
             state.aliases.remove(key);
         }
     }
-    write_session_user_state(&state)
+    write_session_user_state(&state, None)
 }
 
 pub(crate) fn pinned_session_ids() -> HashSet<String> {
-    read_session_user_state().pinned
+    read_session_user_state(None).pinned
+}
+
+fn pinned_session_ids_with_config(config_dir: Option<&Path>) -> HashSet<String> {
+    read_session_user_state(config_dir).pinned
 }
 
 pub(crate) fn set_session_pinned(session_id: &str, pinned: bool) -> Result<(), String> {
+    set_session_pinned_with_config(session_id, pinned, None)
+}
+
+fn set_session_pinned_with_config(
+    session_id: &str,
+    pinned: bool,
+    config_dir: Option<&Path>,
+) -> Result<(), String> {
     let session_id = session_id.trim();
     if session_id.is_empty() {
         return Err("pinned session id is empty".to_owned());
     }
 
-    let mut state = read_session_user_state();
+    let mut state = read_session_user_state(config_dir);
     if pinned {
         state.pinned.insert(session_id.to_owned());
     } else {
         state.pinned.remove(session_id);
     }
-    write_session_user_state(&state)
+    write_session_user_state(&state, config_dir)
 }
 
 fn system_time_to_unix_ms(time: SystemTime) -> Option<i64> {
@@ -251,12 +286,15 @@ fn system_time_to_unix_ms(time: SystemTime) -> Option<i64> {
     i64::try_from(duration.as_millis()).ok()
 }
 
-fn session_user_state_path() -> Option<PathBuf> {
-    warp_core::paths::warp_home_config_dir().map(|config_dir| config_dir.join("session_state.json"))
+fn session_user_state_path(config_dir: Option<&Path>) -> Option<PathBuf> {
+    let config_dir = config_dir
+        .map(PathBuf::from)
+        .or_else(warp_core::paths::warp_home_config_dir)?;
+    Some(config_dir.join("session_state.json"))
 }
 
-fn read_session_user_state() -> SessionUserState {
-    let Some(path) = session_user_state_path() else {
+fn read_session_user_state(config_dir: Option<&Path>) -> SessionUserState {
+    let Some(path) = session_user_state_path(config_dir) else {
         return SessionUserState::default();
     };
     let Ok(contents) = fs::read_to_string(path) else {
@@ -286,8 +324,11 @@ fn sanitize_session_user_state(mut state: SessionUserState) -> SessionUserState 
     state
 }
 
-fn write_session_user_state(state: &SessionUserState) -> Result<(), String> {
-    let Some(path) = session_user_state_path() else {
+fn write_session_user_state(
+    state: &SessionUserState,
+    config_dir: Option<&Path>,
+) -> Result<(), String> {
+    let Some(path) = session_user_state_path(config_dir) else {
         return Err("home directory is unavailable".to_owned());
     };
     if let Some(parent) = path.parent() {
@@ -536,9 +577,13 @@ fn path_from_external_session_snapshot_id(snapshot_id: &str) -> Option<PathBuf> 
     Some(PathBuf::from(String::from_utf8(bytes).ok()?))
 }
 
-fn delete_codex_session_index_entry(snapshot_id: &str) -> Result<(), String> {
-    remove_codex_session_index_entry(snapshot_id)?;
-    if let Err(error) = set_session_pinned(snapshot_id, false) {
+fn delete_codex_session_index_entry_with_dirs(
+    snapshot_id: &str,
+    home_dir: &Path,
+    config_dir: Option<&Path>,
+) -> Result<(), String> {
+    remove_codex_session_index_entry(snapshot_id, home_dir)?;
+    if let Err(error) = set_session_pinned_with_config(snapshot_id, false, config_dir) {
         log::warn!(
             "delete_codex_session_index_entry: failed to clear pinned state for {snapshot_id}: {error}"
         );
@@ -546,7 +591,10 @@ fn delete_codex_session_index_entry(snapshot_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn remove_codex_session_index_entry(snapshot_id: &str) -> Result<String, String> {
+fn remove_codex_session_index_entry(
+    snapshot_id: &str,
+    home_dir: &Path,
+) -> Result<String, String> {
     let (agent, session_id) = session_id_from_external_index_session_snapshot_id(snapshot_id)
         .ok_or_else(|| format!("not an indexed CLI agent session id: {snapshot_id}"))?;
     if !matches!(agent, CLIAgent::Codex) {
@@ -555,7 +603,6 @@ fn remove_codex_session_index_entry(snapshot_id: &str) -> Result<String, String>
             agent.display_name()
         ));
     }
-    let home_dir = dirs::home_dir().ok_or_else(|| "home directory is unavailable".to_owned())?;
     let index_path = home_dir.join(".codex/session_index.jsonl");
     let contents = match fs::read_to_string(&index_path) {
         Ok(contents) => contents,
@@ -598,8 +645,7 @@ fn remove_codex_session_index_entry(snapshot_id: &str) -> Result<String, String>
     Ok(removed_line)
 }
 
-fn validate_mutable_session_path_location(path: &Path) -> Result<(), String> {
-    let home_dir = dirs::home_dir().ok_or_else(|| "home directory is unavailable".to_owned())?;
+fn validate_mutable_session_path_location(path: &Path, home_dir: &Path) -> Result<(), String> {
     if path
         .extension()
         .is_none_or(|extension| extension != "jsonl")
@@ -693,62 +739,61 @@ fn hex_value(byte: u8) -> Option<u8> {
 mod tests {
     use super::*;
     use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use tempfile::TempDir;
 
-    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    fn test_projects_dir(name: &str) -> PathBuf {
-        let home_dir = dirs::home_dir().expect("home directory");
-        let unique = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        home_dir.join(format!(".claude/projects/ashide-test-{name}-{unique}"))
-    }
-
-    fn cleanup_test_dir(path: &Path) {
-        let _ = fs::remove_dir_all(path);
-    }
-
-    fn ensure_session_user_state_dir() {
-        if let Some(config_dir) = warp_core::paths::warp_home_config_dir() {
-            let _ = fs::create_dir_all(config_dir);
-        }
+    /// 构造一个隔离的 tempdir,模拟 home 目录结构(.claude/projects, .codex/sessions)。
+    /// 所有测试通过 `delete_current_app_cli_agent_session_with_dirs` 传入此目录,
+    /// 不再触碰真实 ~/.claude 或 ~/.codex。
+    fn test_home() -> TempDir {
+        let dir = TempDir::new().expect("create temp home");
+        fs::create_dir_all(dir.path().join(".claude/projects")).expect("create claude projects");
+        fs::create_dir_all(dir.path().join(".codex/sessions")).expect("create codex sessions");
+        dir
     }
 
     #[test]
     fn delete_current_app_cli_agent_session_treats_missing_jsonl_as_success() {
-        ensure_session_user_state_dir();
-        let projects_dir = test_projects_dir("missing-jsonl");
+        let home = test_home();
+        let config_dir = TempDir::new().expect("create temp config");
+        let projects_dir = home.path().join(".claude/projects/ashide-test-missing");
         fs::create_dir_all(&projects_dir).expect("create projects dir");
         let session_path = projects_dir.join("demo-session.jsonl");
         let snapshot_id = external_session_snapshot_id_for_path(CLIAgent::Claude, &session_path);
 
-        delete_current_app_cli_agent_session(&snapshot_id).expect("missing jsonl delete succeeds");
+        delete_current_app_cli_agent_session_with_dirs(
+            &snapshot_id,
+            home.path(),
+            Some(config_dir.path()),
+        )
+        .expect("missing jsonl delete succeeds");
         assert!(
             !session_path.exists(),
             "delete should not create the missing jsonl file"
         );
-
-        cleanup_test_dir(&projects_dir);
     }
 
     #[test]
     fn delete_codex_index_entry_treats_missing_session_as_success() {
-        ensure_session_user_state_dir();
-        let unique = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let session_id = format!("ashide-test-missing-{unique}");
+        let home = test_home();
+        let config_dir = TempDir::new().expect("create temp config");
+        let session_id = "ashide-test-missing-codex".to_owned();
         let snapshot_id = external_index_session_snapshot_id(CLIAgent::Codex, &session_id);
 
-        // 无论 ~/.codex/session_index.jsonl 是否存在、是否含该 session,
-        // 删除一个不存在的 index 条目都应视为成功
-        // (与 remote 端 cli_agent_sessions.rs 及本文件 jsonl 路径一致)。
-        delete_current_app_cli_agent_session(&snapshot_id)
-            .expect("deleting a non-existent codex index entry succeeds");
+        delete_current_app_cli_agent_session_with_dirs(
+            &snapshot_id,
+            home.path(),
+            Some(config_dir.path()),
+        )
+        .expect("deleting a non-existent codex index entry succeeds");
     }
 
     #[test]
     fn delete_current_app_cli_agent_session_removes_orphan_subagent_meta() {
-        ensure_session_user_state_dir();
-        let projects_dir = test_projects_dir("subagent-meta");
-        let subagents_dir = projects_dir.join("demo/subagents");
+        let home = test_home();
+        let config_dir = TempDir::new().expect("create temp config");
+        let subagents_dir = home
+            .path()
+            .join(".claude/projects/ashide-test-subagent/demo/subagents");
         fs::create_dir_all(&subagents_dir).expect("create subagents dir");
         let jsonl_path = subagents_dir.join("agent-demo.jsonl");
         let meta_path = subagents_dir.join("agent-demo.meta.json");
@@ -759,23 +804,25 @@ mod tests {
         fs::write(&meta_path, br#"{"agentType":"general-purpose"}"#).expect("write meta");
         let snapshot_id = external_session_snapshot_id_for_path(CLIAgent::Claude, &jsonl_path);
 
-        delete_current_app_cli_agent_session(&snapshot_id).expect("delete succeeds");
+        delete_current_app_cli_agent_session_with_dirs(
+            &snapshot_id,
+            home.path(),
+            Some(config_dir.path()),
+        )
+        .expect("delete succeeds");
 
         assert!(!jsonl_path.exists());
         assert!(!meta_path.exists());
-
-        cleanup_test_dir(&projects_dir);
     }
 
     #[test]
     fn external_jsonl_session_source_exists_reports_missing_backing_file() {
-        let projects_dir = test_projects_dir("source-exists");
-        fs::create_dir_all(&projects_dir).expect("create projects dir");
-        let session_path = projects_dir.join("demo-session.jsonl");
+        let home = test_home();
+        let session_path = home
+            .path()
+            .join(".claude/projects/ashide-test-source-exists/demo-session.jsonl");
         let snapshot_id = external_session_snapshot_id_for_path(CLIAgent::Claude, &session_path);
 
         assert!(!external_jsonl_session_source_exists(&snapshot_id));
-
-        cleanup_test_dir(&projects_dir);
     }
 }
