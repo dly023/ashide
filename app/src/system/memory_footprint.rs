@@ -9,6 +9,7 @@ pub fn memory_footprint_bytes() -> u64 {
 }
 
 /// 返回当前进程的内存分类明细,用于内存异常时写入诊断日志。
+#[cfg(feature = "heap_usage_tracking")]
 pub fn memory_breakdown() -> serde_json::Value {
     serde_json::json!({
         "footprint_bytes": memory_footprint_bytes(),

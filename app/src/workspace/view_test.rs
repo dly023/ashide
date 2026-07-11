@@ -10126,6 +10126,45 @@ fn test_deleting_only_live_local_session_does_not_close_window() {
 }
 
 #[test]
+fn test_reorder_session_navigator_sessions_keeps_active_key() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace
+                .restored_workspace_sessions
+                .push(test_session_navigator_order_session("reorder-a", "A", 10));
+            workspace
+                .restored_workspace_sessions
+                .push(test_session_navigator_order_session("reorder-b", "B", 20));
+            workspace.sync_session_navigator_sessions(ctx);
+
+            let sessions = workspace.session_navigator_sessions(ctx);
+            let target = sessions
+                .iter()
+                .find(|session| session.id == "reorder-b")
+                .expect("reorder-b");
+            let target_key = Workspace::workspace_session_logical_key(target);
+            workspace.active_restored_workspace_session_key = Some(target_key.clone());
+
+            let ordered = sessions
+                .iter()
+                .rev()
+                .map(Workspace::workspace_session_logical_key)
+                .collect::<Vec<_>>();
+            workspace.reorder_session_navigator_sessions(ordered, ctx);
+
+            assert_eq!(
+                workspace.active_restored_workspace_session_key.as_deref(),
+                Some(target_key.as_str()),
+                "Workspace Reorder must keep active_key on the same logical_key"
+            );
+        });
+    });
+}
+
+#[test]
 fn test_pin_workspace_session_does_not_change_focus() {
     // EC-10: pin/unpin must not change focus or active navigator row.
     App::test((), |mut app| async move {

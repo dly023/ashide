@@ -30,6 +30,7 @@ use super::session_navigator_reducer::{
     self, DeleteCloseKind, DeleteEffects, PaneGroupInfo, ReduceResult, SessionNavigatorAction,
     SessionNavigatorState, SideEffect, TabPaneInfo,
 };
+#[cfg(test)]
 use crate::app_state::SessionDisplayOrderStrategy;
 
 #[derive(Debug)]
@@ -151,6 +152,7 @@ impl Workspace {
         self.raw_session_navigator_sessions(ctx)
     }
 
+    #[cfg(test)]
     pub(super) fn workspace_session_display_order_key(
         session: &WorkspaceSessionSnapshot,
     ) -> String {
@@ -265,6 +267,7 @@ impl Workspace {
         });
     }
 
+    #[cfg(test)]
     pub(super) fn reconcile_session_navigator_display_order(
         &mut self,
         sessions: &[WorkspaceSessionSnapshot],
@@ -316,6 +319,7 @@ impl Workspace {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn sort_session_navigator_sessions_by_display_order(
         &self,
         sessions: &mut [WorkspaceSessionSnapshot],
@@ -398,6 +402,7 @@ impl Workspace {
         });
     }
 
+    #[cfg(test)]
     fn session_navigator_display_order_for_session(
         &self,
         session: &WorkspaceSessionSnapshot,
@@ -1904,6 +1909,8 @@ impl Workspace {
     }
 
     /// EC-08: reorder navigator rows by logical_key while keeping focus/active.
+    /// Sidebar drag-reorder UI is not wired yet; reducer + this apply path are ready.
+    #[allow(dead_code)]
     pub(super) fn reorder_session_navigator_sessions(
         &mut self,
         ordered_logical_keys: Vec<String>,

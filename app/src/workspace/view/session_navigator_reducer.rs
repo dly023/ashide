@@ -235,7 +235,7 @@ fn tab_index_for_session(session: &WorkspaceSessionSnapshot) -> Option<usize> {
 }
 
 // ─────────────────────────────────────────────────────────
-// 排序 (与 sort_session_navigator_sessions_by_display_order 一致)
+// 排序 (与历史 Workspace sort_session_navigator_sessions_by_display_order 语义一致)
 // ─────────────────────────────────────────────────────────
 
 fn display_order_for_session(

@@ -657,7 +657,8 @@ impl WorkspaceSessionSnapshot {
         }
 
         // merge 只负责合并去重 + consume,不排序。首次排序语义(pinned 优先
-        // + updated_at 降序)由 reconcile_session_navigator_display_order
+        // + updated_at 降序)由 Session Navigator reducer Refresh.reconcile_display_order
+        // 在分配 display_order 时实现。
         // 在分配 display_order 时自行排序实现,不再隐式依赖 merge 的输出顺序。
         sessions
     }

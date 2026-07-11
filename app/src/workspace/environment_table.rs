@@ -18,7 +18,9 @@ use std::path::PathBuf;
 
 use warp_core::{HostId, SessionId};
 
-use crate::app_state::{EnvironmentLifecycleState, EnvironmentSnapshot, WorkspaceSessionSnapshot};
+use crate::app_state::{
+    EnvironmentKind, EnvironmentLifecycleState, EnvironmentSnapshot, WorkspaceSessionSnapshot,
+};
 use crate::pane_group::PaneId;
 use crate::workspace::environment_backend::{
     AgentTabEntry, ForkEntry, PendingEnvironmentRuntimeSessionRestore,
@@ -231,6 +233,23 @@ impl EnvironmentTable {
             self.active_authority = None;
         }
         Some(entry)
+    }
+
+    /// Drop the runtime transport handle without removing the table row.
+    /// Preserves pending intents, retained flag, indexed sessions, and snapshot identity
+    /// so reconnect (`clear_user_intents: false`) does not wipe user queue state.
+    pub(crate) fn clear_runtime_handle(&mut self, authority: &str) {
+        let Some(entry) = self.entries.get_mut(authority) else {
+            return;
+        };
+        if let Some(session_id) = entry.synthetic_session_id.take() {
+            self.session_to_authority.remove(&session_id);
+        }
+        entry.status = EnvironmentRuntimeStatus::Dormant;
+        entry.host_id = None;
+        entry.control_path = None;
+        entry.last_error = None;
+        entry.snapshot.lifecycle_state = EnvironmentLifecycleState::Dormant;
     }
 
     // --- Retained ---
@@ -517,25 +536,65 @@ impl EnvironmentTable {
 
     // --- Pending intents ---
 
+    /// Ensure a dormant table row exists so queue_* can create-on-write (pre-table HashMap semantics).
+    fn ensure_entry_for_authority(&mut self, authority: &str) {
+        if self.entries.contains_key(authority) {
+            return;
+        }
+        let kind = if authority.starts_with("local") {
+            EnvironmentKind::Local
+        } else {
+            EnvironmentKind::Ssh
+        };
+        let label = authority
+            .rsplit(':')
+            .next()
+            .filter(|part| !part.is_empty())
+            .unwrap_or(authority)
+            .to_owned();
+        let connection_ref = authority
+            .strip_prefix("ssh:")
+            .map(str::to_owned)
+            .or_else(|| {
+                authority
+                    .strip_prefix("ssh-config:")
+                    .map(|_| authority.to_owned())
+            });
+        let snapshot = EnvironmentSnapshot::runtime_transport(
+            kind,
+            label,
+            authority.to_owned(),
+            connection_ref,
+            None,
+            EnvironmentLifecycleState::Dormant,
+        );
+        self.entries
+            .insert(authority.to_owned(), EnvironmentEntry::dormant(snapshot));
+    }
+
     pub(crate) fn queue_terminal(&mut self, authority: &str) {
+        self.ensure_entry_for_authority(authority);
         if let Some(entry) = self.entries.get_mut(authority) {
             entry.pending_terminal = true;
         }
     }
 
     pub(crate) fn queue_startup_command(&mut self, authority: &str, command: String) {
+        self.ensure_entry_for_authority(authority);
         if let Some(entry) = self.entries.get_mut(authority) {
             entry.pending_startup_command = Some(command);
         }
     }
 
     pub(crate) fn queue_agent_view(&mut self, authority: &str, entry: AgentTabEntry) {
+        self.ensure_entry_for_authority(authority);
         if let Some(e) = self.entries.get_mut(authority) {
             e.pending_agent_view = Some(entry);
         }
     }
 
     pub(crate) fn queue_forked_conversation(&mut self, authority: &str, entry: ForkEntry) {
+        self.ensure_entry_for_authority(authority);
         if let Some(e) = self.entries.get_mut(authority) {
             e.pending_forked_conversation = Some(entry);
         }
@@ -546,12 +605,14 @@ impl EnvironmentTable {
         authority: &str,
         restore: PendingEnvironmentRuntimeSessionRestore,
     ) {
+        self.ensure_entry_for_authority(authority);
         if let Some(entry) = self.entries.get_mut(authority) {
             entry.pending_restore = Some(restore);
         }
     }
 
     pub(crate) fn set_split_pane_loading_id(&mut self, authority: &str, pane_id: PaneId) {
+        self.ensure_entry_for_authority(authority);
         if let Some(entry) = self.entries.get_mut(authority) {
             entry.pending_split_pane_loading_id = Some(pane_id);
         }
@@ -730,7 +791,7 @@ mod tests {
     use warp_core::{HostId, SessionId};
 
     use super::*;
-    use crate::app_state::{EnvironmentKind, EnvironmentLifecycleState};
+    use crate::app_state::EnvironmentLifecycleState;
 
     fn ssh_environment(authority_key: &str) -> EnvironmentSnapshot {
         EnvironmentSnapshot::runtime_transport(
@@ -788,5 +849,38 @@ mod tests {
 
         table.remove("ssh:example");
         assert_eq!(table.authority_for_session(second_session), None);
+    }
+
+    #[test]
+    fn queue_startup_command_creates_entry_when_missing() {
+        let mut table = EnvironmentTable::default();
+        table.queue_startup_command("ssh:ssh-config:dnyx216", "cd /srv && codex".to_owned());
+        assert_eq!(
+            table
+                .entry_for_authority("ssh:ssh-config:dnyx216")
+                .and_then(|entry| entry.pending_startup_command.as_deref()),
+            Some("cd /srv && codex")
+        );
+    }
+
+    #[test]
+    fn clear_runtime_handle_preserves_pending_intents() {
+        let mut table = EnvironmentTable::default();
+        let session = SessionId::from(9);
+        table.mark_connecting(
+            ssh_environment("ssh:example"),
+            session,
+            PathBuf::from("/tmp/preserve.sock"),
+        );
+        table.queue_terminal("ssh:example");
+        table.clear_runtime_handle("ssh:example");
+
+        let entry = table
+            .entry_for_authority("ssh:example")
+            .expect("row must survive clear_runtime_handle");
+        assert!(entry.pending_terminal);
+        assert_eq!(entry.synthetic_session_id, None);
+        assert_eq!(entry.status, EnvironmentRuntimeStatus::Dormant);
+        assert_eq!(table.authority_for_session(session), None);
     }
 }

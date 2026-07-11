@@ -8474,6 +8474,8 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         let environment = target.dormant_environment(None);
+        // Upsert before queue so startup intent lands on a real table row.
+        self.environments.upsert(environment.clone());
         if let Some(startup_command) = target.startup_command() {
             self.queue_environment_runtime_intent(
                 &environment.authority_key,
@@ -22821,14 +22823,15 @@ impl Workspace {
         let session_id = self.environment_runtime_session_for_authority(authority_key);
         if clear_user_intents {
             self.release_environment_authority(authority_key);
-        }
-        self.remove_environment_runtime_authority(authority_key);
-        self.clear_environment_runtime_home_root_for_authority(authority_key);
-        self.clear_indexed_environment_cli_agent_sessions_for_authority(authority_key);
-        if clear_user_intents {
+            self.remove_environment_runtime_authority(authority_key);
+            self.clear_environment_runtime_home_root_for_authority(authority_key);
+            self.clear_indexed_environment_cli_agent_sessions_for_authority(authority_key);
             self.clear_workspace_session_restoring_for_authority(authority_key, ctx);
             self.clear_pending_environment_runtime_intents_for_authority(authority_key, ctx);
             self.clear_active_restored_workspace_session_for_authority(authority_key, ctx);
+        } else {
+            // Reconnect path: clear transport handle in place so pending intents survive.
+            self.environments.clear_runtime_handle(authority_key);
         }
 
         if let Some(session_id) = session_id {

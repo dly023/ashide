@@ -785,7 +785,7 @@ fn test_session_navigator_keeps_plain_terminal_without_agent() {
 #[test]
 fn test_session_navigator_merge_preserves_source_order_and_marks_pinned() {
     // merge 不排序,只负责合并去重。排序语义(pinned 优先 + updated_at 降序)
-    // 由 reconcile_session_navigator_display_order 在分配 display_order 时实现。
+    // 由 Session Navigator reducer Refresh.reconcile_display_order 在分配 display_order 时实现。
     // 这里验证 merge 保持 sources 原始顺序,且 pinned 行被正确标记。
     let older = test_workspace_session("older", Some("Claude"), Some("older"), false, Some(10));
     let newer = test_workspace_session("newer", Some("Claude"), Some("newer"), false, Some(20));
