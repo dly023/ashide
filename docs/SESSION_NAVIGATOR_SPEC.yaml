@@ -215,9 +215,15 @@ focus_active_selection:
   # 6.4 Materialization 追踪 (v3 修正)
   materialization_tracking:
     old_behavior: "找不到 stored session 就假设 materialized,返回 live active key"
-    new_behavior: "virtual → live consume 时,如果 virtual row 的 logical_key == active_restored_workspace_session_key,主动迁移 key"
+    new_behavior: |
+      Refresh.track_materialization:
+        - stored 仍在且为 live → 保持
+        - stored 为 virtual 且存在同 env + binding 的 live twin → 迁移到 live logical_key
+        - stored 已消失且 live 的 durable key == stored key → 迁移
+        - 否则清除 active_key (不猜测 live-active)
     deletion_behavior: "session 被删时不做 active 转移猜测;走 focus_after_mutation.delete 的决策"
     rationale: "猜测是不可靠的 —— 被删和 materialize 都表现为'stored session 不在了',但需要不同处理"
+    workspace_path: "sync 只 apply reduce(Refresh) 的 state; 已删除 preferred_active_* 双轨"
 
 # ─────────────────────────────────────────────────────────
 # 7. 纯 Reducer 契约 (v3 新增)
@@ -264,12 +270,20 @@ reducer_contract:
         2. side_effect = WriteUserState
         3. 下一次 refresh 时 is_pinned 由 user_state 预赋值
 
+    Reorder:
+      input: "ordered_logical_keys: Vec<String>"
+      output: |
+        1. 按 keys 重写 display_order
+        2. 不改 active_key / restoring_keys / is_active 指向的 logical_key
+        3. side_effect = None
+
     Refresh:
       input: "new_raw_sessions: Vec<WorkspaceSessionSnapshot>"
       output: |
         1. merge + reconcile + sort
-        2. 根据 active_priority_chain 重新计算 is_active
-        3. 清除已 materialize 的 restoring_keys
+        2. track_materialization (§6.4 durable + binding)
+        3. 根据 active_priority_chain 重新计算 is_active
+        4. 清除已 materialize 的 restoring_keys
 
     TabActivated:
       input: "tab_index: usize"
@@ -386,9 +400,8 @@ edge_cases:
   - id: "EC-08"
     name: "reorder 后 focus 跟随稳定 id"
     expected: "focus 不因 reorder 丢失, 跟随 logical_key"
-    reducer_rule: "reducer 只认 logical_key"
-    ship_status: deferred
-    note: "本发布不做 reorder-focus 产品化; 从 ship checklist 排除"
+    reducer_rule: "Reorder → 只改 display_order; active_key 不变"
+    ship_status: covered
 
   - id: "EC-09"
     name: "最后一项被删除时的 fallback focus"
@@ -453,12 +466,12 @@ test_matrix:
 
   # 10.2 序列型测试 (v3 新增)
   sequences:
-    - name: "create → activate → pin → remove → restore focus"
-      note: "reorder 步骤属 EC-08, 本发布 deferred; 实现见 test_sequence_create_activate_pin_remove_restore"
+    - name: "create → activate → pin → reorder → remove → restore focus"
       steps:
         - "新建 terminal pane → 检查 is_active=true"
         - "activate 另一个 session → 检查 focus 切换"
         - "pin 当前 session → 检查排序变但 focus 不变"
+        - "reorder 列表 → 检查 active_key 仍指向同一 logical_key"
         - "remove 当前 session → 检查 focus 到兄弟"
         - "restore 被删 session → 检查 focus 到新 pane"
 
@@ -555,14 +568,13 @@ ship_coverage:
   production_delete: "unified_flow via reduce(Delete) + DeleteEffects; no preselect/reselect"
   production_activate: "live FocusPane + virtual SpawnTerminal via apply_session_navigator_side_effect"
   production_focus: "activate_tab_internal + Event::PaneFocused → notify/sync; restored marker not overwritten by live key"
+  production_refresh: "single reduce(Refresh) path; track_materialization owns §6.4; no preferred_active_* dual-path"
+  production_reorder: "reduce(Reorder) + apply state; active_key follows logical_key"
   workspace_integration:
     - "EC-01 test_deleting_split_pane_session_keeps_focus_on_sibling_in_same_tab"
     - "EC-02/16 test_deleting_local_tab_session_focuses_same_env_neighbor_tab"
     - "EC-03/09 test_deleting_only_live_local_session_does_not_close_window"
     - "EC-10 test_pin_workspace_session_does_not_change_focus"
     - "EC-14 env delete suite (test_deleting_*_environment_*)"
-  reducer_unit: "session_navigator_reducer_tests (EC-01..07,09..15 + sequences + validator)"
-  deferred:
-    - "EC-08 reorder-focus"
-    - "full combinatorial oracle"
-    - "collapse preferred_active_* dual-path entirely into Refresh state apply"
+  reducer_unit: "session_navigator_reducer_tests (EC-01..16 + sequences + combinatorial oracle + validator)"
+  deferred: []

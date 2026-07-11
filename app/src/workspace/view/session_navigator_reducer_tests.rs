@@ -920,7 +920,22 @@ fn test_sequence_create_activate_pin_remove_restore() {
     );
     sessions = result.sessions;
     state = result.state;
-    assert_eq!(result.side_effect, SideEffect::WriteUserState);
+    assert_eq!(state.active_key, Some(key_s1.clone()));
+    validate_state(&sessions, &state).unwrap();
+
+    // 3b. EC-08 reorder — active stays on logical_key
+    let result = reduce(
+        sessions,
+        state,
+        SessionNavigatorAction::Reorder {
+            ordered_logical_keys: vec![key_s1.clone()],
+        },
+        &pane_info,
+    );
+    sessions = result.sessions;
+    state = result.state;
+    assert_eq!(state.active_key, Some(key_s1.clone()));
+    assert!(matches!(result.side_effect, SideEffect::None));
     validate_state(&sessions, &state).unwrap();
 
     // 4. remove s1
@@ -1096,6 +1111,81 @@ fn test_tie_break_none_updated_at_last() {
 }
 
 // ─────────────────────────────────────────────────────────
+// EC-08: reorder 后 focus 跟随稳定 logical_key
+// ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_ec08_reorder_keeps_active_on_logical_key() {
+    let s_a = make_virtual_session("agent-a", "local", 3000);
+    let s_b = make_virtual_session("agent-b", "local", 2000);
+    let s_c = make_virtual_session("agent-c", "local", 1000);
+    let pane_info = PaneGroupInfo::new();
+
+    let result = reduce(
+        Vec::new(),
+        SessionNavigatorState::new(),
+        SessionNavigatorAction::Refresh {
+            new_sessions: vec![s_a.clone(), s_b.clone(), s_c.clone()],
+            pinned_session_ids: HashSet::new(),
+        },
+        &pane_info,
+    );
+    let key_b = logical_key(&s_b);
+    let result = reduce(
+        result.sessions,
+        result.state,
+        SessionNavigatorAction::Activate {
+            session_logical_key: key_b.clone(),
+            session_id: s_b.id.clone(),
+            is_live: false,
+        },
+        &pane_info,
+    );
+    assert_eq!(result.state.active_key, Some(key_b.clone()));
+
+    let before = ReduceResult {
+        sessions: result.sessions.clone(),
+        state: result.state.clone(),
+        side_effect: SideEffect::None,
+    };
+    // Reverse display order by logical_key.
+    let ordered = vec![
+        logical_key(&s_c),
+        logical_key(&s_b),
+        logical_key(&s_a),
+    ];
+    let action = SessionNavigatorAction::Reorder {
+        ordered_logical_keys: ordered.clone(),
+    };
+    let result = reduce(result.sessions, result.state, action.clone(), &pane_info);
+    validate_transition(&before, &result, &action, &pane_info).unwrap();
+
+    assert_eq!(
+        result.state.active_key,
+        Some(key_b.clone()),
+        "reorder must keep active_key on the same logical_key"
+    );
+    let active = result
+        .sessions
+        .iter()
+        .find(|s| s.is_active)
+        .expect("one active row");
+    assert_eq!(logical_key(active), key_b);
+    // Order follows the reorder keys for rows that have an assigned order.
+    let positions: HashMap<String, usize> = result
+        .sessions
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (logical_key(s), i))
+        .collect();
+    assert!(
+        positions[&logical_key(&s_c)] < positions[&logical_key(&s_a)],
+        "reordered keys should control relative order"
+    );
+    validate_state(&result.sessions, &result.state).unwrap();
+}
+
+// ─────────────────────────────────────────────────────────
 // oracle: active 不超过 1 个
 // ─────────────────────────────────────────────────────────
 
@@ -1133,6 +1223,125 @@ fn test_oracle_at_most_one_active() {
             "expected ≤ 1 active, got {active_count}"
         );
         validate_state(&result.sessions, &result.state).unwrap();
+    }
+}
+
+/// Combinatorial oracle: for each action family, check invariants from SPEC §10.3.
+#[test]
+fn test_oracle_combinatorial_action_invariants() {
+    let live0 = make_live_session("tab:0:leaf:0", "local", 1000);
+    let live1 = make_live_session("tab:0:leaf:1", "local", 2000);
+    let virtual_a = make_virtual_session("agent-oracle-a", "local", 3000);
+    let virtual_b = make_virtual_session("agent-oracle-b", "local", 4000);
+
+    let pane_info = make_pane_info(vec![
+        (0, 2, Some(make_locator(0, 0)), Some(make_locator(0, 1))),
+    ]);
+
+    let base = reduce(
+        Vec::new(),
+        SessionNavigatorState::new(),
+        SessionNavigatorAction::Refresh {
+            new_sessions: vec![
+                live0.clone(),
+                live1.clone(),
+                virtual_a.clone(),
+                virtual_b.clone(),
+            ],
+            pinned_session_ids: HashSet::new(),
+        },
+        &pane_info,
+    );
+    validate_state(&base.sessions, &base.state).unwrap();
+
+    let actions: Vec<SessionNavigatorAction> = vec![
+        SessionNavigatorAction::Activate {
+            session_logical_key: logical_key(&virtual_a),
+            session_id: virtual_a.id.clone(),
+            is_live: false,
+        },
+        SessionNavigatorAction::Pin {
+            session_logical_key: logical_key(&virtual_a),
+            pinned: true,
+        },
+        SessionNavigatorAction::Reorder {
+            ordered_logical_keys: vec![
+                logical_key(&virtual_b),
+                logical_key(&virtual_a),
+                logical_key(&live1),
+                logical_key(&live0),
+            ],
+        },
+        SessionNavigatorAction::Delete {
+            session_logical_key: logical_key(&live0),
+            session_id: live0.id.clone(),
+            environment_authority_key: live0.environment_authority_key.clone(),
+        },
+        SessionNavigatorAction::PaneFocused {
+            locator: make_locator(0, 1),
+            session_logical_key: Some(logical_key(&live1)),
+        },
+        SessionNavigatorAction::TabActivated { tab_index: 0 },
+        SessionNavigatorAction::Refresh {
+            new_sessions: vec![live1.clone(), virtual_a.clone(), virtual_b.clone()],
+            pinned_session_ids: HashSet::from([logical_key(&virtual_a)]),
+        },
+    ];
+
+    let mut current = base;
+    for action in actions {
+        let before = current.clone();
+        let active_before_pin = before.state.active_key.clone();
+        let is_pin = matches!(action, SessionNavigatorAction::Pin { .. });
+        let is_reorder = matches!(action, SessionNavigatorAction::Reorder { .. });
+        current = reduce(
+            before.sessions.clone(),
+            before.state.clone(),
+            action.clone(),
+            &pane_info,
+        );
+        validate_transition(&before, &current, &action, &pane_info).unwrap();
+
+        let active_count = current.sessions.iter().filter(|s| s.is_active).count();
+        assert!(active_count <= 1, "oracle: ≤1 active after {action:?}");
+
+        if is_pin {
+            assert_eq!(
+                current.state.active_key, active_before_pin,
+                "oracle: pin must not change active_key"
+            );
+            assert!(matches!(current.side_effect, SideEffect::WriteUserState));
+        }
+        if is_reorder {
+            assert_eq!(
+                current.state.active_key, before.state.active_key,
+                "oracle: reorder must keep active_key"
+            );
+            assert!(matches!(current.side_effect, SideEffect::None));
+        }
+        if let SessionNavigatorAction::Delete {
+            session_logical_key,
+            ..
+        } = &action
+        {
+            assert!(
+                current
+                    .sessions
+                    .iter()
+                    .all(|s| logical_key(s) != *session_logical_key),
+                "oracle: deleted session gone"
+            );
+            if let SideEffect::DeleteEffects(effects) = &current.side_effect {
+                if let Some(focus) = &effects.focus {
+                    let found = pane_info.tabs.values().any(|tab| {
+                        tab.all_pane_locators
+                            .iter()
+                            .any(|locator| locator.pane_id == focus.pane_id)
+                    });
+                    assert!(found, "oracle: delete focus target must exist in pane_info");
+                }
+            }
+        }
     }
 }
 

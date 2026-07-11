@@ -48,25 +48,43 @@ impl Workspace {
         &self,
         ctx: &AppContext,
     ) -> Vec<WorkspaceSessionSnapshot> {
-        let mut sessions = self.raw_session_navigator_sessions(ctx);
-        self.sort_session_navigator_sessions_by_display_order(&mut sessions);
-        sessions
+        // Refresh already reconciles + sorts; no second Workspace sort path.
+        self.raw_session_navigator_sessions(ctx)
     }
 
     pub(super) fn session_navigator_sessions_for_display_update(
         &mut self,
         ctx: &AppContext,
     ) -> Vec<WorkspaceSessionSnapshot> {
-        let mut sessions = self.raw_session_navigator_sessions(ctx);
-        self.reconcile_session_navigator_display_order(&sessions);
-        self.sort_session_navigator_sessions_by_display_order(&mut sessions);
-        sessions
+        // Display list is owned by reducer Refresh inside raw(); sync persists state.
+        self.raw_session_navigator_sessions(ctx)
     }
 
     pub(super) fn raw_session_navigator_sessions(
         &self,
         ctx: &AppContext,
     ) -> Vec<WorkspaceSessionSnapshot> {
+        let reduced = self.reduce_session_navigator_refresh(ctx, true);
+        let user_state = self.workspace_session_user_state_for_authority(
+            &self.current_environment_authority_key(ctx),
+        );
+        let mut sessions = reduced.sessions;
+        for session in &mut sessions {
+            if let Some(alias) = self.workspace_session_alias_with_state(session, &user_state) {
+                session.label = Some(alias);
+            }
+        }
+        sessions
+    }
+
+    /// Pure Refresh through the reducer. When `inject_focused_live` is true, temporarily
+    /// sets `active_key` to the focused live pane for §6.1 display `is_active` only —
+    /// callers must not apply that injected state onto `active_restored_*`.
+    fn reduce_session_navigator_refresh(
+        &self,
+        ctx: &AppContext,
+        inject_focused_live: bool,
+    ) -> ReduceResult {
         let current_authority = self.current_environment_authority_key(ctx);
         let user_state = self.workspace_session_user_state_for_authority(&current_authority);
         let indexed_sessions = self.indexed_cli_agent_sessions_for_authority(&current_authority);
@@ -92,20 +110,20 @@ impl Workspace {
             WorkspaceSessionSnapshot::merge_for_session_navigator(sources, &user_state.pinned);
         self.filter_deleting_workspace_sessions(&mut merged);
 
-        // v3: active/is_active 由 reducer Refresh 决定; focused live pane 注入 active_key (§6.1)。
         let pane_info = self.snapshot_pane_group_info(ctx);
         let mut state = self.snapshot_session_navigator_state();
-        if let Some(focused_key) = self.logical_key_for_focused_live_pane(ctx) {
-            state.active_key = Some(focused_key);
+        if inject_focused_live {
+            if let Some(focused_key) = self.logical_key_for_focused_live_pane(ctx) {
+                state.active_key = Some(focused_key);
+            }
         }
-        // Preserve pins already on merged rows (tests / in-memory toggles) plus user_state.
         let mut pinned_session_ids = user_state.pinned.clone();
         for session in &merged {
             if session.is_pinned {
                 pinned_session_ids.extend(session.stable_pin_keys());
             }
         }
-        let reduced = session_navigator_reducer::reduce(
+        session_navigator_reducer::reduce(
             Vec::new(),
             state,
             SessionNavigatorAction::Refresh {
@@ -113,14 +131,7 @@ impl Workspace {
                 pinned_session_ids,
             },
             &pane_info,
-        );
-        let mut sessions = reduced.sessions;
-        for session in &mut sessions {
-            if let Some(alias) = self.workspace_session_alias_with_state(session, &user_state) {
-                session.label = Some(alias);
-            }
-        }
-        sessions
+        )
     }
 
     /// Public entry for the command-palette session search: returns the same
@@ -486,103 +497,7 @@ impl Workspace {
         group_numbers.get(&tab_index).copied()
     }
 
-    fn preferred_active_restored_workspace_session_key_for_sessions(
-        &self,
-        sessions: &[WorkspaceSessionSnapshot],
-    ) -> Option<String> {
-        let active_restored_workspace_session_key =
-            self.active_restored_workspace_session_key.as_deref()?;
-
-        let active_key_in_sessions = |session: &WorkspaceSessionSnapshot| {
-            let key = Self::workspace_session_logical_key(session);
-            (active_restored_workspace_session_key == key).then_some(key)
-        };
-
-        if let Some(restoring_key) = sessions.iter().find_map(|session| {
-            active_key_in_sessions(session).filter(|key| {
-                self.restoring_workspace_session_keys.contains(key)
-                    || self.restoring_workspace_session_keys.contains(&session.id)
-            })
-        }) {
-            return Some(restoring_key);
-        }
-
-        let live_active = sessions
-            .iter()
-            .find(|session| session.is_active && session.is_live_container());
-        let live_active_key = live_active.map(Self::workspace_session_logical_key);
-        match live_active_key {
-            Some(key) if active_restored_workspace_session_key == key => Some(key),
-            Some(key) => {
-                // Container model: the stored active key may belong to a
-                // virtual container that has just been materialized into a
-                // live container (e.g. a historical Ashide conversation
-                // activated into a new tab). If the live container shares a
-                // binding (agent session id or conversation id) with the
-                // stored-key virtual container, track the live container's
-                // key as the new active key so the navigator keeps
-                // highlighting the right row.
-                let stored_session = sessions.iter().find(|session| {
-                    Self::workspace_session_logical_key(session)
-                        == active_restored_workspace_session_key
-                });
-                let Some(stored) = stored_session else {
-                    // SPEC §6.4: stored key missing → only migrate when a live
-                    // container's durable key equals the stored active key.
-                    // Never guess "whatever is live-active".
-                    let live = live_active?;
-                    if Self::workspace_session_durable_display_order_key(live).as_deref()
-                        == Some(active_restored_workspace_session_key)
-                    {
-                        return Some(key);
-                    }
-                    return None;
-                };
-                let live = live_active?;
-                let env_matches = WorkspaceSessionSnapshot::logical_environment_key(
-                    stored.environment_authority_key.as_deref(),
-                ) == WorkspaceSessionSnapshot::logical_environment_key(
-                    live.environment_authority_key.as_deref(),
-                );
-                if !env_matches {
-                    return None;
-                }
-                let binding_matches = stored
-                    .cli_agent_session_id
-                    .as_deref()
-                    .filter(|id| !id.trim().is_empty())
-                    .zip(live.cli_agent_session_id.as_deref())
-                    .is_some_and(|(a, b)| a == b)
-                    || stored
-                        .active_conversation_id
-                        .iter()
-                        .chain(stored.conversation_ids.iter())
-                        .any(|conv| {
-                            live.active_conversation_id
-                                .iter()
-                                .chain(live.conversation_ids.iter())
-                                .any(|live_conv| conv == live_conv)
-                        });
-                if binding_matches {
-                    Some(key)
-                } else {
-                    None
-                }
-            }
-            None => sessions.iter().find_map(active_key_in_sessions),
-        }
-    }
-
-    pub(super) fn reconcile_active_restored_workspace_session_key(
-        &mut self,
-        sessions: &[WorkspaceSessionSnapshot],
-    ) {
-        let preferred_key =
-            self.preferred_active_restored_workspace_session_key_for_sessions(sessions);
-        if self.active_restored_workspace_session_key != preferred_key {
-            self.active_restored_workspace_session_key = preferred_key;
-        }
-    }
+    // preferred_active_* dual-path removed: Refresh track_materialization owns §6.4.
 
     #[cfg(test)]
     pub(super) fn normalize_session_navigator_active_state(
@@ -1186,49 +1101,14 @@ impl Workspace {
 
     pub(super) fn sync_session_navigator_sessions(&mut self, ctx: &mut ViewContext<Self>) {
         self.prune_stale_restoring_workspace_session_keys(ctx);
-        let sessions = self.session_navigator_sessions_for_display_update(ctx);
-        // v3: run Refresh through reducer for display_order + durable materialization,
-        // but keep active_key reconciliation on the Workspace path (focus-aware).
-        let pane_info = self.snapshot_pane_group_info(ctx);
-        let state = self.snapshot_session_navigator_state();
-        let mut pinned_session_ids = sessions
-            .iter()
-            .filter(|session| session.is_pinned)
-            .flat_map(|session| session.stable_pin_keys())
-            .collect::<HashSet<_>>();
-        // Also include durable pins from user state for current authority.
-        let authority = self.current_environment_authority_key(ctx);
-        pinned_session_ids.extend(
-            self.workspace_session_user_state_for_authority(&authority)
-                .pinned
-                .iter()
-                .cloned(),
-        );
-        let reduced = session_navigator_reducer::reduce(
-            sessions.clone(),
-            state,
-            SessionNavigatorAction::Refresh {
-                new_sessions: sessions.clone(),
-                pinned_session_ids,
-            },
-            &pane_info,
-        );
-        self.session_navigator_display_order = reduced.state.display_order;
-        self.next_session_navigator_display_order = reduced.state.next_display_order;
-        // Accept active_key migration only when reducer moved to an existing live key
-        // via durable match (§6.4). Do not accept blanket clears here — focus-aware
-        // reconcile below owns clearing stale restored markers.
-        if let Some(migrated) = reduced.state.active_key.as_ref().filter(|key| {
-            self.active_restored_workspace_session_key.as_deref() != Some(key.as_str())
-                && sessions.iter().any(|session| {
-                    session.is_live_container()
-                        && Self::workspace_session_logical_key(session) == **key
-                })
-        }) {
-            self.active_restored_workspace_session_key = Some(migrated.clone());
-        }
-        self.reconcile_active_restored_workspace_session_key(&sessions);
-        let materialized_live_session_keys = sessions
+        // Single Refresh path: materialization + display_order + restoring cleanup.
+        // Do not inject focused live here — that would overwrite restored markers.
+        let reduced = self.reduce_session_navigator_refresh(ctx, false);
+        self.apply_session_navigator_state(reduced.state);
+        // Adapter: clear restoring keys for panes that already have a live locator,
+        // even if the reducer still saw a twin virtual row briefly.
+        let live_sessions = self.live_workspace_sessions(ctx);
+        let materialized_live_session_keys = live_sessions
             .iter()
             .filter(|session| {
                 self.locator_for_workspace_session_snapshot(session, ctx)
@@ -1243,6 +1123,18 @@ impl Workspace {
             .collect::<Vec<_>>();
         for key in materialized_live_session_keys {
             self.restoring_workspace_session_keys.remove(&key);
+        }
+        // Focus-aware: a restored marker pointing at an unfocused live pane is stale
+        // (split materialize / resume leftover). Virtual restoring markers are kept.
+        if let Some(active) = self.active_restored_workspace_session_key.clone() {
+            let focused = self.logical_key_for_focused_live_pane(ctx);
+            let still_restoring = self.restoring_workspace_session_keys.contains(&active);
+            let points_at_live = live_sessions.iter().any(|session| {
+                Self::workspace_session_logical_key(session) == active
+            });
+            if points_at_live && !still_restoring && focused.as_ref() != Some(&active) {
+                self.active_restored_workspace_session_key = None;
+            }
         }
         ctx.notify();
     }
@@ -2009,6 +1901,35 @@ impl Workspace {
             "已取消置顶"
         };
         self.show_workspace_session_success_toast(message.to_owned(), ctx);
+    }
+
+    /// EC-08: reorder navigator rows by logical_key while keeping focus/active.
+    pub(super) fn reorder_session_navigator_sessions(
+        &mut self,
+        ordered_logical_keys: Vec<String>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let pane_info = self.snapshot_pane_group_info(ctx);
+        let state = self.snapshot_session_navigator_state();
+        let sessions = self.raw_session_navigator_sessions(ctx);
+        let action = SessionNavigatorAction::Reorder {
+            ordered_logical_keys: ordered_logical_keys.clone(),
+        };
+        let before = ReduceResult {
+            sessions: sessions.clone(),
+            state: state.clone(),
+            side_effect: SideEffect::None,
+        };
+        let reduced =
+            session_navigator_reducer::reduce(sessions, state, action.clone(), &pane_info);
+        if let Err(error) =
+            session_navigator_reducer::validate_transition(&before, &reduced, &action, &pane_info)
+        {
+            log::warn!("session_navigator reorder validate_transition: {error}");
+        }
+        self.apply_session_navigator_state(reduced.state);
+        self.sync_session_navigator_sessions(ctx);
+        ctx.notify();
     }
 
     // ── 恢复点激活 ─────────────────────────────────────────────────────────

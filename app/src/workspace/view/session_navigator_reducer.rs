@@ -114,6 +114,10 @@ pub enum SessionNavigatorAction {
         locator: PaneViewLocator,
         session_logical_key: Option<String>,
     },
+    /// 重排列表 (EC-08): 只改 display_order, focus/active_key 跟随 logical_key 不变
+    Reorder {
+        ordered_logical_keys: Vec<String>,
+    },
 }
 
 // ─────────────────────────────────────────────────────────
@@ -505,48 +509,75 @@ fn normalize_active(sessions: &mut [WorkspaceSessionSnapshot], state: &SessionNa
 // Materialization 追踪 (§6.4)
 // ─────────────────────────────────────────────────────────
 
-/// 在 Refresh 时检查 virtual → live consume, 主动迁移 active_key
+/// 在 Refresh 时检查 virtual → live consume, 主动迁移 active_key (§6.4)。
+/// 含 durable-key 迁移与 binding (cli_agent_session_id / conversation) 迁移；
+/// 找不到匹配时清除 active_key，不猜测 live-active。
 fn track_materialization(
     sessions: &[WorkspaceSessionSnapshot],
     state: &mut SessionNavigatorState,
 ) {
-    let Some(active_key) = state.active_key.as_ref() else {
+    let Some(active_key) = state.active_key.clone() else {
         return;
     };
 
-    // 检查 active_key 是否仍存在于 sessions 中
-    let active_exists = sessions
-        .iter()
-        .any(|s| logical_key(s) == *active_key);
+    let stored = sessions.iter().find(|s| logical_key(s) == active_key);
 
-    if active_exists {
-        return; // active_key 仍有效, 不需要迁移
+    if let Some(stored) = stored {
+        if is_live(stored) {
+            return;
+        }
+        // Virtual still present: migrate to live twin when env + binding match.
+        if let Some(live) = sessions.iter().find(|candidate| {
+            is_live(candidate)
+                && materialization_env_matches(stored, candidate)
+                && materialization_binding_matches(stored, candidate)
+        }) {
+            state.active_key = Some(logical_key(live));
+        }
+        return;
     }
 
-    // active_key 指向的 session 不在了
-    // 检查是否有 live container 的 durable key 匹配 active_key
-    // (virtual → live consume 的显式迁移)
-    for session in sessions.iter() {
-        if !is_live(session) {
-            continue;
-        }
-        // 检查 live session 的 durable key 是否匹配 active_key
-        if let Some(durable) = durable_key(session) {
-            if durable == *active_key {
-                // 显式迁移: virtual key → live key
-                state.active_key = Some(logical_key(session));
-                return;
-            }
-        }
-        // 也检查 logical_key 直接匹配 (Bridged 场景)
-        if logical_key(session) == *active_key {
-            return; // live session 的 logical_key 直接匹配
+    // Stored key missing: durable key equality only (no live-active guess).
+    for session in sessions.iter().filter(|s| is_live(s)) {
+        if durable_key(session).as_deref() == Some(active_key.as_str()) {
+            state.active_key = Some(logical_key(session));
+            return;
         }
     }
 
-    // 找不到匹配的 live session → 不猜测, 清除 active_key
-    // (被删场景: 走 Delete action 的 focus 决策)
     state.active_key = None;
+}
+
+fn materialization_env_matches(
+    stored: &WorkspaceSessionSnapshot,
+    live: &WorkspaceSessionSnapshot,
+) -> bool {
+    WorkspaceSessionSnapshot::logical_environment_key(stored.environment_authority_key.as_deref())
+        == WorkspaceSessionSnapshot::logical_environment_key(
+            live.environment_authority_key.as_deref(),
+        )
+}
+
+fn materialization_binding_matches(
+    stored: &WorkspaceSessionSnapshot,
+    live: &WorkspaceSessionSnapshot,
+) -> bool {
+    stored
+        .cli_agent_session_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .zip(live.cli_agent_session_id.as_deref())
+        .is_some_and(|(a, b)| a == b)
+        || stored
+            .active_conversation_id
+            .iter()
+            .chain(stored.conversation_ids.iter())
+            .any(|conv| {
+                live.active_conversation_id
+                    .iter()
+                    .chain(live.conversation_ids.iter())
+                    .any(|live_conv| conv == live_conv)
+            })
 }
 
 // ─────────────────────────────────────────────────────────
@@ -859,6 +890,34 @@ pub fn reduce(
                 side_effect: SideEffect::None,
             }
         }
+
+        SessionNavigatorAction::Reorder {
+            ordered_logical_keys,
+        } => {
+            // EC-08: reassign display_order by logical_key; keep active_key / restoring.
+            let active_before = state.active_key.clone();
+            for (index, key) in ordered_logical_keys.iter().enumerate() {
+                state.display_order.insert(key.clone(), index as u64);
+            }
+            if let Some(max_index) = ordered_logical_keys
+                .len()
+                .checked_sub(1)
+                .map(|i| i as u64)
+            {
+                state.next_display_order = state.next_display_order.max(max_index + 1);
+            }
+            sort_sessions(&mut sessions, &state);
+            recompute_active(&mut sessions, &state, pane_info);
+            debug_assert_eq!(
+                state.active_key, active_before,
+                "Reorder must not change active_key"
+            );
+            ReduceResult {
+                sessions,
+                state,
+                side_effect: SideEffect::None,
+            }
+        }
     }
 }
 
@@ -982,6 +1041,21 @@ pub fn validate_transition(
         } else if !matches!(after.side_effect, SideEffect::None) {
             return Err(format!(
                 "validate_transition: Delete must yield DeleteEffects or None, got {:?}",
+                after.side_effect
+            ));
+        }
+    }
+
+    if let SessionNavigatorAction::Reorder { .. } = action {
+        if before.state.active_key != after.state.active_key {
+            return Err(format!(
+                "validate_transition: Reorder changed active_key from {:?} to {:?}",
+                before.state.active_key, after.state.active_key
+            ));
+        }
+        if !matches!(after.side_effect, SideEffect::None) {
+            return Err(format!(
+                "validate_transition: Reorder must yield None, got {:?}",
                 after.side_effect
             ));
         }
