@@ -26,6 +26,10 @@ use super::{
     WorkspaceSessionActionTarget, WorkspaceSessionKind, WorkspaceSessionSnapshot,
     WORKSPACE_SESSIONS_REFRESH_TOAST_ID,
 };
+use super::session_navigator_reducer::{
+    self, DeleteCloseKind, DeleteEffects, PaneGroupInfo, ReduceResult, SessionNavigatorAction,
+    SessionNavigatorState, SideEffect, TabPaneInfo,
+};
 use crate::app_state::SessionDisplayOrderStrategy;
 
 #[derive(Debug)]
@@ -37,7 +41,6 @@ pub(super) struct WorkspaceSessionDeletePlan {
     alias_keys: Vec<String>,
     pin_keys: Vec<String>,
     user_state_authority: String,
-    deleted_session_was_active: bool,
 }
 
 impl Workspace {
@@ -85,22 +88,33 @@ impl Workspace {
             .filter(|session| {
                 Self::session_matches_current_environment(session, &current_authority)
             });
-        let mut sessions =
+        let mut merged =
             WorkspaceSessionSnapshot::merge_for_session_navigator(sources, &user_state.pinned);
-        self.filter_deleting_workspace_sessions(&mut sessions);
-        let preferred_active_key =
-            self.preferred_active_restored_workspace_session_key_for_sessions(&sessions);
-        for session in &mut sessions {
-            if preferred_active_key.as_deref()
-                == Some(Self::workspace_session_logical_key(session).as_str())
-            {
-                session.is_active = true;
+        self.filter_deleting_workspace_sessions(&mut merged);
+
+        // v3: active/is_active 由 reducer Refresh 决定; focused live pane 注入 active_key (§6.1)。
+        let pane_info = self.snapshot_pane_group_info(ctx);
+        let mut state = self.snapshot_session_navigator_state();
+        if let Some(focused_key) = self.logical_key_for_focused_live_pane(ctx) {
+            state.active_key = Some(focused_key);
+        }
+        // Preserve pins already on merged rows (tests / in-memory toggles) plus user_state.
+        let mut pinned_session_ids = user_state.pinned.clone();
+        for session in &merged {
+            if session.is_pinned {
+                pinned_session_ids.extend(session.stable_pin_keys());
             }
         }
-        Self::normalize_session_navigator_active_state(
-            &mut sessions,
-            preferred_active_key.as_deref(),
+        let reduced = session_navigator_reducer::reduce(
+            Vec::new(),
+            state,
+            SessionNavigatorAction::Refresh {
+                new_sessions: merged,
+                pinned_session_ids,
+            },
+            &pane_info,
         );
+        let mut sessions = reduced.sessions;
         for session in &mut sessions {
             if let Some(alias) = self.workspace_session_alias_with_state(session, &user_state) {
                 session.label = Some(alias);
@@ -259,7 +273,12 @@ impl Workspace {
                         .unwrap_or_default()
                         .cmp(right.label.as_deref().unwrap_or_default())
                 })
-                .then_with(|| left.id.cmp(&right.id))
+                // v3: tie-breaker 用 logical_key 不用 volatile id
+                // id 在 materialize 时从 agent:... 变成 tab:...,会导致 order 丢失
+                .then_with(|| {
+                    Self::workspace_session_logical_key(left)
+                        .cmp(&Self::workspace_session_logical_key(right))
+                })
         });
 
         for session in &sorted {
@@ -359,7 +378,12 @@ impl Workspace {
                         .unwrap_or_default()
                         .cmp(right.label.as_deref().unwrap_or_default())
                 })
-                .then_with(|| left.id.cmp(&right.id))
+                // v3: tie-breaker 用 logical_key 不用 volatile id
+                // id 在 materialize 时从 agent:... 变成 tab:...,会导致 order 丢失
+                .then_with(|| {
+                    Self::workspace_session_logical_key(left)
+                        .cmp(&Self::workspace_session_logical_key(right))
+                })
         });
     }
 
@@ -503,11 +527,16 @@ impl Workspace {
                         == active_restored_workspace_session_key
                 });
                 let Some(stored) = stored_session else {
-                    // The stored-key session is no longer present (e.g. a
-                    // historical conversation that became represented by the
-                    // new live tab and was filtered out of the navigator).
-                    // Assume materialization and track the live container.
-                    return Some(key);
+                    // SPEC §6.4: stored key missing → only migrate when a live
+                    // container's durable key equals the stored active key.
+                    // Never guess "whatever is live-active".
+                    let live = live_active?;
+                    if Self::workspace_session_durable_display_order_key(live).as_deref()
+                        == Some(active_restored_workspace_session_key)
+                    {
+                        return Some(key);
+                    }
+                    return None;
                 };
                 let live = live_active?;
                 let env_matches = WorkspaceSessionSnapshot::logical_environment_key(
@@ -555,6 +584,7 @@ impl Workspace {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn normalize_session_navigator_active_state(
         sessions: &mut [WorkspaceSessionSnapshot],
         preferred_active_key: Option<&str>,
@@ -1157,6 +1187,46 @@ impl Workspace {
     pub(super) fn sync_session_navigator_sessions(&mut self, ctx: &mut ViewContext<Self>) {
         self.prune_stale_restoring_workspace_session_keys(ctx);
         let sessions = self.session_navigator_sessions_for_display_update(ctx);
+        // v3: run Refresh through reducer for display_order + durable materialization,
+        // but keep active_key reconciliation on the Workspace path (focus-aware).
+        let pane_info = self.snapshot_pane_group_info(ctx);
+        let state = self.snapshot_session_navigator_state();
+        let mut pinned_session_ids = sessions
+            .iter()
+            .filter(|session| session.is_pinned)
+            .flat_map(|session| session.stable_pin_keys())
+            .collect::<HashSet<_>>();
+        // Also include durable pins from user state for current authority.
+        let authority = self.current_environment_authority_key(ctx);
+        pinned_session_ids.extend(
+            self.workspace_session_user_state_for_authority(&authority)
+                .pinned
+                .iter()
+                .cloned(),
+        );
+        let reduced = session_navigator_reducer::reduce(
+            sessions.clone(),
+            state,
+            SessionNavigatorAction::Refresh {
+                new_sessions: sessions.clone(),
+                pinned_session_ids,
+            },
+            &pane_info,
+        );
+        self.session_navigator_display_order = reduced.state.display_order;
+        self.next_session_navigator_display_order = reduced.state.next_display_order;
+        // Accept active_key migration only when reducer moved to an existing live key
+        // via durable match (§6.4). Do not accept blanket clears here — focus-aware
+        // reconcile below owns clearing stale restored markers.
+        if let Some(migrated) = reduced.state.active_key.as_ref().filter(|key| {
+            self.active_restored_workspace_session_key.as_deref() != Some(key.as_str())
+                && sessions.iter().any(|session| {
+                    session.is_live_container()
+                        && Self::workspace_session_logical_key(session) == **key
+                })
+        }) {
+            self.active_restored_workspace_session_key = Some(migrated.clone());
+        }
         self.reconcile_active_restored_workspace_session_key(&sessions);
         let materialized_live_session_keys = sessions
             .iter()
@@ -1654,7 +1724,6 @@ impl Workspace {
     pub(super) fn workspace_session_delete_plan(
         &self,
         session: WorkspaceSessionSnapshot,
-        deleted_session_was_active: bool,
     ) -> WorkspaceSessionDeletePlan {
         let backing_sessions = self.backing_sessions_for_workspace_session(&session);
         let mut cache_sessions = backing_sessions.clone();
@@ -1688,7 +1757,6 @@ impl Workspace {
             alias_keys,
             pin_keys,
             user_state_authority,
-            deleted_session_was_active,
         }
     }
 
@@ -1724,11 +1792,8 @@ impl Workspace {
         for key in Self::workspace_session_volatile_identity_keys(&plan.requested_session) {
             self.deleting_workspace_session_keys.remove(&key);
         }
-        if plan.deleted_session_was_active {
-            self.reselect_workspace_session_after_delete(&plan.requested_session, ctx);
-        } else {
-            self.sync_session_navigator_sessions(ctx);
-        }
+        // v3 §8: finish only clears user state; focus/close already applied via reducer.
+        self.sync_session_navigator_sessions(ctx);
     }
 
     fn clear_workspace_session_delete_plan_user_state(
@@ -1922,6 +1987,21 @@ impl Workspace {
             self.show_workspace_session_error_toast(format!("置顶状态更新失败：{error}"), ctx);
             return;
         }
+        // v3: Pin action must not change focus (reducer yields WriteUserState only).
+        let pane_info = self.snapshot_pane_group_info(ctx);
+        let state = self.snapshot_session_navigator_state();
+        let sessions = self.raw_session_navigator_sessions(ctx);
+        let reduced = session_navigator_reducer::reduce(
+            sessions,
+            state,
+            SessionNavigatorAction::Pin {
+                session_logical_key: Self::workspace_session_logical_key(&session),
+                pinned,
+            },
+            &pane_info,
+        );
+        debug_assert!(matches!(reduced.side_effect, SideEffect::WriteUserState));
+        self.apply_session_navigator_state(reduced.state);
         self.refresh_workspace_sessions(ctx);
         let message = if pinned {
             "已置顶会话"
@@ -1992,13 +2072,47 @@ impl Workspace {
 
         let locator = self.locator_for_workspace_session_snapshot(&session, ctx);
 
-        if let Some(locator) = locator {
-            self.focus_pane(locator, ctx);
-            self.set_active_restored_workspace_session_key_for_session(&session, ctx);
+        if let Some(_locator) = locator {
+            // v3: Activate live via reducer (FocusPane side effect).
+            let pane_info = self.snapshot_pane_group_info(ctx);
+            let state = self.snapshot_session_navigator_state();
+            let sessions = self.raw_session_navigator_sessions(ctx);
+            let reduced = session_navigator_reducer::reduce(
+                sessions,
+                state,
+                SessionNavigatorAction::Activate {
+                    session_logical_key: logical_key.clone(),
+                    session_id: session.id.clone(),
+                    is_live: true,
+                },
+                &pane_info,
+            );
+            self.apply_session_navigator_state(reduced.state);
+            let _ = self.apply_session_navigator_side_effect(&reduced.side_effect, None, ctx);
             self.clear_workspace_session_restoring(&session);
             ctx.notify();
             return;
         }
+
+        // v3: virtual Activate → reducer sets restoring + active_key + SpawnTerminal.
+        let pane_info = self.snapshot_pane_group_info(ctx);
+        let state = self.snapshot_session_navigator_state();
+        let sessions = self.raw_session_navigator_sessions(ctx);
+        let reduced = session_navigator_reducer::reduce(
+            sessions,
+            state,
+            SessionNavigatorAction::Activate {
+                session_logical_key: logical_key.clone(),
+                session_id: session.id.clone(),
+                is_live: false,
+            },
+            &pane_info,
+        );
+        self.apply_session_navigator_state(reduced.state);
+        debug_assert!(matches!(
+            reduced.side_effect,
+            SideEffect::SpawnTerminal { .. }
+        ));
 
         if let Some(conversation_id) =
             Self::conversation_id_from_ashide_conversation_session_id(&session.id)
@@ -2037,9 +2151,9 @@ impl Workspace {
             None
         };
 
+        // restoring_keys already set by reducer; keep id twin for legacy lookups.
         self.restoring_workspace_session_keys
             .insert(session.id.clone());
-        self.restoring_workspace_session_keys.insert(logical_key);
         ctx.notify();
 
         if session
@@ -2122,18 +2236,376 @@ impl Workspace {
         ctx.show_native_platform_modal(dialog);
     }
 
+    pub(super) fn snapshot_session_navigator_state(&self) -> SessionNavigatorState {
+        SessionNavigatorState {
+            active_key: self.active_restored_workspace_session_key.clone(),
+            restoring_keys: self.restoring_workspace_session_keys.clone(),
+            deleting_keys: self.deleting_workspace_session_keys.clone(),
+            display_order: self.session_navigator_display_order.clone(),
+            next_display_order: self.next_session_navigator_display_order,
+        }
+    }
+
+    pub(super) fn logical_key_for_focused_live_pane(&self, ctx: &AppContext) -> Option<String> {
+        let tab = self.tabs.get(self.active_tab_index)?;
+        let pane_group = tab.pane_group.as_ref(ctx);
+        let focused_id = pane_group.focused_pane_id(ctx);
+        self.live_workspace_sessions(ctx).into_iter().find_map(|session| {
+            self.locator_for_workspace_session_snapshot(&session, ctx)
+                .filter(|locator| locator.pane_id == focused_id)
+                .map(|_| Self::workspace_session_logical_key(&session))
+        })
+    }
+
+    /// After tab/pane focus changes, clear stale restored active markers.
+    /// Display active still follows focused live pane via raw Refresh injection (§6.1).
+    pub(super) fn notify_session_navigator_focus_changed(
+        &mut self,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let focused_key = self.logical_key_for_focused_live_pane(ctx);
+        if let Some(active) = self.active_restored_workspace_session_key.clone() {
+            let still_focused = focused_key.as_ref() == Some(&active);
+            let still_restoring = self.restoring_workspace_session_keys.contains(&active);
+            if !still_focused && !still_restoring {
+                self.active_restored_workspace_session_key = None;
+            }
+        }
+
+        // Book-keep reducer TabActivated / PaneFocused without forcing active_key onto
+        // workspace (that would replace a cleared restored marker with a live key).
+        let tab_index = self.active_tab_index;
+        let pane_info = self.snapshot_pane_group_info(ctx);
+        let state = self.snapshot_session_navigator_state();
+        let sessions = {
+            // Avoid full raw Refresh recursion cost: use live+restored snapshot lightly
+            self.live_workspace_sessions(ctx)
+        };
+        let _ = session_navigator_reducer::reduce(
+            sessions,
+            state,
+            SessionNavigatorAction::TabActivated { tab_index },
+            &pane_info,
+        );
+        if let Some(tab) = self.tabs.get(tab_index) {
+            let locator = PaneViewLocator {
+                pane_group_id: tab.pane_group.id(),
+                pane_id: tab.pane_group.as_ref(ctx).focused_pane_id(ctx),
+            };
+            let _ = session_navigator_reducer::reduce(
+                Vec::new(),
+                self.snapshot_session_navigator_state(),
+                SessionNavigatorAction::PaneFocused {
+                    locator,
+                    session_logical_key: focused_key,
+                },
+                &pane_info,
+            );
+        }
+    }
+
+    pub(super) fn apply_session_navigator_state(&mut self, state: SessionNavigatorState) {
+        self.active_restored_workspace_session_key = state.active_key;
+        self.restoring_workspace_session_keys = state.restoring_keys;
+        self.deleting_workspace_session_keys = state.deleting_keys;
+        self.session_navigator_display_order = state.display_order;
+        self.next_session_navigator_display_order = state.next_display_order;
+    }
+
+    pub(super) fn snapshot_pane_group_info(&self, ctx: &AppContext) -> PaneGroupInfo {
+        let mut info = PaneGroupInfo::new();
+        for (tab_index, tab) in self.tabs.iter().enumerate() {
+            let pane_group = tab.pane_group.as_ref(ctx);
+            let visible_ids = pane_group.visible_pane_ids();
+            let focused_id = pane_group.focused_pane_id(ctx);
+            let mut all_pane_locators = Vec::with_capacity(visible_ids.len());
+            for (leaf, pane_id) in visible_ids.iter().enumerate() {
+                if let Some(locator) = self.locator_for_tab_pane_index(tab_index, leaf, ctx) {
+                    // Prefer index-based locator; fall back to constructing from visible id.
+                    all_pane_locators.push(if locator.pane_id == *pane_id {
+                        locator
+                    } else {
+                        PaneViewLocator {
+                            pane_group_id: tab.pane_group.id(),
+                            pane_id: *pane_id,
+                        }
+                    });
+                } else {
+                    all_pane_locators.push(PaneViewLocator {
+                        pane_group_id: tab.pane_group.id(),
+                        pane_id: *pane_id,
+                    });
+                }
+            }
+            let focused_locator = all_pane_locators
+                .iter()
+                .find(|locator| locator.pane_id == focused_id)
+                .cloned()
+                .or_else(|| {
+                    Some(PaneViewLocator {
+                        pane_group_id: tab.pane_group.id(),
+                        pane_id: focused_id,
+                    })
+                });
+            let prev_pane_locator = pane_group
+                .prev_pane_id(focused_id)
+                .map(|pane_id| PaneViewLocator {
+                    pane_group_id: tab.pane_group.id(),
+                    pane_id,
+                });
+            info.tabs.insert(
+                tab_index,
+                TabPaneInfo {
+                    visible_pane_count: visible_ids.len(),
+                    focused_locator,
+                    prev_pane_locator,
+                    all_pane_locators,
+                },
+            );
+        }
+        info
+    }
+
+    /// Apply reducer side effects. Returns false if close was refused (sole pane / no CloseWindow).
+    pub(super) fn apply_session_navigator_side_effect(
+        &mut self,
+        side_effect: &SideEffect,
+        deleted_session: Option<&WorkspaceSessionSnapshot>,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        match side_effect {
+            SideEffect::FocusPane(locator) => {
+                self.focus_pane(locator.clone(), ctx);
+                true
+            }
+            SideEffect::SpawnTerminal { .. } => {
+                // Virtual activate path performs spawn after reduce; nothing else here.
+                true
+            }
+            SideEffect::WriteUserState => true,
+            SideEffect::None => {
+                // Live delete with no reducer hit: still close via derived DeleteEffects path.
+                if let Some(session) = deleted_session.filter(|s| s.is_live_container()) {
+                    return self.apply_delete_effects(
+                        &DeleteEffects {
+                            focus: None,
+                            close: DeleteCloseKind::None,
+                        },
+                        Some(session),
+                        ctx,
+                    );
+                }
+                true
+            }
+            SideEffect::DeleteEffects(effects) => {
+                self.apply_delete_effects(effects, deleted_session, ctx)
+            }
+        }
+    }
+
+    fn apply_delete_effects(
+        &mut self,
+        effects: &DeleteEffects,
+        deleted_session: Option<&WorkspaceSessionSnapshot>,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        if let Some(session) = deleted_session {
+            self.clear_active_restored_workspace_session_if_matches(session, ctx);
+        }
+        // Adapter: refuse closing the window's last visible pane.
+        if matches!(effects.close, DeleteCloseKind::CloseTab(_))
+            && self.tabs.len() == 1
+            && !ContextFlag::CloseWindow.is_enabled()
+        {
+            if let Some(tab) = self.tabs.first() {
+                if tab.pane_group.as_ref(ctx).visible_pane_ids().len() <= 1 {
+                    return false;
+                }
+            }
+        }
+        if let DeleteCloseKind::ClosePane(locator) = &effects.close {
+            if self.tabs.len() == 1 && !ContextFlag::CloseWindow.is_enabled() {
+                if let Some(tab) = self.tabs.first() {
+                    let pane_group = tab.pane_group.as_ref(ctx);
+                    if pane_group.visible_pane_ids().len() <= 1
+                        && pane_group.visible_pane_ids().contains(&locator.pane_id)
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        // Focus first (SPEC §8: Focus then Close), except multi-pane ClosePane where
+        // close_pane_permanently already focuses the sibling via focus_next.
+        let skip_explicit_focus = matches!(effects.close, DeleteCloseKind::ClosePane(_))
+            && effects.focus.is_some();
+        if !skip_explicit_focus {
+            if let Some(locator) = &effects.focus {
+                self.focus_pane(locator.clone(), ctx);
+            }
+        }
+
+        match &effects.close {
+            DeleteCloseKind::None => {
+                // Live twin without reducer close (unparseable id): derive close here
+                // so production never needs a second close_live path.
+                if let Some(session) = deleted_session.filter(|s| s.is_live_container()) {
+                    if let Some((tab_index, pane_index)) =
+                        Self::locator_from_restored_session_id(&session.id)
+                    {
+                        if let Some(locator) =
+                            self.locator_for_tab_pane_index(tab_index, pane_index, ctx)
+                        {
+                            let visible = self
+                                .tabs
+                                .get(tab_index)
+                                .map(|tab| tab.pane_group.as_ref(ctx).visible_pane_ids().len())
+                                .unwrap_or(0);
+                            if visible <= 1 {
+                                if self.tabs.len() == 1 && !ContextFlag::CloseWindow.is_enabled() {
+                                    return false;
+                                }
+                                self.close_tab(tab_index, true, false, ctx);
+                            } else {
+                                if let Some(pane_group) =
+                                    self.tabs.get(tab_index).map(|tab| tab.pane_group.clone())
+                                {
+                                    pane_group.update(ctx, |pane_group, ctx| {
+                                        pane_group.close_pane_permanently(locator.pane_id, ctx);
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            DeleteCloseKind::ClosePane(locator) => {
+                let Some(pane_group) = self
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.pane_group.id() == locator.pane_group_id)
+                    .map(|tab| tab.pane_group.clone())
+                else {
+                    return true;
+                };
+                pane_group.update(ctx, |pane_group, ctx| {
+                    pane_group.close_pane_permanently(locator.pane_id, ctx);
+                });
+            }
+            DeleteCloseKind::CloseTab(tab_index) => {
+                if *tab_index < self.tabs.len() {
+                    self.close_tab(*tab_index, true, false, ctx);
+                }
+            }
+        }
+
+        // Adapter hooks: env recreate / terminal-bootstrap after close.
+        if let Some(session) = deleted_session {
+            self.apply_delete_adapter_hooks(session, effects, ctx);
+        }
+        true
+    }
+
+    fn apply_delete_adapter_hooks(
+        &mut self,
+        deleted_session: &WorkspaceSessionSnapshot,
+        effects: &DeleteEffects,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        // Multi-pane ClosePane: sibling already focused; nothing else.
+        if matches!(effects.close, DeleteCloseKind::ClosePane(_)) {
+            self.sync_session_navigator_sessions(ctx);
+            return;
+        }
+
+        let target_authority =
+            crate::workspace::environment_runtime::session_authority_or_terminal_bootstrap(
+                deleted_session.environment_authority_key.as_deref(),
+            );
+
+        // If focus already landed on a same-env live pane, just sync.
+        if effects.focus.is_some() {
+            self.sync_session_navigator_sessions(ctx);
+            return;
+        }
+
+        if crate::workspace::environment_runtime::authority_uses_terminal_bootstrap(target_authority)
+        {
+            let active_is_local = self
+                .tabs
+                .get(self.active_tab_index)
+                .is_some_and(|tab| tab.environment.is_none());
+            if !active_is_local {
+                if let Some(local_tab_index) =
+                    self.tabs.iter().position(|tab| tab.environment.is_none())
+                {
+                    self.activate_tab(local_tab_index, ctx);
+                } else if self.tabs.is_empty() {
+                    self.add_explicit_terminal_bootstrap_default_tab(None, ctx);
+                }
+            } else if self.tabs.is_empty() {
+                self.add_explicit_terminal_bootstrap_default_tab(None, ctx);
+            }
+            self.sync_session_navigator_sessions(ctx);
+            return;
+        }
+
+        // Non-bootstrap env: recreate / reselect environment tab when no same-env live remains.
+        let has_same_env_live = self.live_workspace_sessions(ctx).into_iter().any(|session| {
+            Self::session_matches_current_environment(&session, target_authority)
+        });
+        if !has_same_env_live {
+            if self.ensure_environment_tab_for_authority(target_authority, ctx) {
+                self.prepare_active_environment_after_visible_tab_activation(ctx);
+            }
+        } else if let Some(tab_index) = self.tab_index_for_environment_authority(target_authority) {
+            self.activate_tab(tab_index, ctx);
+        }
+        self.sync_session_navigator_sessions(ctx);
+    }
+
     pub(super) fn delete_workspace_session_for_session(
         &mut self,
         session: &WorkspaceSessionSnapshot,
         ctx: &mut ViewContext<Self>,
     ) {
         self.clear_workspace_session_restoring(session);
-        let deleted_session_was_active = self.workspace_session_is_active_selection(session, ctx);
-        let plan = self.workspace_session_delete_plan(session.clone(), deleted_session_was_active);
-        if deleted_session_was_active {
-            self.preselect_workspace_session_before_delete(&plan.requested_session, ctx);
+        let plan = self.workspace_session_delete_plan(session.clone());
+
+        // v3 unified delete: one reducer.Delete decides focus + close.
+        let pane_info = self.snapshot_pane_group_info(ctx);
+        let navigator_state = self.snapshot_session_navigator_state();
+        let sessions_before = self.raw_session_navigator_sessions(ctx);
+        let action = SessionNavigatorAction::Delete {
+            session_logical_key: Self::workspace_session_logical_key(&plan.requested_session),
+            session_id: plan.requested_session.id.clone(),
+            environment_authority_key: plan.requested_session.environment_authority_key.clone(),
+        };
+        let before = ReduceResult {
+            sessions: sessions_before.clone(),
+            state: navigator_state.clone(),
+            side_effect: SideEffect::None,
+        };
+        let reduced = session_navigator_reducer::reduce(
+            sessions_before,
+            navigator_state,
+            action.clone(),
+            &pane_info,
+        );
+        if let Err(error) =
+            session_navigator_reducer::validate_transition(&before, &reduced, &action, &pane_info)
+        {
+            log::warn!("session_navigator delete validate_transition: {error}");
         }
-        if !self.close_live_workspace_session_for_delete(&plan.requested_session, ctx) {
+        self.apply_session_navigator_state(reduced.state);
+
+        let applied = self.apply_session_navigator_side_effect(
+            &reduced.side_effect,
+            Some(&plan.requested_session),
+            ctx,
+        );
+        if !applied {
             self.show_workspace_session_error_toast(
                 "无法关闭当前唯一会话窗口，删除已取消".to_owned(),
                 ctx,
@@ -2141,6 +2613,7 @@ impl Workspace {
             ctx.notify();
             return;
         }
+
         self.begin_workspace_session_delete_plan(&plan, ctx);
 
         #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
@@ -2245,6 +2718,7 @@ impl Workspace {
         self.delete_workspace_session_for_session(&session, ctx);
     }
 
+    #[cfg(test)]
     pub(super) fn workspace_session_is_active_selection(
         &self,
         session: &WorkspaceSessionSnapshot,
@@ -2266,196 +2740,6 @@ impl Workspace {
                                     == locator.pane_id
                         })
                 })
-    }
-
-    fn preselect_workspace_session_before_delete(
-        &mut self,
-        deleted_session: &WorkspaceSessionSnapshot,
-        ctx: &mut ViewContext<Self>,
-    ) -> bool {
-        let target_authority =
-            crate::workspace::environment_runtime::session_authority_or_terminal_bootstrap(
-                deleted_session.environment_authority_key.as_deref(),
-            );
-        let deleted_key = Self::workspace_session_logical_key(deleted_session);
-        let deleted_live_tab_index = Self::locator_from_restored_session_id(&deleted_session.id)
-            .and_then(|(tab_index, _)| {
-                self.locator_for_workspace_session_snapshot(deleted_session, ctx)
-                    .map(|_| tab_index)
-            });
-
-        if let Some(locator) = self
-            .live_workspace_sessions(ctx)
-            .into_iter()
-            .filter(|candidate| {
-                Self::session_matches_current_environment(candidate, target_authority)
-                    && Self::workspace_session_logical_key(candidate) != deleted_key
-            })
-            .filter_map(|candidate| self.locator_for_workspace_session_snapshot(&candidate, ctx))
-            .next()
-        {
-            self.focus_pane(locator, ctx);
-            self.sync_session_navigator_sessions(ctx);
-            return true;
-        }
-
-        if let Some(tab_index) = self
-            .tab_index_for_environment_authority(target_authority)
-            .filter(|tab_index| Some(*tab_index) != deleted_live_tab_index)
-        {
-            self.activate_tab(tab_index, ctx);
-            self.sync_session_navigator_sessions(ctx);
-            return true;
-        }
-
-        if crate::workspace::environment_runtime::authority_uses_terminal_bootstrap(
-            target_authority,
-        ) {
-            if let Some(local_tab_index) =
-                self.tabs.iter().enumerate().find_map(|(tab_index, tab)| {
-                    (tab.environment.is_none() && Some(tab_index) != deleted_live_tab_index)
-                        .then_some(tab_index)
-                })
-            {
-                self.activate_tab(local_tab_index, ctx);
-                self.sync_session_navigator_sessions(ctx);
-                return true;
-            }
-
-            let deleting_only_visible_tab = self.tabs.len() == 1
-                && deleted_live_tab_index == Some(self.active_tab_index())
-                && !ContextFlag::CloseWindow.is_enabled();
-            if deleting_only_visible_tab {
-                self.add_explicit_terminal_bootstrap_default_tab(None, ctx);
-                self.sync_session_navigator_sessions(ctx);
-                return true;
-            }
-
-            return false;
-        }
-
-        if self.ensure_environment_tab_for_authority(target_authority, ctx) {
-            self.prepare_active_environment_after_visible_tab_activation(ctx);
-            self.sync_session_navigator_sessions(ctx);
-            return true;
-        }
-
-        false
-    }
-
-    pub(super) fn reselect_workspace_session_after_delete(
-        &mut self,
-        deleted_session: &WorkspaceSessionSnapshot,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.clear_active_restored_workspace_session_if_matches(deleted_session, ctx);
-        let target_authority =
-            crate::workspace::environment_runtime::session_authority_or_terminal_bootstrap(
-                deleted_session.environment_authority_key.as_deref(),
-            );
-        let deleted_key = Self::workspace_session_logical_key(deleted_session);
-
-        let replacement_locator = self
-            .live_workspace_sessions(ctx)
-            .into_iter()
-            .filter(|candidate| {
-                Self::session_matches_current_environment(candidate, target_authority)
-                    && Self::workspace_session_logical_key(candidate) != deleted_key
-            })
-            .filter_map(|candidate| self.locator_for_workspace_session_snapshot(&candidate, ctx))
-            .next();
-
-        if let Some(locator) = replacement_locator {
-            self.focus_pane(locator, ctx);
-            self.sync_session_navigator_sessions(ctx);
-            return;
-        }
-
-        if let Some(tab_index) = self.tab_index_for_environment_authority(target_authority) {
-            self.activate_tab(tab_index, ctx);
-        } else if crate::workspace::environment_runtime::authority_uses_terminal_bootstrap(
-            target_authority,
-        ) {
-            // 删除的是本地 / terminal-bootstrap 会话:它所在的 tab `environment == None`,
-            // `tab_index_for_environment_authority` 永远匹配不到。若还有其它本地 tab,切回本地;
-            // 若没有,不要在删除完成阶段再凭空创建空 terminal tab。唯一可见 tab 的防关窗兜底
-            // 已在 preselect_workspace_session_before_delete 中处理。
-            let active_is_local = self
-                .tabs
-                .get(self.active_tab_index)
-                .is_some_and(|tab| tab.environment.is_none());
-            if !active_is_local {
-                if let Some(local_tab_index) =
-                    self.tabs.iter().position(|tab| tab.environment.is_none())
-                {
-                    self.activate_tab(local_tab_index, ctx);
-                }
-            }
-        } else {
-            if self.ensure_environment_tab_for_authority(target_authority, ctx) {
-                self.prepare_active_environment_after_visible_tab_activation(ctx);
-            }
-        }
-        self.sync_session_navigator_sessions(ctx);
-    }
-
-    pub(super) fn close_live_workspace_session_for_delete(
-        &mut self,
-        session: &WorkspaceSessionSnapshot,
-        ctx: &mut ViewContext<Self>,
-    ) -> bool {
-        let live_session = self
-            .live_workspace_sessions(ctx)
-            .into_iter()
-            .find(|candidate| Self::is_same_workspace_session(session, candidate));
-        let Some(live_session) = live_session else {
-            return true;
-        };
-        let Some((tab_index, pane_index)) =
-            Self::locator_from_restored_session_id(&live_session.id)
-        else {
-            return true;
-        };
-        if self
-            .locator_for_workspace_session_snapshot(&live_session, ctx)
-            .is_none()
-        {
-            log::warn!(
-                "close_live_workspace_session_for_delete: refusing cross-environment live close for {}",
-                live_session.id
-            );
-            return true;
-        }
-
-        if self.tabs.len() == 1 && !ContextFlag::CloseWindow.is_enabled() {
-            let Some(pane_group) = self
-                .tabs
-                .get(tab_index)
-                .map(|tab| tab.pane_group.as_ref(ctx))
-            else {
-                return true;
-            };
-            if pane_group.visible_pane_ids().len() == 1 {
-                return false;
-            }
-        }
-
-        let Some(locator) = self.locator_for_tab_pane_index(tab_index, pane_index, ctx) else {
-            return true;
-        };
-        let Some(pane_group) = self.tabs.get(tab_index).map(|tab| tab.pane_group.clone()) else {
-            return true;
-        };
-        let visible_pane_count = pane_group.as_ref(ctx).visible_pane_ids().len();
-        if visible_pane_count <= 1 {
-            self.close_tab(tab_index, true, false, ctx);
-            return true;
-        }
-
-        pane_group.update(ctx, |pane_group, ctx| {
-            pane_group.close_pane_permanently(locator.pane_id, ctx);
-        });
-        true
     }
 
     // ── 恢复中状态清理 ─────────────────────────────────────────────────────

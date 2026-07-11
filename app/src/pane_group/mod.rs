@@ -4710,7 +4710,7 @@ impl PaneGroup {
     /// Returns the ID of the pane immediately previous to the given view
     ///
     /// Will retrieve from the history of selected panes when available
-    fn prev_pane_id(&self, current_pane: PaneId) -> Option<PaneId> {
+    pub(crate) fn prev_pane_id(&self, current_pane: PaneId) -> Option<PaneId> {
         let pane_ids = self.panes.pane_ids();
 
         let candidate = pane_ids

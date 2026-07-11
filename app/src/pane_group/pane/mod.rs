@@ -416,6 +416,15 @@ impl PaneId {
         })
     }
 
+    /// Creates a [`PaneId`] for testing with a deterministic entity id.
+    #[cfg(test)]
+    pub fn test_from_usize(value: usize) -> Self {
+        Self(IPaneId {
+            pane_type: IPaneType::Terminal,
+            pane_view_id: warpui::EntityId::from_usize(value),
+        })
+    }
+
     /// Creates a placeholder [`PaneId`] for non-live sessions surfaced into
     /// the command-palette search (restored / indexed / historical sessions
     /// with no backing terminal pane). The placeholder is never used to focus

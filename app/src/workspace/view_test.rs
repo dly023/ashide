@@ -3373,7 +3373,7 @@ fn test_session_navigator_live_row_delete_keeps_materialized_backing_source() {
                 "deleting a materialized live row must still target the indexed/restored provider source; otherwise the UI reports success but the scan brings the row back"
             );
 
-            let plan = workspace.workspace_session_delete_plan(live, false);
+            let plan = workspace.workspace_session_delete_plan(live);
             workspace.begin_workspace_session_delete_plan(&plan, ctx);
 
             assert!(
@@ -9881,7 +9881,7 @@ fn test_delete_confirmation_uses_resolved_session_snapshot() {
                 })
                 .expect("expected active environment live session");
 
-            let plan = workspace.workspace_session_delete_plan(live_session.clone(), true);
+            let plan = workspace.workspace_session_delete_plan(live_session.clone());
             workspace.begin_workspace_session_delete_plan(&plan, ctx);
             workspace.delete_workspace_session_for_session(&live_session, ctx);
         });
@@ -9975,6 +9975,220 @@ fn test_deleting_only_live_environment_session_keeps_environment_selected() {
                     .map(|environment| environment.authority_key.as_str()),
                 Some(authority.as_str())
             );
+        });
+    });
+}
+
+#[test]
+fn test_deleting_split_pane_session_keeps_focus_on_sibling_in_same_tab() {
+    // EC-01: delete one pane in a split tab → focus stays on sibling, no tab jump.
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let tab_index = workspace.active_tab_index();
+            if let Some(tab_view) = workspace.get_pane_group_view(tab_index) {
+                tab_view.update(ctx, |view, ctx| {
+                    view.handle_action(&PaneGroupAction::Add(Direction::Right), ctx);
+                });
+            }
+
+            let pane_group = workspace.tabs[tab_index].pane_group.clone();
+            let visible = pane_group.as_ref(ctx).visible_pane_ids();
+            assert_eq!(visible.len(), 2, "expected a two-pane split");
+
+            let focused_before = pane_group.as_ref(ctx).focused_pane_id(ctx);
+            let sibling = visible
+                .iter()
+                .copied()
+                .find(|id| *id != focused_before)
+                .expect("sibling pane");
+
+            let deleted_session = workspace
+                .live_workspace_sessions(ctx)
+                .into_iter()
+                .find(|session| {
+                    session.is_active
+                        && workspace
+                            .locator_for_workspace_session_snapshot(session, ctx)
+                            .is_some_and(|locator| locator.pane_id == focused_before)
+                })
+                .expect("expected active live session for focused pane");
+
+            workspace.delete_workspace_session_for_session(&deleted_session, ctx);
+
+            assert_eq!(
+                workspace.active_tab_index(),
+                tab_index,
+                "delete in a split must not jump to another tab"
+            );
+            assert_eq!(
+                workspace.tabs[tab_index]
+                    .pane_group
+                    .as_ref(ctx)
+                    .visible_pane_ids()
+                    .len(),
+                1,
+                "exactly one pane should remain after delete"
+            );
+            assert_eq!(
+                workspace.tabs[tab_index]
+                    .pane_group
+                    .as_ref(ctx)
+                    .focused_pane_id(ctx),
+                sibling,
+                "focus must stay on the sibling pane in the same tab"
+            );
+
+            let active_sessions: Vec<_> = workspace
+                .session_navigator_sessions(ctx)
+                .into_iter()
+                .filter(|session| session.is_active)
+                .collect();
+            assert_eq!(active_sessions.len(), 1);
+            assert!(
+                workspace
+                    .locator_for_workspace_session_snapshot(&active_sessions[0], ctx)
+                    .is_some_and(|locator| locator.pane_id == sibling),
+                "navigator active row must track the sibling pane"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_deleting_local_tab_session_focuses_same_env_neighbor_tab() {
+    // EC-02 / EC-16 (local): delete sole pane of a local tab → focus same-env neighbor.
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+            assert_eq!(workspace.tab_count(), 2);
+            let deleted_tab = workspace.active_tab_index();
+            assert_eq!(deleted_tab, 1);
+
+            let deleted_session = workspace
+                .live_workspace_sessions(ctx)
+                .into_iter()
+                .find(|session| session.is_active)
+                .expect("expected active live session on new tab");
+
+            workspace.delete_workspace_session_for_session(&deleted_session, ctx);
+
+            assert_eq!(workspace.tab_count(), 1);
+            assert_eq!(workspace.active_tab_index(), 0);
+            let remaining_is_local = workspace.tabs[0].environment.as_ref().is_none_or(|env| {
+                matches!(env.kind, EnvironmentKind::Local)
+                    || crate::workspace::environment_runtime::authority_uses_terminal_bootstrap(
+                        &env.authority_key,
+                    )
+            });
+            assert!(
+                remaining_is_local,
+                "should remain on local / terminal-bootstrap tab, got {:?}",
+                workspace.tabs[0].environment.as_ref().map(|e| &e.kind)
+            );
+            let active = workspace
+                .session_navigator_sessions(ctx)
+                .into_iter()
+                .find(|session| session.is_active);
+            assert!(active.is_some(), "neighbor local session should be active");
+        });
+    });
+}
+
+#[test]
+fn test_deleting_only_live_local_session_does_not_close_window() {
+    // EC-03 / EC-09: last local session must not close the window.
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(workspace.tab_count(), 1);
+            let deleted_session = workspace
+                .live_workspace_sessions(ctx)
+                .into_iter()
+                .find(|session| session.is_active)
+                .expect("expected active local session");
+
+            workspace.delete_workspace_session_for_session(&deleted_session, ctx);
+
+            assert!(
+                workspace.tab_count() >= 1,
+                "deleting the last local session must not close the window"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_pin_workspace_session_does_not_change_focus() {
+    // EC-10: pin/unpin must not change focus or active navigator row.
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace
+                .restored_workspace_sessions
+                .push(test_session_navigator_order_session(
+                    "pin-focus-a",
+                    "A",
+                    10,
+                ));
+            workspace
+                .restored_workspace_sessions
+                .push(test_session_navigator_order_session(
+                    "pin-focus-b",
+                    "B",
+                    20,
+                ));
+            workspace.sync_session_navigator_sessions(ctx);
+
+            let focused_before = workspace
+                .tabs
+                .get(workspace.active_tab_index())
+                .map(|tab| tab.pane_group.as_ref(ctx).focused_pane_id(ctx));
+            let active_before = workspace
+                .session_navigator_sessions(ctx)
+                .into_iter()
+                .find(|session| session.is_active)
+                .map(|session| session.id);
+
+            let pin_target = workspace
+                .session_navigator_sessions(ctx)
+                .into_iter()
+                .find(|session| session.id == "pin-focus-b")
+                .expect("pin target");
+            let pin_target = Workspace::workspace_session_action_target(&pin_target);
+            workspace.toggle_workspace_session_pinned(&pin_target, true, ctx);
+
+            let focused_after = workspace
+                .tabs
+                .get(workspace.active_tab_index())
+                .map(|tab| tab.pane_group.as_ref(ctx).focused_pane_id(ctx));
+            let active_after = workspace
+                .session_navigator_sessions(ctx)
+                .into_iter()
+                .find(|session| session.is_active)
+                .map(|session| session.id);
+
+            assert_eq!(
+                focused_before, focused_after,
+                "pin must not change physical pane focus"
+            );
+            assert_eq!(
+                active_before, active_after,
+                "pin must not change navigator active row"
+            );
+
+            // Always unpin: toggle persists to ~/.ashide/session_state.json and
+            // would otherwise pollute later tests that assert empty pinned state.
+            workspace.toggle_workspace_session_pinned(&pin_target, false, ctx);
         });
     });
 }

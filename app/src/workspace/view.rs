@@ -8,6 +8,7 @@ pub(crate) mod onboarding;
 pub(crate) mod right_panel;
 pub(crate) mod server_file_browser;
 mod session_navigator;
+mod session_navigator_reducer;
 mod startup_directory;
 #[cfg(test)]
 #[path = "view_test.rs"]
@@ -5613,6 +5614,7 @@ impl Workspace {
 
             self.set_active_tab_index(index, ctx);
             self.focus_active_tab(ctx);
+            self.notify_session_navigator_focus_changed(ctx);
             self.update_window_title(ctx);
         }
     }
@@ -7316,6 +7318,8 @@ impl Workspace {
                 view.focus_pane_by_id(pane_view_locator.pane_id, ctx);
             });
             self.activate_tab_internal(index, ctx);
+            // activate_tab_internal already notifies navigator; ensure pane id is the one requested
+            // (activate focuses the tab's remembered pane, which should match after focus_pane_by_id).
             if activate_environment {
                 self.prepare_active_environment_after_visible_tab_activation(ctx);
             }
@@ -8432,7 +8436,7 @@ impl Workspace {
         )
     }
 
-    fn locator_for_tab_pane_index(
+    pub(super) fn locator_for_tab_pane_index(
         &self,
         tab_index: usize,
         pane_index: usize,

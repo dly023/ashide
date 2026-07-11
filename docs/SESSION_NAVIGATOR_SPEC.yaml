@@ -1,14 +1,24 @@
-# Ashide Session Navigator 语义规范
+# Ashide Session Navigator 语义规范 v3
 #
-# 这是 Session Navigator 排序、合并、置顶、删除、生命周期行为的唯一权威定义。
-# 代码实现 (app_state.rs / session_navigator.rs / cli_agent_session_index.rs)
-# 和所有测试 (app_state_tests.rs / view_test.rs) 必须与此 spec 一致。
+# 这是 Session Navigator 排序、合并、置顶、删除、恢复、focus/active/selection
+# 行为的唯一权威定义。代码实现和所有测试必须与此 spec 一致。
 # 当 spec 与代码冲突时,以 spec 为准;修改行为先改 spec 再改代码。
 #
-# 版本: 2  (v1 = codex commit 8aef2d2 的隐式语义,已废弃)
+# v3 变更摘要:
+#   - 新增 focus/active/selection 优先级链 (§6)
+#   - 新增纯 reducer 契约 (§7): 所有列表变化走同一 reducer
+#   - 修正 tie-breaker: 用 logical_key 不用 volatile id (§3)
+#   - 修正删除流程: 统一 focus 决策,消除 preselect/reselect 重复 (§8)
+#   - 修正 materialization 追踪: 显式迁移,不靠猜测 (§6.4)
+#   - 新增边界条件全量覆盖 (§9)
+#   - 新增测试矩阵: 序列测试 + oracle + 排序稳定性 + tie-break (§10)
+#
+# 版本: 3
+# v2 = codex commit 8aef2d2 的隐式语义 (已废弃)
+# v1 = 更早的隐式语义 (已废弃)
 
-spec_version: 2
-last_updated: "2026-01-08"
+spec_version: 3
+last_updated: "2026-07-11"
 
 # ─────────────────────────────────────────────────────────
 # 1. 容器模型 (Container Model)
@@ -18,9 +28,8 @@ container_model:
     description: "由真实 pane 支撑的会话 (from_tabs 产出, id=tab:X:leaf:Y)"
     identity: "物理身份 source:tab:X:leaf:Y,不随 agent 变化"
     is_live_container: true
-    is_pinned_initial: false  # live container 永不预赋值 pin
-    pin_inheritance: "不继承 durable pin key —— 即使用户 pin 了 durable 行,
-      物化到 live tab 后 tab 本身不被 pin"
+    is_pinned_initial: false
+    pin_inheritance: "不继承 durable pin key"
 
   virtual_container:
     description: "无真实 pane 支撑的会话 (restored / indexed / historical)"
@@ -30,78 +39,68 @@ container_model:
     pin_inheritance: "virtual row 保留自己的 pin 状态,直到被 live consume"
 
   consume_rule:
-    description: "virtual row 的 binding (agent session id 或 conversation id)
-      匹配到 live container 时,被 consume (合并到 live row,不单独显示)"
-    pin_transfer: "被 consume 的 virtual row 强制 is_pinned=false,
-      其 pin 状态不泄漏到 live container"
+    description: "virtual row 的 binding 匹配 live container 时被 consume"
+    pin_transfer: "被 consume 的 virtual row 强制 is_pinned=false"
 
 # ─────────────────────────────────────────────────────────
 # 2. 排序意图链 (Sort Intent Chain)
 # ─────────────────────────────────────────────────────────
-# 排序由 sort_session_navigator_sessions_by_display_order 执行。
-# 多个排序键按优先级从高到低排列,前一个相等才比下一个。
-# 这是最终权威 —— 任何关于"行应该排在哪里"的争议都对照此链。
 sort_intent_chain:
   - key: "is_pinned (降序)"
-    intent: "pinned 行优先,始终排在 unpinned 行前面"
+    intent: "pinned 行优先"
     applies_when: "always"
 
-  - key: "display_order (升序)"
-    intent: "同 pin 组内按稳定序号排序。序号由 reconcile 分配,
-      一旦分配不因 updated_at 变化而重排"
-    applies_when: "已 sync/reconcile 的行"
-    fallback_when_empty: "order=u64::MAX (未分配),回退到下一个 key"
-
-  - key: "same_window_split_group (升序)"
-    intent: "同一 tab 的 split pane 相邻"
+  - key: "same_window_group_order (升序)"
+    intent: "同一 tab 的 split pane 相邻;用同 tab 所有 pane 的最小 display_order"
     applies_when: "id 可解析为 tab:X:leaf:Y"
 
-  - key: "display_order (升序, 再比一次)"
-    intent: "group order 相同时用行自身 order"
-    applies_when: "always"
+  - key: "same_window_split leaf index (升序)"
+    intent: "同 tab 内按 leaf 序号排"
+    applies_when: "同 tab 的 pane 之间"
 
-  - key: "updated_at_unix_ms (降序)"
-    intent: "最近更新排前面 —— 仅在 order 未分配时生效(首次显示,尚未 sync)"
-    applies_when: "order == u64::MAX (所有行都未 reconcile)"
+  - key: "display_order (升序)"
+    intent: "稳定序号。一旦分配不因 updated_at 变化而重排"
+    applies_when: "已 sync/reconcile 的行"
+    fallback_when_empty: "order=u64::MAX"
+
+  - key: "updated_at_unix_ms (降序, None 排最后)"
+    intent: "最近更新排前面 —— 仅在 order 未分配时生效"
+    applies_when: "order == u64::MAX"
 
   - key: "original_position (升序)"
-    intent: "merge 后的原始位置作为最终 tiebreaker"
+    intent: "merge 后的原始位置作为 tiebreaker"
     applies_when: "always"
 
-  - key: "label (升序)"
-    intent: "字典序标签兜底"
+  - key: "logical_key (升序)"
+    intent: "确定性兜底 —— 用 logical_key 不用 volatile id"
     applies_when: "always"
-
-  - key: "id (升序)"
-    intent: "最终确定性兜底"
-    applies_when: "always"
+    note: "v3 修正: v2 用 id 做 tie-breaker,但 id 在 materialize 时从 agent:... 变成 tab:...,导致 order 丢失"
 
 # ─────────────────────────────────────────────────────────
 # 3. display_order 分配策略 (Reconcile Strategy)
 # ─────────────────────────────────────────────────────────
 reconcile_strategy:
-  description: "reconcile_session_navigator_display_order 负责为新行分配稳定序号"
+  description: "为新行分配稳定序号"
   allocation_order: "按 pinned 优先 + updated_at 降序排序后,依次分配递增序号"
-  not_depends_on: "不依赖 merge_for_session_navigator 的输出顺序
-    (merge 不排序,只合并去重)"
-  existing_row: "已有 order 的行跳过 (contains_key 检查)"
-  durable_bridging: "新行先查 durable key 是否已有 order (从 virtual 物化为 live
-    时继承旧序号);都没有才分配 next_session_navigator_display_order"
+  not_depends_on: "不依赖 merge 的输出顺序"
+  existing_row: "已有 order 的行跳过"
+  durable_bridging: "新行先查 durable key 是否已有 order;都没有才分配 next"
+  tie_breaker: "pinned DESC → updated_at DESC (None 排最后) → logical_key ASC"
+  note: "v3 修正: tie-breaker 从 id ASC 改为 logical_key ASC,因为 id 是 volatile"
 
 # ─────────────────────────────────────────────────────────
 # 4. display_order 键策略 (Key Strategy)
 # ─────────────────────────────────────────────────────────
-# 用 SessionDisplayOrderStrategy 枚举显式决定,不靠字符串隐式相等。
 key_strategy:
   Physical:
     description: "live container"
     primary_key: "logical_key (source:tab:X:leaf:Y)"
-    durable_key: "agent:{agent}:{session_id} (如果有的话,用于继承旧序号)"
-    order_lookup: "min(primary_order, durable_order) —— 继承 virtual 时期的序号"
+    durable_key: "agent:{agent}:{session_id} (如果有,用于继承旧序号)"
+    order_lookup: "min(primary_order, durable_order)"
 
   Durable:
     description: "virtual row 有 agent session id 或 conversation id"
-    primary_key: "durable_key (== primary_key, 两者相同)"
+    primary_key: "durable_key (== primary_key)"
     order_lookup: "只查一次 primary_key"
 
   Bridged:
@@ -119,44 +118,433 @@ merge_responsibility:
     - "pin 守卫:被 consume 的 virtual row 强制 is_pinned=false"
     - "pin 补齐:未被 consume 的 virtual row 执行 is_pinned_by 补齐"
   does_not:
-    - "排序 —— merge 不排序,返回 sources 原始顺序"
-    - "分配 display_order —— 由 reconcile 负责"
+    - "排序"
+    - "分配 display_order"
+    - "决定 active/focus"
 
 # ─────────────────────────────────────────────────────────
-# 6. 删除语义 (Delete Semantics)
+# 6. Focus / Active / Selection 优先级链 (v3 新增)
+# ─────────────────────────────────────────────────────────
+#
+# 三个概念:
+#   - focus: 物理输入焦点 (pane group 的 focused_pane_id)
+#   - active: Session Navigator 中高亮的行 (snapshot.is_active)
+#   - selection: workspace 级恢复标记 (active_restored_workspace_session_key)
+#
+# 这三者可能指向不同行。mutation 之后谁说了算,由下面的优先级链决定。
+
+focus_active_selection:
+  # 6.1 active 行的唯一决定规则 (按优先级从高到低)
+  active_priority_chain:
+    - rule: "live container focused pane"
+      priority: 1
+      description: "pane group 的 focused pane 对应的 live session → is_active=true"
+      overrides: "一切虚拟标记"
+      
+    - rule: "restoring session"
+      priority: 2
+      description: "restoring_workspace_session_keys 中的 session → is_active=true"
+      overrides: "active_restored_workspace_session_key"
+
+    - rule: "active_restored_workspace_session_key"
+      priority: 3
+      description: "workspace 级恢复标记指向的 virtual row → is_active=true"
+      overridden_by: "规则 1 (live focus) 和规则 2 (restoring)"
+
+    - rule: "其余"
+      priority: 4
+      description: "is_active=false"
+
+  # 6.2 冲突解决
+  conflict_resolution:
+    live_vs_virtual: "live container focused pane 总是胜出 —— 物理焦点 > 虚拟标记"
+    restoring_vs_restore_key: "restoring 中的 session 胜出 —— 正在恢复 > 已点击待恢复"
+    multiple_active: "Refresh/reducer 保证至多一行 is_active; 测试辅助 normalize_session_navigator_active_state 仍可用于静态断言"
+
+  # 6.3 mutation 后的 focus 决策
+  focus_after_mutation:
+    delete:
+      - condition: "被删 session 在多 visible pane 的 tab 中"
+        focus_target: "同 group 的 prev_pane (pane_history 优先,其次位置相邻)"
+        close_action: "close_pane_permanently"
+        rule: "不 preselect 到别的 tab;让 pane group 的 focus_next 自己处理"
+
+      - condition: "被删 session 是 tab 的唯一 visible pane"
+        focus_target: "同 environment 的邻居 tab (优先同 env,其次任意)"
+        close_action: "close_tab"
+        rule: "由 remove_tab 的 tab 选择逻辑处理 focus"
+
+      - condition: "被删 session 是窗口的唯一 tab 的唯一 pane"
+        focus_target: "无 (不关窗) 或新建空 tab"
+        close_action: "close_pane (保留空 tab)"
+        rule: "不关窗,留空 tab"
+
+      - condition: "被删 session 是 virtual row (无 live pane)"
+        focus_target: "不改 focus"
+        close_action: "只删 provider source + 清 user state"
+        rule: "virtual row 删除不影响物理焦点"
+
+    activate_restore:
+      - condition: "target 已 materialize (有 locator)"
+        focus_target: "focus_pane(target locator)"
+        side_effect: "set active_restored_key + clear restoring"
+
+      - condition: "target 是 Ashide conversation"
+        focus_target: "restore_or_navigate_to_conversation (新 tab)"
+        side_effect: "set active_restored_key + clear restoring"
+
+      - condition: "target 是 virtual row (需 spawn)"
+        focus_target: "不抢 focus (用户可能已切走)"
+        side_effect: "set restoring + set active_restored_key + spawn terminal"
+
+    pin_unpin:
+      - condition: "always"
+        focus_target: "不改 focus / active / selection"
+        rule: "pin 只改排序组,不碰焦点"
+
+    split_pane_fork:
+      - condition: "always"
+        focus_target: "focus_pane(新创建的 pane)"
+        rule: "新 split pane 获得焦点"
+
+    tab_switch:
+      - condition: "always"
+        focus_target: "activate_tab → focus_active_tab (pane group 的 focused pane)"
+        rule: "切 tab 时由 pane group 的 focus_state 决定焦点"
+
+  # 6.4 Materialization 追踪 (v3 修正)
+  materialization_tracking:
+    old_behavior: "找不到 stored session 就假设 materialized,返回 live active key"
+    new_behavior: "virtual → live consume 时,如果 virtual row 的 logical_key == active_restored_workspace_session_key,主动迁移 key"
+    deletion_behavior: "session 被删时不做 active 转移猜测;走 focus_after_mutation.delete 的决策"
+    rationale: "猜测是不可靠的 —— 被删和 materialize 都表现为'stored session 不在了',但需要不同处理"
+
+# ─────────────────────────────────────────────────────────
+# 7. 纯 Reducer 契约 (v3 新增)
+# ─────────────────────────────────────────────────────────
+#
+# 所有列表变化都走同一个纯 reducer。reducer 只描述可观察结果,
+# 不描述内部实现机制 (如 focus-restorer)。
+#
+# 输入: (当前 sessions 快照, action)
+# 输出: (new sessions, side_effect)
+
+reducer_contract:
+  input:
+    sessions: "Vec<WorkspaceSessionSnapshot> — 当前排序后的 session 列表"
+    state: "SessionNavigatorState — 包含 active_key, restoring_keys, deleting_keys, display_order"
+    action: "SessionNavigatorAction"
+    pane_group_info: "PaneGroupInfo — 各 tab 的 visible pane 数、focused pane、pane_history"
+
+  output:
+    sessions: "Vec<WorkspaceSessionSnapshot> — 更新后的 session 列表"
+    state: "SessionNavigatorState — 更新后的状态"
+    side_effect: "Option<SideEffect> — 需要执行的外部操作 (focus_pane / close_pane / close_tab / spawn_terminal / write_user_state)"
+
+  actions:
+    Delete:
+      input: "session_id: String"
+      output: |
+        1. 从 sessions 中移除被删 session
+        2. 加入 deleting_keys
+        3. 根据 focus_after_mutation.delete 决定 side_effect
+        4. 如果被删 session 的 key == active_key → 清除 active_key
+
+    Activate:
+      input: "session_id: String"
+      output: |
+        1. 如果 target 已 materialize → side_effect = FocusPane
+        2. 如果 target 是 virtual → 加入 restoring_keys, side_effect = SpawnTerminal
+        3. 设置 active_key = target logical_key
+
+    Pin:
+      input: "session_id: String, pinned: bool"
+      output: |
+        1. 不改 sessions 的 is_active / focus
+        2. side_effect = WriteUserState
+        3. 下一次 refresh 时 is_pinned 由 user_state 预赋值
+
+    Refresh:
+      input: "new_raw_sessions: Vec<WorkspaceSessionSnapshot>"
+      output: |
+        1. merge + reconcile + sort
+        2. 根据 active_priority_chain 重新计算 is_active
+        3. 清除已 materialize 的 restoring_keys
+
+    TabActivated:
+      input: "tab_index: usize"
+      output: |
+        1. 根据 pane group 的 focused pane 设置 live session 的 is_active
+        2. 清除不属于当前 environment 的 active_key
+
+    PaneFocused:
+      input: "locator: PaneViewLocator"
+      output: |
+        1. 对应 live session 的 is_active = true
+        2. 其他 live session 的 is_active = false
+        3. 不改 active_restored_workspace_session_key (除非被删)
+
+  side_effects:
+    FocusPane: "PaneViewLocator — 调用 workspace.focus_pane"
+    DeleteEffects: |
+      一次 Delete action 的复合副作用 (仍算「一个 side_effect」):
+        focus: Option<PaneViewLocator> — 先执行 (多 pane ClosePane 时可由 close_pane focus_next 代劳)
+        close: ClosePane(locator) | CloseTab(tab_index) | None
+    SpawnTerminal: "session: WorkspaceSessionSnapshot — 调用 activate_restored_workspace_session 的 spawn 路径"
+    WriteUserState: "authority, keys, mutation — 调用 mutate_workspace_session_user_state"
+    NoEffect: "无副作用 (pin/refresh 只改数据模型)"
+
+  invariants:
+    - "reducer 是纯函数: 相同输入 → 相同输出, 无隐藏状态"
+    - "reducer 只认 stable id (logical_key), 不认 volatile id 或 index"
+    - "sort/pin policy 和 focus restore 分开: sort 决定位置, focus 决定高亮"
+    - "contract 只描述可观察结果, 不描述内部机制"
+    - "一次 action 只产生一个 side_effect (Delete 用 DeleteEffects 复合携带 focus+close)"
+    - "pin/unpin 不产生 focus 副作用"
+
+# ─────────────────────────────────────────────────────────
+# 8. 删除流程 (v3)
 # ─────────────────────────────────────────────────────────
 delete_semantics:
-  source_not_found: "视为成功 (Ok) —— source/session 文件或 index 条目不存在
-    说明已被删除,不报错不 rollback"
-  pinned_state_clear_failure: "只 log::warn,不阻断删除"
-  session_state_write_failure: "返回 Err 但不 panic —— tmp rename 的
-    NotFound 等视为可恢复"
-  navigator_cache_cleanup: "删除中的 session 从 deleting_workspace_session_keys
-    过滤,避免删完又冒回来"
+  unified_flow:
+    step_1: "snapshot PaneGroupInfo + SessionNavigatorState"
+    step_2: "reducer.Delete → DeleteEffects { focus, close }"
+    step_3: "validate_transition (log on failure)"
+    step_4: "apply DeleteEffects: Focus (若需要) → ClosePane/CloseTab"
+    step_5: "adapter_hooks (见下)"
+    step_6: "异步删 provider source"
+    step_7: "finish: 只清 user state + sync, 不再 reselect"
+
+  adapter_hooks:
+    description: "纯 reducer 无法表达的 Workspace 兜底,在 apply 末尾执行"
+    ensure_environment_tab: "删光某 env 的 live session 后 → ensure_environment_tab_for_authority"
+    terminal_bootstrap: "切本地邻居 tab / 空窗口时 add_explicit_terminal_bootstrap_default_tab"
+    refuse_last_pane: "唯一 tab 唯一 pane 且 CloseWindow 未启用 → 拒绝关闭并 toast"
+
+  source_not_found: "视为成功 (Ok)"
+  pinned_state_clear_failure: "只 log::warn, 不阻断"
+  session_state_write_failure: "返回 Err 但不 panic"
+  navigator_cache_cleanup: "从 deleting_workspace_session_keys 过滤"
+
+  historical_v2:
+    note: "已废弃,仅作考古。生产路径不再调用 preselect/reselect。"
+    old_flow: |
+      1. preselect_workspace_session_before_delete
+      2. close_live_workspace_session_for_delete
+      3. reselect_workspace_session_after_delete
+    old_problems:
+      - "preselect 可能跳到别的 tab, close_pane focus_next 无法留在同屏兄弟"
+      - "preselect + reselect 重复选, 焦点跳两次"
+      - "split pane 删除后焦点不留在同屏兄弟"
 
 # ─────────────────────────────────────────────────────────
-# 7. 标签名解析 (Label Resolution)
+# 9. 边界条件全量覆盖 (v3 新增)
+# ─────────────────────────────────────────────────────────
+edge_cases:
+  - id: "EC-01"
+    name: "删除 split tab 中的一个 pane"
+    expected: "focus 留在同 tab 的兄弟 pane, 不跳到别的 tab"
+    reducer_rule: "delete → 多 pane → close_pane + FocusPane(prev_pane)"
+
+  - id: "EC-02"
+    name: "删除唯一 pane 的 tab"
+    expected: "focus 切到同 env 邻居 tab, 不重复选"
+    reducer_rule: "delete → 唯一 pane → close_tab + FocusPane(邻居)"
+
+  - id: "EC-03"
+    name: "删除窗口唯一 tab 的唯一 pane"
+    expected: "不关窗 (adapter refuse 或留空/bootstrap tab)"
+    reducer_rule: "delete → CloseTab, focus=None; adapter 可拒绝关窗"
+    ship_status: covered
+
+  - id: "EC-04"
+    name: "当前聚焦项被删, 别的项还 selected"
+    expected: "focus 给同 group 兄弟, 其他 selection 不变"
+    reducer_rule: "delete → 多 pane → FocusPane(prev_pane)"
+
+  - id: "EC-05"
+    name: "active session 被删 → 恢复 → pin"
+    expected: "恢复后 active 跟随新 pane; pin 不改 focus"
+    reducer_rule: "delete → Activate → Pin, 每步独立"
+
+  - id: "EC-06"
+    name: "列表为空时插入新项"
+    expected: "新项 is_active=false, order=0"
+    reducer_rule: "Refresh → reconcile 分配 order"
+
+  - id: "EC-07"
+    name: "多项同一时刻创建"
+    expected: "updated_at 相同 → logical_key 升序兜底, 排序稳定"
+    reducer_rule: "reconcile tie_breaker = logical_key ASC"
+
+  - id: "EC-08"
+    name: "reorder 后 focus 跟随稳定 id"
+    expected: "focus 不因 reorder 丢失, 跟随 logical_key"
+    reducer_rule: "reducer 只认 logical_key"
+    ship_status: deferred
+    note: "本发布不做 reorder-focus 产品化; 从 ship checklist 排除"
+
+  - id: "EC-09"
+    name: "最后一项被删除时的 fallback focus"
+    expected: "不关窗, 留空 tab"
+    reducer_rule: "delete → 唯一 tab 唯一 pane → 不 FocusPane"
+
+  - id: "EC-10"
+    name: "pin/unpin 后不改 selection 或 focus"
+    expected: "pin 只改排序组, is_active / active_key / focus 不变"
+    reducer_rule: "Pin → NoEffect (focus)"
+
+  - id: "EC-11"
+    name: "virtual row consume 时 active 迁移"
+    expected: "active_key 从 virtual logical_key 迁移到 live logical_key"
+    reducer_rule: "Refresh → materialization_tracking 主动迁移"
+
+  - id: "EC-12"
+    name: "restoring 中用户切走"
+    expected: "restoring 行保持 active highlight, 但物理焦点跟随用户"
+    reducer_rule: "active_priority_chain: restoring > active_key, live focus > restoring"
+
+  - id: "EC-13"
+    name: "被删 session 的 active 不猜测转移"
+    expected: "被删 session 是 active → 清除 active_key, 走 focus 决策, 不猜 materialize"
+    reducer_rule: "materialization_tracking: deletion 不猜测"
+
+  - id: "EC-14"
+    name: "跨 environment 删除"
+    expected: "删除后 focus 留在被删 session 的 environment"
+    reducer_rule: "delete → focus target 限同 env"
+
+  - id: "EC-15"
+    name: "split pane fork 后焦点"
+    expected: "新 pane 获得焦点"
+    reducer_rule: "split_pane_fork → FocusPane(new_pane)"
+
+  - id: "EC-16"
+    name: "tab 关闭后 focus"
+    expected: "优先同 env 邻居 tab"
+    reducer_rule: "delete → 唯一 pane → close_tab → 同 env 邻居"
+
+# ─────────────────────────────────────────────────────────
+# 10. 测试矩阵 (v3 新增)
+# ─────────────────────────────────────────────────────────
+test_matrix:
+  # 10.1 单步 fixture 测试 (已有, 保留)
+  single_step:
+    - "pin 组切换不重排"
+    - "refresh append 不跳"
+    - "resume 不跳"
+    - "hidden 恢复原位"
+    - "merge 不断言排序结果"
+    - "sort 覆盖各排序键"
+
+  # 10.2 序列型测试 (v3 新增)
+  sequences:
+    - name: "create → activate → pin → reorder → remove → restore focus"
+      steps:
+        - "新建 terminal pane → 检查 is_active=true"
+        - "activate 另一个 session → 检查 focus 切换"
+        - "pin 当前 session → 检查排序变但 focus 不变"
+        - "remove 当前 session → 检查 focus 到兄弟"
+        - "restore 被删 session → 检查 focus 到新 pane"
+
+    - name: "split → fork → delete one pane → focus stays"
+      steps:
+        - "split pane → 检查新 pane focused"
+        - "fork conversation → 检查新 pane focused"
+        - "delete 一个 pane → 检查 focus 留在兄弟"
+
+    - name: "multi-tab delete → same-env neighbor"
+      steps:
+        - "创建 3 个 tab (2 local + 1 remote)"
+        - "删除中间的 local tab → 检查 focus 到另一个 local tab"
+
+    - name: "virtual → live materialize → active 迁移"
+      steps:
+        - "有 virtual row, active_key 指向它"
+        - "activate 它 → spawn terminal"
+        - "terminal materialize → 检查 active_key 迁移到 live key"
+        - "检查旧 virtual key 不在 active_key"
+
+    - name: "restoring → user switch away → materialize"
+      steps:
+        - "activate virtual row → restoring"
+        - "用户切到另一个 pane"
+        - "spawn 完成 → materialize"
+        - "检查 restoring 行保持 active highlight, 但物理焦点在用户选的 pane"
+
+  # 10.3 纯 reducer oracle 对照测试 (v3 新增)
+  reducer_oracle:
+    description: "对每个 action, 用独立实现的 oracle 验证 reducer 输出"
+    oracle_inputs:
+      - "各种 session 组合 (live + virtual + mixed)"
+      - "各种 pane group 结构 (单 pane / 多 pane / 多 tab)"
+      - "各种 active/restoring/deleting 状态组合"
+    oracle_checks:
+      - "is_active 只有一个 true (或零个)"
+      - "focus target 存在且稳定"
+      - "deleting session 从列表消失"
+      - "pin 不改 is_active"
+      - "sort 结果与 sort_intent_chain 一致"
+
+  # 10.4 排序稳定性测试 (v3 新增)
+  sort_stability:
+    - "相同 sort key 的多个 session, 排序结果稳定 (多次排序结果相同)"
+    - "updated_at 变化后, 已有 order 的行不跳"
+    - "新增行 append 到末尾, 不影响已有行"
+    - "pin 组切换后, 组内顺序不变"
+
+  # 10.5 tie-break 测试 (v3 新增)
+  tie_break:
+    - "同一时刻创建的多个 session → logical_key 升序"
+    - "updated_at 为 None 的行排最后"
+    - "label 相同 → logical_key 兜底"
+    - "materialize 后 id 变化 → order 不丢 (用 logical_key)"
+
+  # 10.6 预检查 / state transition validator (v3 新增)
+  validator:
+    description: "纯确定性检查, 在每次 action 前后运行"
+    checks:
+      - "每个操作的前后状态完整 (sessions 非空时至少有一个 active 或有 focus target)"
+      - "newest-first 的插入位置正确"
+      - "focus restoration 的目标存在且稳定"
+      - "新建并激活后不能 pin / move-to-top (如果适用)"
+      - "deleting session 不在 sessions 中"
+      - "restoring session 的 key 存在于 sessions 中 (除非已 materialize)"
+      - "active_key 指向的 session 存在于 sessions 中 (除非正在 restoring)"
+
+# ─────────────────────────────────────────────────────────
+# 11. 标签名解析 (Label Resolution)
 # ─────────────────────────────────────────────────────────
 label_resolution:
   priority_chain:
     - "durable alias (user_state.aliases, 通过 durable key 查找)"
     - "display_title (agent session 的 query → summary → fallback_title)"
     - "custom_title (pane group 自定义标题)"
-    - "environment_label (环境名,最后兜底)"
-  remote_specific: "远程 placeholder/materialized row 回填 cli_agent_session_id 后,
-    durable key 可算 → alias 可查 → 覆盖环境名"
+    - "environment_label (环境名, 最后兜底)"
 
 # ─────────────────────────────────────────────────────────
-# 8. 测试约束 (Test Constraints)
+# 12. 测试约束 (Test Constraints)
 # ─────────────────────────────────────────────────────────
 test_constraints:
-  isolation: "所有测试用 tempfile::TempDir 隔离,不触碰真实 ~/.claude ~/.codex"
+  isolation: "所有测试用 tempfile::TempDir 隔离"
   snapshot_helper:
-    test_workspace_session_in_environment: "is_live_container 由 id.starts_with('tab:')
-      决定,不由 is_active 推断 —— 与生产 from_tabs 一致"
-    test_indexed_session_snapshot: "构建后立即 is_pinned_by 预赋值,
-      模拟 view.rs / cli_agent_session_index.rs 的生产路径"
-  merge_test_rule: "merge 测试断言 sources 原始顺序,不断言排序结果
-    (排序由 reconcile + sort 负责)"
-  sort_test_rule: "排序测试在 view_test.rs 的 session_navigator 测试中验证,
-    覆盖: pin 组切换不重排 / refresh append 不跳 / resume 不跳 / hidden 恢复原位"
+    test_workspace_session_in_environment: "is_live_container 由 id.starts_with('tab:') 决定"
+    test_indexed_session_snapshot: "构建后立即 is_pinned_by 预赋值"
+  merge_test_rule: "merge 测试断言 sources 原始顺序, 不断言排序结果"
+  sort_test_rule: "排序测试覆盖: pin 组切换不重排 / refresh append 不跳 / resume 不跳 / hidden 恢复原位"
+
+# ─────────────────────────────────────────────────────────
+# 13. 本发布覆盖状态 (ship checklist)
+# ─────────────────────────────────────────────────────────
+ship_coverage:
+  production_delete: "unified_flow via reduce(Delete) + DeleteEffects; no preselect/reselect"
+  workspace_integration:
+    - "EC-01 test_deleting_split_pane_session_keeps_focus_on_sibling_in_same_tab"
+    - "EC-02/16 test_deleting_local_tab_session_focuses_same_env_neighbor_tab"
+    - "EC-03/09 test_deleting_only_live_local_session_does_not_close_window"
+    - "EC-10 test_pin_workspace_session_does_not_change_focus"
+    - "EC-14 env delete suite (test_deleting_*_environment_*)"
+  reducer_unit: "session_navigator_reducer_tests (EC-01..07,09..15 + sequences + validator)"
+  deferred:
+    - "EC-08 reorder-focus"
+    - "full combinatorial oracle"
