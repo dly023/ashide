@@ -10165,6 +10165,82 @@ fn test_reorder_session_navigator_sessions_keeps_active_key() {
 }
 
 #[test]
+fn test_reorder_session_navigator_unit_moves_split_group() {
+    // EC-17: dragging a same-window split unit keeps leaf adjacency + active_key.
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.sync_session_navigator_sessions(ctx);
+            workspace.restored_workspace_sessions.push(
+                test_session_navigator_order_session("order-key-unit-between", "Between", 20),
+            );
+            workspace.sync_session_navigator_sessions(ctx);
+
+            let pane_group = workspace.active_tab_pane_group();
+            pane_group.update(ctx, |panes, ctx| {
+                panes.add_terminal_pane_with_options(
+                    Direction::Right,
+                    NewTerminalOptions::default(),
+                    ctx,
+                );
+            });
+            workspace.sync_session_navigator_sessions(ctx);
+
+            let sessions = workspace.session_navigator_sessions(ctx);
+            let units = super::session_navigator_reducer::build_reorder_units(&sessions);
+            let group_unit = units
+                .iter()
+                .find(|unit| {
+                    matches!(
+                        unit,
+                        super::session_navigator_reducer::ReorderUnit::Group {
+                            tab_index: 0,
+                            ..
+                        }
+                    )
+                })
+                .expect("tab:0 split group");
+            let group_id = group_unit.id();
+            let from_index = units
+                .iter()
+                .position(|unit| unit.id() == group_id)
+                .expect("group index");
+            let active_before = workspace.active_restored_workspace_session_key.clone();
+
+            // Move group past the virtual row (insert at end).
+            workspace.reorder_session_navigator_unit(&group_id, units.len(), ctx);
+
+            let after = workspace.session_navigator_sessions(ctx);
+            let relevant: Vec<&str> = after
+                .iter()
+                .filter(|session| {
+                    matches!(
+                        session.id.as_str(),
+                        "tab:0:leaf:0" | "tab:0:leaf:1" | "order-key-unit-between"
+                    )
+                })
+                .map(|session| session.id.as_str())
+                .collect();
+            assert_eq!(
+                relevant,
+                vec![
+                    "order-key-unit-between",
+                    "tab:0:leaf:0",
+                    "tab:0:leaf:1",
+                ],
+                "split group must move as one contiguous unit (from_index was {from_index})"
+            );
+            assert_eq!(
+                workspace.active_restored_workspace_session_key, active_before,
+                "unit reorder must keep active_key"
+            );
+        });
+    });
+}
+
+#[test]
 fn test_pin_workspace_session_does_not_change_focus() {
     // EC-10: pin/unpin must not change focus or active navigator row.
     App::test((), |mut app| async move {

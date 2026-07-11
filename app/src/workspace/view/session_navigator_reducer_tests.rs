@@ -1186,6 +1186,168 @@ fn test_ec08_reorder_keeps_active_on_logical_key() {
 }
 
 // ─────────────────────────────────────────────────────────
+// EC-17: 同屏组拖拽 — 整组平移, leaf 邻接与相对序不变
+// ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_ec17_reorder_moves_split_group_as_unit() {
+    let leaf0 = make_live_session("tab:0:leaf:0", "local", 1000);
+    let leaf1 = make_live_session("tab:0:leaf:1", "local", 2000);
+    let virtual_a = make_virtual_session("agent-ec17", "local", 3000);
+    let pane_info = make_pane_info(vec![
+        (0, 2, Some(make_locator(0, 0)), Some(make_locator(0, 1))),
+    ]);
+
+    let result = reduce(
+        Vec::new(),
+        SessionNavigatorState::new(),
+        SessionNavigatorAction::Refresh {
+            new_sessions: vec![leaf0.clone(), leaf1.clone(), virtual_a.clone()],
+            pinned_session_ids: HashSet::new(),
+        },
+        &pane_info,
+    );
+    let key0 = logical_key(&leaf0);
+    let result = reduce(
+        result.sessions,
+        result.state,
+        SessionNavigatorAction::Activate {
+            session_logical_key: key0.clone(),
+            session_id: leaf0.id.clone(),
+            is_live: true,
+        },
+        &pane_info,
+    );
+    assert_eq!(result.state.active_key, Some(key0.clone()));
+
+    let units = build_reorder_units(&result.sessions);
+    assert_eq!(units.len(), 2, "split group + virtual = 2 units");
+    assert!(
+        units
+            .iter()
+            .any(|unit| matches!(unit, ReorderUnit::Group { tab_index: 0, .. })),
+        "expected tab:0 group unit among {units:?}"
+    );
+
+    // Construct unit list with group first, then drag past the virtual unit.
+    let group_unit = units
+        .iter()
+        .find(|unit| matches!(unit, ReorderUnit::Group { .. }))
+        .cloned()
+        .expect("group");
+    let single_unit = units
+        .iter()
+        .find(|unit| matches!(unit, ReorderUnit::Single { .. }))
+        .cloned()
+        .expect("single");
+    let ordered = move_reorder_unit(vec![group_unit, single_unit], 0, 2);
+    assert_eq!(
+        ordered,
+        vec![
+            logical_key(&virtual_a),
+            logical_key(&leaf0),
+            logical_key(&leaf1),
+        ]
+    );
+
+    let before = ReduceResult {
+        sessions: result.sessions.clone(),
+        state: result.state.clone(),
+        side_effect: SideEffect::None,
+    };
+    let action = SessionNavigatorAction::Reorder {
+        ordered_logical_keys: ordered,
+    };
+    let result = reduce(result.sessions, result.state, action.clone(), &pane_info);
+    validate_transition(&before, &result, &action, &pane_info).unwrap();
+
+    assert_eq!(result.state.active_key, Some(key0));
+    let ids: Vec<&str> = result.sessions.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["agent-ec17", "tab:0:leaf:0", "tab:0:leaf:1"],
+        "group must stay contiguous after crossing virtual"
+    );
+    validate_state(&result.sessions, &result.state).unwrap();
+}
+
+#[test]
+fn test_ec17_validate_rejects_split_adjacency_break() {
+    let leaf0 = make_live_session("tab:0:leaf:0", "local", 1000);
+    let leaf1 = make_live_session("tab:0:leaf:1", "local", 2000);
+    let virtual_a = make_virtual_session("agent-ec17-break", "local", 3000);
+    let pane_info = make_pane_info(vec![
+        (0, 2, Some(make_locator(0, 0)), Some(make_locator(0, 1))),
+    ]);
+
+    let result = reduce(
+        Vec::new(),
+        SessionNavigatorState::new(),
+        SessionNavigatorAction::Refresh {
+            new_sessions: vec![leaf0.clone(), leaf1.clone(), virtual_a.clone()],
+            pinned_session_ids: HashSet::new(),
+        },
+        &pane_info,
+    );
+    let before = ReduceResult {
+        sessions: result.sessions.clone(),
+        state: result.state.clone(),
+        side_effect: SideEffect::None,
+    };
+    // Intentionally interleave virtual between split leaves.
+    let action = SessionNavigatorAction::Reorder {
+        ordered_logical_keys: vec![
+            logical_key(&leaf0),
+            logical_key(&virtual_a),
+            logical_key(&leaf1),
+        ],
+    };
+    let after = reduce(result.sessions, result.state, action.clone(), &pane_info);
+    let err = validate_transition(&before, &after, &action, &pane_info)
+        .expect_err("breaking same_window adjacency must fail validation");
+    assert!(
+        err.contains("adjacency") || err.contains("leaf relative order"),
+        "unexpected validator message: {err}"
+    );
+}
+
+#[test]
+fn test_build_reorder_units_groups_same_tab_leaves() {
+    let leaf0 = make_live_session("tab:1:leaf:0", "local", 1000);
+    let leaf1 = make_live_session("tab:1:leaf:1", "local", 2000);
+    let sole = make_live_session("tab:2:leaf:0", "local", 1500);
+    let virtual_a = make_virtual_session("agent-units", "local", 3000);
+    let sessions = vec![leaf0.clone(), leaf1.clone(), sole.clone(), virtual_a.clone()];
+    let units = build_reorder_units(&sessions);
+    assert_eq!(units.len(), 3);
+    match &units[0] {
+        ReorderUnit::Group {
+            tab_index,
+            logical_keys,
+        } => {
+            assert_eq!(*tab_index, 1);
+            assert_eq!(
+                logical_keys,
+                &vec![logical_key(&leaf0), logical_key(&leaf1)]
+            );
+        }
+        other => panic!("expected group, got {other:?}"),
+    }
+    assert_eq!(
+        units[1],
+        ReorderUnit::Single {
+            logical_key: logical_key(&sole)
+        }
+    );
+    assert_eq!(
+        units[2],
+        ReorderUnit::Single {
+            logical_key: logical_key(&virtual_a)
+        }
+    );
+}
+
+// ─────────────────────────────────────────────────────────
 // oracle: active 不超过 1 个
 // ─────────────────────────────────────────────────────────
 
@@ -1265,11 +1427,12 @@ fn test_oracle_combinatorial_action_invariants() {
             pinned: true,
         },
         SessionNavigatorAction::Reorder {
+            // Keep same-tab live leaves contiguous (EC-17); move virtuals ahead of the group.
             ordered_logical_keys: vec![
                 logical_key(&virtual_b),
                 logical_key(&virtual_a),
-                logical_key(&live1),
                 logical_key(&live0),
+                logical_key(&live1),
             ],
         },
         SessionNavigatorAction::Delete {

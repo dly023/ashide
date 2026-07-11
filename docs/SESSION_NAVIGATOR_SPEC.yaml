@@ -271,11 +271,15 @@ reducer_contract:
         3. 下一次 refresh 时 is_pinned 由 user_state 预赋值
 
     Reorder:
-      input: "ordered_logical_keys: Vec<String>"
+      input: "ordered_logical_keys: Vec<String> — Workspace 按拖动单元 flatten 后的 keys"
       output: |
         1. 按 keys 重写 display_order
         2. 不改 active_key / restoring_keys / is_active 指向的 logical_key
         3. side_effect = None
+      invariants:
+        - "同 tab 的 live split leaf 在结果中必须连续"
+        - "同组 leaf 相对序 (leaf index) 不因 Reorder 改变"
+        - "UI 拖动单元 = 同屏组 (tab 多 pane) 或单行; 落点只在单元边界"
 
     Refresh:
       input: "new_raw_sessions: Vec<WorkspaceSessionSnapshot>"
@@ -399,8 +403,8 @@ edge_cases:
 
   - id: "EC-08"
     name: "reorder 后 focus 跟随稳定 id"
-    expected: "focus 不因 reorder 丢失, 跟随 logical_key"
-    reducer_rule: "Reorder → 只改 display_order; active_key 不变"
+    expected: "focus 不因 reorder 丢失, 跟随 logical_key; 同屏 split 邻接不被拆散"
+    reducer_rule: "Reorder → 只改 display_order; active_key 不变; same_window leaf 连续且相对序不变"
     ship_status: covered
 
   - id: "EC-09"
@@ -451,6 +455,14 @@ edge_cases:
     reducer_rule: "delete → 唯一 pane → close_tab → 同 env 邻居"
     ship_status: covered
 
+  - id: "EC-17"
+    name: "同屏 split 组拖拽重排"
+    expected: |
+      拖组内任意行 = 整组平移; 落点不能插入同组 leaf 之间;
+      展示不全仍以 tab:X 组为单位; active_key 不变; 组内 leaf 相对序不变
+    reducer_rule: "Workspace build_reorder_units → flatten → Reorder; validate same_window adjacency"
+    ship_status: covered
+
 # ─────────────────────────────────────────────────────────
 # 10. 测试矩阵 (v3 新增)
 # ─────────────────────────────────────────────────────────
@@ -480,6 +492,13 @@ test_matrix:
         - "split pane → 检查新 pane focused"
         - "fork conversation → 检查新 pane focused"
         - "delete 一个 pane → 检查 focus 留在兄弟"
+
+    - name: "split group → drag group → adjacency preserved"
+      steps:
+        - "同 tab 两个 leaf + 旁侧 virtual 行"
+        - "拖组内任一行跨过 virtual → 整组平移"
+        - "两 leaf 仍相邻且 leaf 相对序不变"
+        - "active_key 不变"
 
     - name: "multi-tab delete → same-env neighbor"
       steps:
@@ -520,6 +539,7 @@ test_matrix:
     - "updated_at 变化后, 已有 order 的行不跳"
     - "新增行 append 到末尾, 不影响已有行"
     - "pin 组切换后, 组内顺序不变"
+    - "reorder 不得拆散 same_window split 邻接 (EC-17)"
 
   # 10.5 tie-break 测试 (v3 新增)
   tie_break:
@@ -539,6 +559,7 @@ test_matrix:
       - "deleting session 不在 sessions 中"
       - "restoring session 的 key 存在于 sessions 中 (除非已 materialize)"
       - "active_key 指向的 session 存在于 sessions 中 (除非正在 restoring)"
+      - "Reorder 后同 tab live leaf 必须连续且 leaf 相对序不变"
 
 # ─────────────────────────────────────────────────────────
 # 11. 标签名解析 (Label Resolution)
@@ -569,12 +590,13 @@ ship_coverage:
   production_activate: "live FocusPane + virtual SpawnTerminal via apply_session_navigator_side_effect"
   production_focus: "activate_tab_internal + Event::PaneFocused → notify/sync; restored marker not overwritten by live key"
   production_refresh: "single reduce(Refresh) path; track_materialization owns §6.4; no preferred_active_* dual-path"
-  production_reorder: "reduce(Reorder) + apply state; active_key follows logical_key"
+  production_reorder: "group-aware UI (split tab = one drag unit) → flatten → reduce(Reorder); active_key + same_window adjacency preserved"
   workspace_integration:
     - "EC-01 test_deleting_split_pane_session_keeps_focus_on_sibling_in_same_tab"
     - "EC-02/16 test_deleting_local_tab_session_focuses_same_env_neighbor_tab"
     - "EC-03/09 test_deleting_only_live_local_session_does_not_close_window"
+    - "EC-08/17 test_reorder_session_navigator_sessions_keeps_active_key + split group reorder"
     - "EC-10 test_pin_workspace_session_does_not_change_focus"
     - "EC-14 env delete suite (test_deleting_*_environment_*)"
-  reducer_unit: "session_navigator_reducer_tests (EC-01..16 + sequences + combinatorial oracle + validator)"
+  reducer_unit: "session_navigator_reducer_tests (EC-01..17 + sequences + combinatorial oracle + validator)"
   deferred: []

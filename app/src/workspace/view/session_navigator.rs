@@ -1909,8 +1909,6 @@ impl Workspace {
     }
 
     /// EC-08: reorder navigator rows by logical_key while keeping focus/active.
-    /// Sidebar drag-reorder UI is not wired yet; reducer + this apply path are ready.
-    #[allow(dead_code)]
     pub(super) fn reorder_session_navigator_sessions(
         &mut self,
         ordered_logical_keys: Vec<String>,
@@ -1933,10 +1931,35 @@ impl Workspace {
             session_navigator_reducer::validate_transition(&before, &reduced, &action, &pane_info)
         {
             log::warn!("session_navigator reorder validate_transition: {error}");
+            return;
         }
         self.apply_session_navigator_state(reduced.state);
         self.sync_session_navigator_sessions(ctx);
         ctx.notify();
+    }
+
+    /// EC-17: move a drag unit (split group or single row) then flatten into Reorder.
+    pub(super) fn reorder_session_navigator_unit(
+        &mut self,
+        dragged_unit_id: &str,
+        target_index: usize,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let sessions = self.session_navigator_sessions(ctx);
+        let units = session_navigator_reducer::build_reorder_units(&sessions);
+        let Some(from_index) = units.iter().position(|unit| unit.id() == dragged_unit_id) else {
+            log::warn!(
+                "reorder_session_navigator_unit: unknown unit id {dragged_unit_id}"
+            );
+            return;
+        };
+        if from_index == target_index || from_index + 1 == target_index {
+            // Dropped on own boundaries — no-op.
+            return;
+        }
+        let ordered =
+            session_navigator_reducer::move_reorder_unit(units, from_index, target_index);
+        self.reorder_session_navigator_sessions(ordered, ctx);
     }
 
     // ── 恢复点激活 ─────────────────────────────────────────────────────────

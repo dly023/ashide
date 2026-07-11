@@ -1541,3 +1541,15 @@ impl DropTargetData for VerticalTabsPaneDropTargetData {
         self
     }
 }
+
+/// Session Navigator unit-boundary drop slot (EC-17).
+#[derive(Clone, Debug)]
+pub struct SessionNavigatorReorderDropData {
+    pub target_index: usize,
+}
+
+impl DropTargetData for SessionNavigatorReorderDropData {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}

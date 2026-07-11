@@ -47,8 +47,8 @@ use crate::workspace::tab_settings::{
     VerticalTabsPrimaryInfo, VerticalTabsTabItemMode, VerticalTabsViewMode,
 };
 use crate::workspace::{
-    PaneViewLocator, TabBarLocation, TabContextMenuAnchor, VerticalTabsPaneContextMenuTarget,
-    VerticalTabsPaneDropTargetData, Workspace,
+    PaneViewLocator, SessionNavigatorReorderDropData, TabBarLocation, TabContextMenuAnchor,
+    VerticalTabsPaneContextMenuTarget, VerticalTabsPaneDropTargetData, Workspace,
 };
 use languages::language_by_filename;
 
@@ -65,12 +65,12 @@ use warp_core::ui::theme::{AnsiColorIdentifier, Fill as WarpThemeFill, WarpTheme
 use warp_core::ui::Icon as WarpIcon;
 use warpui::elements::DispatchEventResult;
 use warpui::elements::{
-    resizable_state_handle, Border, ChildAnchor, ChildView, Clipped, ClippedScrollStateHandle,
-    ClippedScrollable, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, DragAxis,
-    DragBarSide, Draggable, DropShadow, DropTarget, Element, Empty, EventHandler,
-    Fill as ElementFill, Flex, Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle,
-    OffsetPositioning, Padding, ParentAnchor, ParentElement, ParentOffsetBounds,
-    PositionedElementAnchor, PositionedElementOffsetBounds, Radius, Resizable,
+    resizable_state_handle, AcceptedByDropTarget, Border, ChildAnchor, ChildView, Clipped,
+    ClippedScrollStateHandle, ClippedScrollable, ConstrainedBox, Container, CornerRadius,
+    CrossAxisAlignment, DragAxis, DragBarSide, Draggable, DraggableState, DropShadow, DropTarget,
+    Element, Empty, EventHandler, Fill as ElementFill, Flex, Hoverable, MainAxisAlignment,
+    MainAxisSize, MouseStateHandle, OffsetPositioning, Padding, ParentAnchor, ParentElement,
+    ParentOffsetBounds, PositionedElementAnchor, PositionedElementOffsetBounds, Radius, Resizable,
     ResizableStateHandle, SavePosition, ScrollTarget, ScrollToPositionMode, ScrollbarWidth,
     Shrinkable, Stack, Text,
 };
@@ -272,6 +272,8 @@ fn render_restored_session_row(
     is_renaming: bool,
     alias_editor: ViewHandle<EditorView>,
     mouse_state: MouseStateHandle,
+    drag_state: DraggableState,
+    reorder_unit_id: String,
     detail_hover_state: VerticalTabsDetailHoverState,
     appearance: &Appearance,
 ) -> Box<dyn Element> {
@@ -429,7 +431,34 @@ fn render_restored_session_row(
     .with_cursor(Cursor::PointingHand)
     .finish();
 
-    SavePosition::new(row, &row_position_id).finish()
+    let positioned = SavePosition::new(row, &row_position_id).finish();
+    // Stable layout origin — see ssh_manager/panel.rs Draggable/DropTarget nesting note.
+    let stable_anchor = Container::new(positioned).finish();
+    let unit_id_for_drop = reorder_unit_id;
+    Draggable::new(drag_state, stable_anchor)
+        .with_drag_axis(DragAxis::VerticalOnly)
+        .with_accepted_by_drop_target_fn(move |drop_data, _app| {
+            if drop_data
+                .as_any()
+                .downcast_ref::<SessionNavigatorReorderDropData>()
+                .is_some()
+            {
+                AcceptedByDropTarget::Yes
+            } else {
+                AcceptedByDropTarget::No
+            }
+        })
+        .on_drop(move |ctx, _app, _bounds, data| {
+            if let Some(drop) = data
+                .and_then(|d| d.as_any().downcast_ref::<SessionNavigatorReorderDropData>())
+            {
+                ctx.dispatch_typed_action(WorkspaceAction::ReorderWorkspaceSessionUnit {
+                    unit_id: unit_id_for_drop.clone(),
+                    target_index: drop.target_index,
+                });
+            }
+        })
+        .finish()
 }
 
 fn render_restored_sessions_group(
@@ -440,9 +469,10 @@ fn render_restored_sessions_group(
     appearance: &Appearance,
     app: &AppContext,
 ) -> Option<Box<dyn Element>> {
-    let split_group_numbers = workspace.same_window_split_group_numbers_for_sessions(sessions, app);
+    use super::session_navigator_reducer::{build_reorder_units, ReorderUnit};
+
     let query_lower = query.to_lowercase();
-    let sessions: Vec<&WorkspaceSessionSnapshot> = sessions
+    let kind_sessions: Vec<WorkspaceSessionSnapshot> = sessions
         .iter()
         .filter(|session| {
             matches!(
@@ -452,6 +482,28 @@ fn render_restored_sessions_group(
                     | WorkspaceSessionKind::Welcome
             )
         })
+        .cloned()
+        .collect();
+    if kind_sessions.is_empty() {
+        return None;
+    }
+
+    // Group identity from full kind list (not search-filtered) so hidden sibling
+    // leaves still keep the split unit intact (EC-17).
+    let units = build_reorder_units(&kind_sessions);
+    let unit_index_by_key: HashMap<String, usize> = units
+        .iter()
+        .enumerate()
+        .flat_map(|(index, unit)| {
+            unit.logical_keys()
+                .iter()
+                .cloned()
+                .map(move |key| (key, index))
+        })
+        .collect();
+
+    let visible: Vec<&WorkspaceSessionSnapshot> = kind_sessions
+        .iter()
         .filter(|session| {
             query.is_empty()
                 || search_fragments_contain_query(
@@ -460,11 +512,14 @@ fn render_restored_sessions_group(
                 )
         })
         .collect();
-    if sessions.is_empty() {
+    if visible.is_empty() {
         return None;
     }
 
+    let split_group_numbers =
+        workspace.same_window_split_group_numbers_for_sessions(&kind_sessions, app);
     let theme = appearance.theme();
+
     let header = Text::new_inline(
         crate::t!("workspace-session-navigator-title"),
         appearance.ui_font_family(),
@@ -480,16 +535,45 @@ fn render_restored_sessions_group(
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
         .with_spacing(GROUP_ITEM_SPACING)
         .with_child(header);
-    for session in sessions {
+
+    let mut last_unit_index: Option<usize> = None;
+    for session in visible {
+        let logical_key = Workspace::workspace_session_logical_key(session);
+        let unit_index = unit_index_by_key
+            .get(&logical_key)
+            .copied()
+            .unwrap_or(0);
+        if last_unit_index != Some(unit_index) {
+            // Unit-boundary drop slot (not between sibling leaves).
+            column.add_child(render_session_unit_insertion_target(
+                unit_index,
+                false,
+                theme,
+            ));
+            last_unit_index = Some(unit_index);
+        }
+
+        let row_key = vtab_session_row_key(
+            &session.id,
+            session.environment_authority_key.as_deref(),
+        );
         let mouse_state = state
             .session_row_mouse_states
             .borrow_mut()
-            .entry(vtab_session_row_key(
-                &session.id,
-                session.environment_authority_key.as_deref(),
-            ))
+            .entry(row_key.clone())
             .or_default()
             .clone();
+        let drag_state = state
+            .session_row_drag_states
+            .borrow_mut()
+            .entry(row_key)
+            .or_default()
+            .clone();
+        let reorder_unit_id = units
+            .get(unit_index)
+            .map(ReorderUnit::id)
+            .unwrap_or_else(|| format!("row:{logical_key}"));
+
         column.add_child(render_restored_session_row(
             session,
             workspace.is_restoring_workspace_session(session),
@@ -505,8 +589,18 @@ fn render_restored_sessions_group(
                 }),
             workspace.workspace_session_alias_editor.clone(),
             mouse_state,
+            drag_state,
+            reorder_unit_id,
             state.detail_hover_state(workspace.window_id),
             appearance,
+        ));
+    }
+
+    if last_unit_index.is_some() {
+        column.add_child(render_session_unit_insertion_target(
+            units.len(),
+            false,
+            theme,
         ));
     }
 
@@ -515,6 +609,23 @@ fn render_restored_sessions_group(
             .with_padding(Padding::uniform(8.).with_top(4.))
             .finish(),
     )
+}
+
+fn render_session_unit_insertion_target(
+    target_index: usize,
+    show_indicator: bool,
+    theme: &WarpTheme,
+) -> Box<dyn Element> {
+    let content = if show_indicator {
+        render_vertical_tab_hover_indicator(theme)
+    } else {
+        Empty::new().finish()
+    };
+    DropTarget::new(
+        render_vertical_tab_insertion_target_content(content),
+        SessionNavigatorReorderDropData { target_index },
+    )
+    .finish()
 }
 
 fn terminal_title_fallback_font(agent_text: &TerminalAgentText) -> TerminalPrimaryLineFont {
@@ -994,6 +1105,8 @@ pub(super) struct VerticalTabsPanelState {
     group_mouse_states: RefCell<HashMap<EntityId, PaneGroupStateHandles>>,
     pane_row_mouse_states: RefCell<HashMap<PaneId, MouseStateHandle>>,
     session_row_mouse_states: RefCell<HashMap<String, MouseStateHandle>>,
+    /// Per-row drag state keyed by `vtab_session_row_key` (EC-17).
+    session_row_drag_states: RefCell<HashMap<String, DraggableState>>,
     pane_title_mouse_states: RefCell<HashMap<PaneId, MouseStateHandle>>,
     pane_badge_mouse_states: RefCell<HashMap<PaneId, PaneRowBadgeMouseStates>>,
     detail_pane_badge_mouse_states: RefCell<HashMap<PaneId, PaneRowBadgeMouseStates>>,
@@ -1014,6 +1127,7 @@ impl Default for VerticalTabsPanelState {
             group_mouse_states: RefCell::default(),
             pane_row_mouse_states: RefCell::default(),
             session_row_mouse_states: RefCell::default(),
+            session_row_drag_states: RefCell::default(),
             pane_title_mouse_states: RefCell::default(),
             pane_badge_mouse_states: RefCell::default(),
             detail_pane_badge_mouse_states: RefCell::default(),

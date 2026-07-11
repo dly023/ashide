@@ -1046,7 +1046,10 @@ pub fn validate_transition(
         }
     }
 
-    if let SessionNavigatorAction::Reorder { .. } = action {
+    if let SessionNavigatorAction::Reorder {
+        ordered_logical_keys,
+    } = action
+    {
         if before.state.active_key != after.state.active_key {
             return Err(format!(
                 "validate_transition: Reorder changed active_key from {:?} to {:?}",
@@ -1059,6 +1062,9 @@ pub fn validate_transition(
                 after.side_effect
             ));
         }
+        // Check the requested key sequence (sort may re-glue adjacency via group min order).
+        validate_reorder_keys_preserve_split_groups(&before.sessions, ordered_logical_keys)?;
+        validate_same_window_split_adjacency(&before.sessions, &after.sessions)?;
     }
 
     // sessions 数量在非 Refresh 时不应增加
@@ -1073,6 +1079,211 @@ pub fn validate_transition(
     }
 
     Ok(())
+}
+
+/// EC-17: live leaves that share a tab must stay contiguous with leaf order preserved.
+fn validate_same_window_split_adjacency(
+    before: &[WorkspaceSessionSnapshot],
+    after: &[WorkspaceSessionSnapshot],
+) -> Result<(), String> {
+    let before_leaves = live_leaves_by_tab(before);
+    let after_keys: Vec<String> = after.iter().map(logical_key).collect();
+    validate_split_groups_in_key_sequence(&before_leaves, &after_keys)
+}
+
+/// Reject Reorder payloads that insert foreign keys between same-tab live leaves
+/// or reverse leaf relative order.
+fn validate_reorder_keys_preserve_split_groups(
+    before: &[WorkspaceSessionSnapshot],
+    ordered_logical_keys: &[String],
+) -> Result<(), String> {
+    let before_leaves = live_leaves_by_tab(before);
+    validate_split_groups_in_key_sequence(&before_leaves, ordered_logical_keys)
+}
+
+fn validate_split_groups_in_key_sequence(
+    before_leaves: &HashMap<usize, Vec<String>>,
+    ordered_keys: &[String],
+) -> Result<(), String> {
+    let positions: HashMap<&str, usize> = ordered_keys
+        .iter()
+        .enumerate()
+        .map(|(i, key)| (key.as_str(), i))
+        .collect();
+
+    for (tab_index, before_keys) in before_leaves {
+        if before_keys.len() < 2 {
+            continue;
+        }
+        let mut positions_for_group = Vec::with_capacity(before_keys.len());
+        for key in before_keys {
+            let Some(pos) = positions.get(key.as_str()).copied() else {
+                return Err(format!(
+                    "validate_transition: Reorder dropped split leaf {key} from tab {tab_index}"
+                ));
+            };
+            positions_for_group.push(pos);
+        }
+        let mut sorted = positions_for_group.clone();
+        sorted.sort_unstable();
+        if positions_for_group != sorted {
+            return Err(format!(
+                "validate_transition: Reorder changed leaf relative order in tab {tab_index}"
+            ));
+        }
+        for window in sorted.windows(2) {
+            if window[1] != window[0] + 1 {
+                return Err(format!(
+                    "validate_transition: Reorder broke same_window adjacency in tab {tab_index}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn live_leaves_by_tab(
+    sessions: &[WorkspaceSessionSnapshot],
+) -> HashMap<usize, Vec<String>> {
+    let mut by_tab: HashMap<usize, Vec<(usize, String)>> = HashMap::new();
+    for session in sessions {
+        if !is_live(session) {
+            continue;
+        }
+        let Some((tab, leaf)) = locator_from_session_id(&session.id) else {
+            continue;
+        };
+        by_tab
+            .entry(tab)
+            .or_default()
+            .push((leaf, logical_key(session)));
+    }
+    by_tab
+        .into_iter()
+        .map(|(tab, mut leaves)| {
+            leaves.sort_by_key(|(leaf, _)| *leaf);
+            (
+                tab,
+                leaves.into_iter().map(|(_, key)| key).collect::<Vec<_>>(),
+            )
+        })
+        .collect()
+}
+
+// ─────────────────────────────────────────────────────────
+// Reorder units (EC-17: split tab = one drag unit)
+// ─────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReorderUnit {
+    /// Same-tab multi-pane live group; keys already in leaf order.
+    Group {
+        tab_index: usize,
+        logical_keys: Vec<String>,
+    },
+    /// Virtual row or sole live pane.
+    Single {
+        logical_key: String,
+    },
+}
+
+impl ReorderUnit {
+    pub fn id(&self) -> String {
+        match self {
+            Self::Group { tab_index, .. } => format!("group:tab:{tab_index}"),
+            Self::Single { logical_key } => format!("row:{logical_key}"),
+        }
+    }
+
+    pub fn logical_keys(&self) -> &[String] {
+        match self {
+            Self::Group { logical_keys, .. } => logical_keys,
+            Self::Single { logical_key } => std::slice::from_ref(logical_key),
+        }
+    }
+}
+
+/// Build drag units from a display-ordered session list.
+/// A tab with 2+ live leaves in the list is one Group; others are Single.
+pub fn build_reorder_units(sessions: &[WorkspaceSessionSnapshot]) -> Vec<ReorderUnit> {
+    let multi_tabs: HashSet<usize> = {
+        let mut counts: HashMap<usize, usize> = HashMap::new();
+        for session in sessions {
+            if !is_live(session) {
+                continue;
+            }
+            if let Some((tab, _)) = locator_from_session_id(&session.id) {
+                *counts.entry(tab).or_default() += 1;
+            }
+        }
+        counts
+            .into_iter()
+            .filter(|(_, count)| *count > 1)
+            .map(|(tab, _)| tab)
+            .collect()
+    };
+
+    let mut units = Vec::new();
+    let mut emitted_groups: HashSet<usize> = HashSet::new();
+    for session in sessions {
+        let key = logical_key(session);
+        if is_live(session) {
+            if let Some((tab, _)) = locator_from_session_id(&session.id) {
+                if multi_tabs.contains(&tab) {
+                    if emitted_groups.insert(tab) {
+                        let mut leaves: Vec<(usize, String)> = sessions
+                            .iter()
+                            .filter(|s| {
+                                is_live(s)
+                                    && locator_from_session_id(&s.id)
+                                        .is_some_and(|(t, _)| t == tab)
+                            })
+                            .filter_map(|s| {
+                                locator_from_session_id(&s.id)
+                                    .map(|(_, leaf)| (leaf, logical_key(s)))
+                            })
+                            .collect();
+                        leaves.sort_by_key(|(leaf, _)| *leaf);
+                        units.push(ReorderUnit::Group {
+                            tab_index: tab,
+                            logical_keys: leaves.into_iter().map(|(_, k)| k).collect(),
+                        });
+                    }
+                    continue;
+                }
+            }
+        }
+        units.push(ReorderUnit::Single {
+            logical_key: key,
+        });
+    }
+    units
+}
+
+/// Move a unit to `to_index` (unit-list insertion index before removal adjustment).
+/// Returns flattened logical_keys for `SessionNavigatorAction::Reorder`.
+pub fn move_reorder_unit(
+    mut units: Vec<ReorderUnit>,
+    from_index: usize,
+    to_index: usize,
+) -> Vec<String> {
+    if from_index >= units.len() {
+        return units
+            .into_iter()
+            .flat_map(|unit| unit.logical_keys().to_vec())
+            .collect();
+    }
+    let unit = units.remove(from_index);
+    let insert_at = if to_index > from_index {
+        to_index.saturating_sub(1).min(units.len())
+    } else {
+        to_index.min(units.len())
+    };
+    units.insert(insert_at, unit);
+    units
+        .into_iter()
+        .flat_map(|unit| unit.logical_keys().to_vec())
+        .collect()
 }
 
 // ─────────────────────────────────────────────────────────

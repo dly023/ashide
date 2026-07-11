@@ -366,6 +366,11 @@ pub enum WorkspaceAction {
         target: WorkspaceSessionActionTarget,
         pinned: bool,
     },
+    /// EC-17: drag a Session Navigator unit (split group or single row) to a unit-boundary index.
+    ReorderWorkspaceSessionUnit {
+        unit_id: String,
+        target_index: usize,
+    },
     /// Closes the focused panel. This happens as an explicit action from the user.
     ClosePanel,
     CopyTextToClipboard(String),
@@ -933,6 +938,7 @@ impl WorkspaceAction {
             | SetWorkspaceSessionRestorePopoverOpen { .. }
             | RefreshWorkspaceSessions
             | ToggleWorkspaceSessionPinned { .. }
+            | ReorderWorkspaceSessionUnit { .. }
             | ActivateRestoredWorkspaceSession { .. }
             | RequestRenameWorkspaceSession { .. }
             | ClearWorkspaceSessionAlias { .. }

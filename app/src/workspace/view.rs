@@ -26673,6 +26673,12 @@ impl TypedActionView for Workspace {
             ToggleWorkspaceSessionPinned { target, pinned } => {
                 self.toggle_workspace_session_pinned(target, *pinned, ctx);
             }
+            ReorderWorkspaceSessionUnit {
+                unit_id,
+                target_index,
+            } => {
+                self.reorder_session_navigator_unit(unit_id, *target_index, ctx);
+            }
             ToggleNotificationMailbox { select_first } => {
                 if FeatureFlag::HOANotifications.is_enabled()
                     && *AISettings::as_ref(ctx).show_agent_notifications
