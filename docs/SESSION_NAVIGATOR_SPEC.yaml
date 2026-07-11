@@ -345,11 +345,13 @@ edge_cases:
     name: "删除 split tab 中的一个 pane"
     expected: "focus 留在同 tab 的兄弟 pane, 不跳到别的 tab"
     reducer_rule: "delete → 多 pane → close_pane + FocusPane(prev_pane)"
+    ship_status: covered
 
   - id: "EC-02"
     name: "删除唯一 pane 的 tab"
     expected: "focus 切到同 env 邻居 tab, 不重复选"
     reducer_rule: "delete → 唯一 pane → close_tab + FocusPane(邻居)"
+    ship_status: covered
 
   - id: "EC-03"
     name: "删除窗口唯一 tab 的唯一 pane"
@@ -361,21 +363,25 @@ edge_cases:
     name: "当前聚焦项被删, 别的项还 selected"
     expected: "focus 给同 group 兄弟, 其他 selection 不变"
     reducer_rule: "delete → 多 pane → FocusPane(prev_pane)"
+    ship_status: covered
 
   - id: "EC-05"
     name: "active session 被删 → 恢复 → pin"
     expected: "恢复后 active 跟随新 pane; pin 不改 focus"
     reducer_rule: "delete → Activate → Pin, 每步独立"
+    ship_status: covered
 
   - id: "EC-06"
     name: "列表为空时插入新项"
     expected: "新项 is_active=false, order=0"
     reducer_rule: "Refresh → reconcile 分配 order"
+    ship_status: covered
 
   - id: "EC-07"
     name: "多项同一时刻创建"
     expected: "updated_at 相同 → logical_key 升序兜底, 排序稳定"
     reducer_rule: "reconcile tie_breaker = logical_key ASC"
+    ship_status: covered
 
   - id: "EC-08"
     name: "reorder 后 focus 跟随稳定 id"
@@ -388,41 +394,49 @@ edge_cases:
     name: "最后一项被删除时的 fallback focus"
     expected: "不关窗, 留空 tab"
     reducer_rule: "delete → 唯一 tab 唯一 pane → 不 FocusPane"
+    ship_status: covered
 
   - id: "EC-10"
     name: "pin/unpin 后不改 selection 或 focus"
     expected: "pin 只改排序组, is_active / active_key / focus 不变"
     reducer_rule: "Pin → NoEffect (focus)"
+    ship_status: covered
 
   - id: "EC-11"
     name: "virtual row consume 时 active 迁移"
     expected: "active_key 从 virtual logical_key 迁移到 live logical_key"
     reducer_rule: "Refresh → materialization_tracking 主动迁移"
+    ship_status: covered
 
   - id: "EC-12"
     name: "restoring 中用户切走"
     expected: "restoring 行保持 active highlight, 但物理焦点跟随用户"
     reducer_rule: "active_priority_chain: restoring > active_key, live focus > restoring"
+    ship_status: covered
 
   - id: "EC-13"
     name: "被删 session 的 active 不猜测转移"
     expected: "被删 session 是 active → 清除 active_key, 走 focus 决策, 不猜 materialize"
     reducer_rule: "materialization_tracking: deletion 不猜测"
+    ship_status: covered
 
   - id: "EC-14"
     name: "跨 environment 删除"
     expected: "删除后 focus 留在被删 session 的 environment"
     reducer_rule: "delete → focus target 限同 env"
+    ship_status: covered
 
   - id: "EC-15"
     name: "split pane fork 后焦点"
     expected: "新 pane 获得焦点"
     reducer_rule: "split_pane_fork → FocusPane(new_pane)"
+    ship_status: covered
 
   - id: "EC-16"
     name: "tab 关闭后 focus"
     expected: "优先同 env 邻居 tab"
     reducer_rule: "delete → 唯一 pane → close_tab → 同 env 邻居"
+    ship_status: covered
 
 # ─────────────────────────────────────────────────────────
 # 10. 测试矩阵 (v3 新增)
@@ -439,7 +453,8 @@ test_matrix:
 
   # 10.2 序列型测试 (v3 新增)
   sequences:
-    - name: "create → activate → pin → reorder → remove → restore focus"
+    - name: "create → activate → pin → remove → restore focus"
+      note: "reorder 步骤属 EC-08, 本发布 deferred; 实现见 test_sequence_create_activate_pin_remove_restore"
       steps:
         - "新建 terminal pane → 检查 is_active=true"
         - "activate 另一个 session → 检查 focus 切换"
@@ -538,6 +553,8 @@ test_constraints:
 # ─────────────────────────────────────────────────────────
 ship_coverage:
   production_delete: "unified_flow via reduce(Delete) + DeleteEffects; no preselect/reselect"
+  production_activate: "live FocusPane + virtual SpawnTerminal via apply_session_navigator_side_effect"
+  production_focus: "activate_tab_internal + Event::PaneFocused → notify/sync; restored marker not overwritten by live key"
   workspace_integration:
     - "EC-01 test_deleting_split_pane_session_keeps_focus_on_sibling_in_same_tab"
     - "EC-02/16 test_deleting_local_tab_session_focuses_same_env_neighbor_tab"
@@ -548,3 +565,4 @@ ship_coverage:
   deferred:
     - "EC-08 reorder-focus"
     - "full combinatorial oracle"
+    - "collapse preferred_active_* dual-path entirely into Refresh state apply"

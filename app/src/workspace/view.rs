@@ -19061,6 +19061,8 @@ impl Workspace {
                 // Pane focus can change the active terminal session without changing tabs.
                 // Keep the Session Navigator active row aligned with the focused pane path.
                 self.update_active_session(ctx);
+                self.notify_session_navigator_focus_changed(ctx);
+                self.sync_session_navigator_sessions(ctx);
 
                 // Re-evaluate which region is focused and update pane dimming accordingly.
                 self.update_pane_dimming_for_current_focus_region(ctx);

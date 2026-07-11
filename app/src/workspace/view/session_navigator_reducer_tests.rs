@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::*;
-use crate::app_state::{SessionDisplayOrderStrategy, WorkspaceSessionKind, WorkspaceSessionSnapshot};
+use crate::app_state::{WorkspaceSessionKind, WorkspaceSessionSnapshot};
 
 // ─────────────────────────────────────────────────────────
 // 测试辅助
@@ -319,6 +319,169 @@ fn test_ec01_delete_split_pane_focus_stays_in_same_tab() {
     // s0 应该被移除
     assert_eq!(result.sessions.len(), 1);
     assert_eq!(result.sessions[0].id, "tab:0:leaf:1");
+    validate_state(&result.sessions, &result.state).unwrap();
+}
+
+// ─────────────────────────────────────────────────────────
+// EC-04: 当前聚焦项被删, 同组兄弟获 focus; 其它行 selection 不变
+// ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_ec04_delete_focused_keeps_other_row_selection_semantics() {
+    let mut state = SessionNavigatorState::new();
+
+    let s0 = make_live_session("tab:0:leaf:0", "local", 1000);
+    let s1 = make_live_session("tab:0:leaf:1", "local", 2000);
+    let s_virtual = make_virtual_session("agent-codex:other-selected", "local", 3000);
+
+    let pane_info = make_pane_info(vec![
+        (0, 2, Some(make_locator(0, 0)), Some(make_locator(0, 1))),
+    ]);
+
+    let result = reduce(
+        Vec::new(),
+        state.clone(),
+        SessionNavigatorAction::Refresh {
+            new_sessions: vec![s0.clone(), s1.clone(), s_virtual.clone()],
+            pinned_session_ids: HashSet::new(),
+        },
+        &pane_info,
+    );
+    state = result.state;
+    // Mark the virtual row as the restored selection while focus is on s0.
+    state.active_key = Some(logical_key(&s_virtual));
+
+    let result = reduce(
+        result.sessions,
+        state,
+        SessionNavigatorAction::Delete {
+            session_logical_key: logical_key(&s0),
+            session_id: s0.id.clone(),
+            environment_authority_key: s0.environment_authority_key.clone(),
+        },
+        &pane_info,
+    );
+
+    match &result.side_effect {
+        SideEffect::DeleteEffects(effects) => {
+            let locator = effects
+                .focus
+                .as_ref()
+                .expect("focus should go to sibling pane");
+            assert_eq!(
+                locator.pane_id,
+                crate::pane_group::PaneId::test_from_usize(1),
+                "focus should go to sibling pane"
+            );
+            assert!(matches!(effects.close, DeleteCloseKind::ClosePane(_)));
+        }
+        other => panic!("expected DeleteEffects, got {other:?}"),
+    }
+
+    assert!(
+        result.sessions.iter().all(|s| s.id != s0.id),
+        "deleted focused session must be gone"
+    );
+    assert!(
+        result
+            .sessions
+            .iter()
+            .any(|s| logical_key(s) == logical_key(&s_virtual)),
+        "unrelated virtual selection row must remain"
+    );
+    // Sibling becomes the live focus target; virtual row must not be invented as the focus target.
+    assert_ne!(
+        result.state.active_key.as_deref(),
+        Some(logical_key(&s0).as_str()),
+        "deleted key must not remain active"
+    );
+    validate_state(&result.sessions, &result.state).unwrap();
+}
+
+// ─────────────────────────────────────────────────────────
+// EC-05: active 被删 → Activate 恢复 → Pin 不改 focus
+// ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_ec05_delete_active_then_activate_then_pin() {
+    let mut state = SessionNavigatorState::new();
+    let s_live = make_live_session("tab:0:leaf:0", "local", 1000);
+    let s_virtual = make_virtual_session("agent-codex:session-ec05", "local", 2000);
+
+    let pane_info = make_pane_info(vec![(0, 1, Some(make_locator(0, 0)), None)]);
+
+    let result = reduce(
+        Vec::new(),
+        state.clone(),
+        SessionNavigatorAction::Refresh {
+            new_sessions: vec![s_live.clone(), s_virtual.clone()],
+            pinned_session_ids: HashSet::new(),
+        },
+        &pane_info,
+    );
+    state = result.state;
+
+    // Activate live so it is the active selection, then delete it.
+    let live_key = logical_key(&s_live);
+    let result = reduce(
+        result.sessions,
+        state,
+        SessionNavigatorAction::Activate {
+            session_logical_key: live_key.clone(),
+            session_id: s_live.id.clone(),
+            is_live: true,
+        },
+        &pane_info,
+    );
+    assert_eq!(result.state.active_key, Some(live_key.clone()));
+
+    let pane_info_after_delete = PaneGroupInfo::new();
+    let result = reduce(
+        result.sessions,
+        result.state,
+        SessionNavigatorAction::Delete {
+            session_logical_key: live_key,
+            session_id: s_live.id.clone(),
+            environment_authority_key: s_live.environment_authority_key.clone(),
+        },
+        &pane_info_after_delete,
+    );
+    assert!(result.sessions.iter().all(|s| s.id != s_live.id));
+
+    // Restore virtual row.
+    let virtual_key = logical_key(&s_virtual);
+    let result = reduce(
+        result.sessions,
+        result.state,
+        SessionNavigatorAction::Activate {
+            session_logical_key: virtual_key.clone(),
+            session_id: s_virtual.id.clone(),
+            is_live: false,
+        },
+        &pane_info_after_delete,
+    );
+    assert_eq!(result.state.active_key, Some(virtual_key.clone()));
+    assert!(result.state.restoring_keys.contains(&virtual_key));
+    assert!(matches!(
+        result.side_effect,
+        SideEffect::SpawnTerminal { .. }
+    ));
+
+    let active_before_pin = result.state.active_key.clone();
+    let result = reduce(
+        result.sessions,
+        result.state,
+        SessionNavigatorAction::Pin {
+            session_logical_key: virtual_key,
+            pinned: true,
+        },
+        &pane_info_after_delete,
+    );
+    assert_eq!(
+        result.state.active_key, active_before_pin,
+        "pin must not change active_key"
+    );
+    assert!(matches!(result.side_effect, SideEffect::WriteUserState));
     validate_state(&result.sessions, &result.state).unwrap();
 }
 

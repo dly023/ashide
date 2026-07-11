@@ -2109,11 +2109,19 @@ impl Workspace {
             &pane_info,
         );
         self.apply_session_navigator_state(reduced.state);
-        debug_assert!(matches!(
-            reduced.side_effect,
-            SideEffect::SpawnTerminal { .. }
-        ));
+        let _ = self.apply_session_navigator_side_effect(
+            &reduced.side_effect,
+            Some(&session),
+            ctx,
+        );
+    }
 
+    /// Spawn / restore a virtual session after reducer emitted `SpawnTerminal`.
+    fn spawn_virtual_workspace_session_from_activate(
+        &mut self,
+        session: &WorkspaceSessionSnapshot,
+        ctx: &mut ViewContext<Self>,
+    ) {
         if let Some(conversation_id) =
             Self::conversation_id_from_ashide_conversation_session_id(&session.id)
         {
@@ -2123,11 +2131,11 @@ impl Workspace {
                 None,
                 None,
                 Some(RestoreConversationLayout::NewTab),
-                Some(&session),
+                Some(session),
                 ctx,
             );
-            self.set_active_restored_workspace_session_key_for_session(&session, ctx);
-            self.clear_workspace_session_restoring(&session);
+            self.set_active_restored_workspace_session_key_for_session(session, ctx);
+            self.clear_workspace_session_restoring(session);
             ctx.notify();
             return;
         }
@@ -2141,7 +2149,7 @@ impl Workspace {
             || session.cli_agent.is_some()
             || session.cli_command.is_some()
         {
-            Self::cli_agent_from_session(&session).and_then(|agent| {
+            Self::cli_agent_from_session(session).and_then(|agent| {
                 agent.explicit_resume_command(
                     session.cli_agent_session_id.as_deref(),
                     session.cwd.as_deref(),
@@ -2162,19 +2170,19 @@ impl Workspace {
             .and_then(environment_provider::runtime_connection_ref_from_authority)
             .is_some()
         {
-            self.open_restored_environment_runtime_session(&session, pending_command, ctx);
+            self.open_restored_environment_runtime_session(session, pending_command, ctx);
             return;
         }
 
         let terminal_bootstrap_restore_command =
-            Self::restored_terminal_bootstrap_startup_command(&session, pending_command);
+            Self::restored_terminal_bootstrap_startup_command(session, pending_command);
         self.open_terminal_bootstrap_restored_session_terminal(
             initial_directory,
-            &session,
+            session,
             terminal_bootstrap_restore_command,
             ctx,
         );
-        self.set_active_restored_workspace_session_key_for_session(&session, ctx);
+        self.set_active_restored_workspace_session_key_for_session(session, ctx);
         self.sync_session_navigator_sessions(ctx);
     }
 
@@ -2257,8 +2265,11 @@ impl Workspace {
         })
     }
 
-    /// After tab/pane focus changes, clear stale restored active markers.
-    /// Display active still follows focused live pane via raw Refresh injection (§6.1).
+    /// After tab/pane focus changes, clear stale restored active markers and refresh
+    /// navigator display. Display `is_active` still follows focused live pane via raw
+    /// Refresh injection (§6.1). Do **not** apply PaneFocused `active_key` into
+    /// `active_restored_workspace_session_key` — that marker is reserved for
+    /// virtual/restored highlight and must clear on tab switch.
     pub(super) fn notify_session_navigator_focus_changed(
         &mut self,
         ctx: &mut ViewContext<Self>,
@@ -2272,36 +2283,39 @@ impl Workspace {
             }
         }
 
-        // Book-keep reducer TabActivated / PaneFocused without forcing active_key onto
-        // workspace (that would replace a cleared restored marker with a live key).
+        // Drive reducer TabActivated / PaneFocused for session-list is_active bookkeeping.
+        // Only persist restoring/display fields — never write live focus into the restored marker.
         let tab_index = self.active_tab_index;
         let pane_info = self.snapshot_pane_group_info(ctx);
         let state = self.snapshot_session_navigator_state();
-        let sessions = {
-            // Avoid full raw Refresh recursion cost: use live+restored snapshot lightly
-            self.live_workspace_sessions(ctx)
-        };
-        let _ = session_navigator_reducer::reduce(
+        let sessions = self.live_workspace_sessions(ctx);
+        let after_tab = session_navigator_reducer::reduce(
             sessions,
             state,
             SessionNavigatorAction::TabActivated { tab_index },
             &pane_info,
         );
-        if let Some(tab) = self.tabs.get(tab_index) {
+        let reduced = if let Some(tab) = self.tabs.get(tab_index) {
             let locator = PaneViewLocator {
                 pane_group_id: tab.pane_group.id(),
                 pane_id: tab.pane_group.as_ref(ctx).focused_pane_id(ctx),
             };
-            let _ = session_navigator_reducer::reduce(
-                Vec::new(),
-                self.snapshot_session_navigator_state(),
+            session_navigator_reducer::reduce(
+                after_tab.sessions,
+                after_tab.state,
                 SessionNavigatorAction::PaneFocused {
                     locator,
                     session_logical_key: focused_key,
                 },
                 &pane_info,
-            );
-        }
+            )
+        } else {
+            after_tab
+        };
+        self.session_navigator_display_order = reduced.state.display_order;
+        self.next_session_navigator_display_order = reduced.state.next_display_order;
+        self.restoring_workspace_session_keys = reduced.state.restoring_keys;
+        self.deleting_workspace_session_keys = reduced.state.deleting_keys;
     }
 
     pub(super) fn apply_session_navigator_state(&mut self, state: SessionNavigatorState) {
@@ -2367,10 +2381,11 @@ impl Workspace {
     }
 
     /// Apply reducer side effects. Returns false if close was refused (sole pane / no CloseWindow).
+    /// `context_session` is the deleted session for DeleteEffects, or the virtual session for SpawnTerminal.
     pub(super) fn apply_session_navigator_side_effect(
         &mut self,
         side_effect: &SideEffect,
-        deleted_session: Option<&WorkspaceSessionSnapshot>,
+        context_session: Option<&WorkspaceSessionSnapshot>,
         ctx: &mut ViewContext<Self>,
     ) -> bool {
         match side_effect {
@@ -2378,14 +2393,26 @@ impl Workspace {
                 self.focus_pane(locator.clone(), ctx);
                 true
             }
-            SideEffect::SpawnTerminal { .. } => {
-                // Virtual activate path performs spawn after reduce; nothing else here.
+            SideEffect::SpawnTerminal { session_id, .. } => {
+                if let Some(session) = context_session {
+                    if session.id != *session_id {
+                        log::warn!(
+                            "SpawnTerminal session id mismatch: effect={session_id} context={}",
+                            session.id
+                        );
+                    }
+                    self.spawn_virtual_workspace_session_from_activate(session, ctx);
+                } else {
+                    log::warn!(
+                        "SpawnTerminal missing context session for id={session_id}; spawn skipped"
+                    );
+                }
                 true
             }
             SideEffect::WriteUserState => true,
             SideEffect::None => {
                 // Live delete with no reducer hit: still close via derived DeleteEffects path.
-                if let Some(session) = deleted_session.filter(|s| s.is_live_container()) {
+                if let Some(session) = context_session.filter(|s| s.is_live_container()) {
                     return self.apply_delete_effects(
                         &DeleteEffects {
                             focus: None,
@@ -2398,7 +2425,7 @@ impl Workspace {
                 true
             }
             SideEffect::DeleteEffects(effects) => {
-                self.apply_delete_effects(effects, deleted_session, ctx)
+                self.apply_delete_effects(effects, context_session, ctx)
             }
         }
     }
