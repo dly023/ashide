@@ -100,11 +100,11 @@ build_linux_helper() {
   echo "Building Linux helper for $rust_target (profile=$CARGO_PROFILE)"
   if command -v cargo-zigbuild >/dev/null 2>&1; then
     USE_ZIGBUILD=true CARGO_TARGET_DIR="$HELPER_TARGET_DIR" \
-      cargo zigbuild -p warp --bin ashide --target "$rust_target" \
+      cargo zigbuild --locked -p warp --bin ashide --target "$rust_target" \
       --profile "$CARGO_PROFILE" --features "$FEATURES"
   else
     CARGO_TARGET_DIR="$HELPER_TARGET_DIR" \
-      cargo build -p warp --bin ashide --target "$rust_target" \
+      cargo build --locked -p warp --bin ashide --target "$rust_target" \
       --profile "$CARGO_PROFILE" --features "$FEATURES"
   fi
 

@@ -16,6 +16,8 @@ TERM=xterm-256color ./script/run
 
 The app bundle build can be slow, so prefer `cargo check` for small code changes and run the GUI only when interaction needs verification.
 
+根目录 `Cargo.lock` 必须随依赖变更一起提交。应用 bundle、CI Release 和 remote helper 构建统一使用 `--locked`，确保本地验证、tag 构建和发布产物解析到完全相同的依赖图；需要升级依赖时应显式更新 lockfile，而不是依赖 CI 临时解析最新版。
+
 ## Naming
 
 - Product name: `Ashide`

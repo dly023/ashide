@@ -1018,7 +1018,8 @@ async fn cross_compile_remote_server(
                     );
             }
         }
-        cmd.arg("-p")
+        cmd.arg("--locked")
+            .arg("-p")
             .arg("warp")
             .arg("--bin")
             .arg(bin_name)
@@ -1680,6 +1681,29 @@ mod tests {
              build_linux_helper aarch64-unknown-linux-musl aarch64"
         ));
         assert!(!artifact_script.contains("Skipping x86_64 Linux helper build"));
+    }
+
+    #[test]
+    fn release_builds_are_reproducibly_locked() {
+        let root = workspace_root();
+        assert!(root.join("Cargo.lock").is_file());
+
+        let gitignore = include_str!("../../../.gitignore");
+        assert!(!gitignore.lines().any(|line| line.trim() == "/Cargo.lock"));
+
+        let macos_bundle = include_str!("../../../script/macos/bundle");
+        let linux_bundle = include_str!("../../../script/linux/bundle");
+        let windows_bundle = include_str!("../../../script/windows/bundle.ps1");
+        let helper_bundle = include_str!("../../../script/make_release_helper_artifacts");
+        let dev_remote_install = include_str!("dev_remote_install.rs");
+
+        assert!(macos_bundle.contains("cargo build --locked"));
+        assert!(linux_bundle.contains("cargo zigbuild --locked"));
+        assert!(linux_bundle.contains("cargo build --locked"));
+        assert!(windows_bundle.contains("cargo build --locked"));
+        assert!(helper_bundle.contains("cargo zigbuild --locked"));
+        assert!(helper_bundle.contains("cargo build --locked"));
+        assert!(dev_remote_install.contains(".arg(\"--locked\")"));
     }
 
     #[test]

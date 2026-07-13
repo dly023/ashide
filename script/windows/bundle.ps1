@@ -153,7 +153,7 @@ if (-Not $SKIP_BUILD_BINARY) {
     Write-Output "Building Ashide for channel $CHANNEL and bundle id $BUNDLE_ID"
     $env:CARGO_BIN_NAME = $CHANNEL
     $env:ASHIDE_APP_NAME = $APP_NAME
-    cargo build -p warp --profile "$CARGO_PROFILE" --bin "$ASHIDE_BIN" --features "$FEATURES" --target $PLATFORM_TARGET
+    cargo build --locked -p warp --profile "$CARGO_PROFILE" --bin "$ASHIDE_BIN" --features "$FEATURES" --target $PLATFORM_TARGET
     if (-Not $?) {
         Write-Error "Failed to build Ashide $ASHIDE_BIN binary with profile $CARGO_PROFILE"
         exit 1
