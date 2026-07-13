@@ -18,6 +18,8 @@ The app bundle build can be slow, so prefer `cargo check` for small code changes
 
 根目录 `Cargo.lock` 必须随依赖变更一起提交。应用 bundle、CI Release 和 remote helper 构建统一使用 `--locked`，确保本地验证、tag 构建和发布产物解析到完全相同的依赖图；需要升级依赖时应显式更新 lockfile，而不是依赖 CI 临时解析最新版。
 
+Release tag 统一使用 `vMAJOR.MINOR.PATCH`。macOS 打包必须同时满足：`AshideVersion` 等于完整 tag、`CFBundleShortVersionString` 与 `CFBundleVersion` 等于去掉 `v` 的产品版本、应用内二进制 `ashide --version` 等于 `Ashide <tag>`。`script/make_release_artifacts` 会在封装 DMG/zip 前验证这四项，任何一项不一致都必须中止发布，禁止以 warning 或旧版本 fallback 继续产出。
+
 ## Naming
 
 - Product name: `Ashide`

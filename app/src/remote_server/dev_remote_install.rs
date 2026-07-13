@@ -1688,6 +1688,25 @@ mod tests {
     }
 
     #[test]
+    fn macos_release_identity_is_semver_and_verified_before_packaging() {
+        let workflow = include_str!("../../../.github/workflows/release.yml");
+        let plist_script = include_str!("../../../script/update_plist");
+        let artifact_script = include_str!("../../../script/make_release_artifacts");
+
+        assert!(workflow.contains("--release-tag \"$RELEASE_TAG\""));
+        assert!(plist_script.contains("expected semantic version vMAJOR.MINOR.PATCH"));
+        assert!(plist_script.contains(
+            "PRODUCT_VERSION=\"${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}\""
+        ));
+        assert!(!plist_script.contains("YEAR=\"${BASH_REMATCH[2]}\""));
+        assert!(artifact_script.contains("CFBundleShortVersionString"));
+        assert!(artifact_script.contains("CFBundleVersion"));
+        assert!(artifact_script.contains("AshideVersion"));
+        assert!(artifact_script.contains("ACTUAL_BINARY_VERSION"));
+        assert!(artifact_script.contains("error: release identity mismatch"));
+    }
+
+    #[test]
     fn release_builds_are_reproducibly_locked() {
         let root = workspace_root();
         assert!(root.join("Cargo.lock").is_file());

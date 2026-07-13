@@ -16,32 +16,24 @@ if [[ -z "$ASHIDE_PLIST_PATH" ]]; then
   exit 1
 fi
 
-if [[ -n "$GIT_RELEASE_TAG" ]]; then
-  echo "Updating plist Ashide version to $GIT_RELEASE_TAG"
-  plutil -insert AshideVersion -string "$GIT_RELEASE_TAG" "$ASHIDE_PLIST_PATH"
+set_plist_string() {
+  local key="$1"
+  local value="$2"
+  plutil -replace "$key" -string "$value" "$ASHIDE_PLIST_PATH" 2>/dev/null || \
+    plutil -insert "$key" -string "$value" "$ASHIDE_PLIST_PATH"
+}
 
-  # We convert our version format to be period-separated integers only to align better with
-  # Apple's guidance on values for `CFBundleVersion` / `CFBundleShortVersionString`.
-  # (They technically only allow [major].[minor].[patch], but it's not enforced.)
-  # This allows IT admins to work with a more stable version of our internal versioning scheme.
-  # A tag like `v0.2025.01.07.08.02.stable_02` would be converted to `0.2025.01.07.08.02.02`.
-  if [[ $GIT_RELEASE_TAG =~ ^v([0-9]+)\.([0-9]{4})\.([0-9]{2})\.([0-9]{2})\.([0-9]{2})\.([0-9]{2})\.[a-z]+_([0-9]{2})$ ]]; then
-    MAJOR="${BASH_REMATCH[1]}"
-    YEAR="${BASH_REMATCH[2]}"
-    MONTH="${BASH_REMATCH[3]}"
-    DAY="${BASH_REMATCH[4]}"
-    HOUR="${BASH_REMATCH[5]}"
-    MINUTE="${BASH_REMATCH[6]}"
-    BUILD="${BASH_REMATCH[7]}"
-    
-    FORMATTED_VERSION="${MAJOR}.${YEAR}.${MONTH}.${DAY}.${HOUR}.${MINUTE}.${BUILD}"
-    
-    echo "Updating plist version to $FORMATTED_VERSION"
-    plutil -replace CFBundleShortVersionString -string "$FORMATTED_VERSION" "$ASHIDE_PLIST_PATH"
-    plutil -replace CFBundleVersion -string "$FORMATTED_VERSION" "$ASHIDE_PLIST_PATH"
-  else
-    echo "Warning: GIT_RELEASE_TAG '$GIT_RELEASE_TAG' does not match expected format vN.YYYY.MM.DD.HH.MM.channel_NN"
+if [[ -n "${GIT_RELEASE_TAG:-}" ]]; then
+  if [[ ! "$GIT_RELEASE_TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    echo "Invalid release tag '$GIT_RELEASE_TAG': expected semantic version vMAJOR.MINOR.PATCH" >&2
+    exit 1
   fi
+
+  PRODUCT_VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+  echo "Updating plist Ashide version to $GIT_RELEASE_TAG ($PRODUCT_VERSION)"
+  set_plist_string AshideVersion "$GIT_RELEASE_TAG"
+  set_plist_string CFBundleShortVersionString "$PRODUCT_VERSION"
+  set_plist_string CFBundleVersion "$PRODUCT_VERSION"
 fi
 
 if [[ -n "$ASHIDE_SCHEME_NAME" ]]; then

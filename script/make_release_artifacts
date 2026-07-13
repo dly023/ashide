@@ -13,6 +13,7 @@
 #   script/make_release_artifacts [--source <dir>] [--name <base>]
 #                                 [--artifact app|cli]
 #                                 [--channel <channel>]
+#                                 --release-tag <vMAJOR.MINOR.PATCH>
 #
 # Defaults:
 #   --source    target/<profile>/bundle/osx   (auto-detected from --channel)
@@ -34,6 +35,7 @@ ARTIFACT="app"
 CHANNEL="dev"
 SOURCE_DIR=""
 NAME_OVERRIDE=""
+RELEASE_TAG=""
 
 while (( "$#" )); do
   case "$1" in
@@ -41,6 +43,7 @@ while (( "$#" )); do
     --name)     NAME_OVERRIDE="$2"; shift 2 ;;
     --artifact) ARTIFACT="$2"; shift 2 ;;
     --channel)  CHANNEL="$2"; shift 2 ;;
+    --release-tag) RELEASE_TAG="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
   esac
 done
@@ -91,6 +94,39 @@ rm -f "$ZIP_PATH"
 if [[ "$ARTIFACT" == "app" ]]; then
   APP_BUNDLE="$SOURCE_DIR/$APP_NAME.app"
   DMG_FILE="$SOURCE_DIR/$APP_NAME.dmg"
+  APP_PLIST="$APP_BUNDLE/Contents/Info.plist"
+  APP_EXECUTABLE="$APP_BUNDLE/Contents/MacOS/ashide"
+
+  if [[ ! "$RELEASE_TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    echo "error: --release-tag must be semantic version vMAJOR.MINOR.PATCH" >&2
+    exit 1
+  fi
+  EXPECTED_PRODUCT_VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+
+  if [[ ! -f "$APP_PLIST" || ! -x "$APP_EXECUTABLE" ]]; then
+    echo "error: release app identity files are missing under '$APP_BUNDLE'" >&2
+    exit 1
+  fi
+
+  ACTUAL_RELEASE_TAG="$(/usr/libexec/PlistBuddy -c 'Print :AshideVersion' "$APP_PLIST")"
+  ACTUAL_SHORT_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PLIST")"
+  ACTUAL_BUILD_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PLIST")"
+  ACTUAL_BINARY_VERSION="$("$APP_EXECUTABLE" --version)"
+
+  if [[ "$ACTUAL_RELEASE_TAG" != "$RELEASE_TAG" ||
+      "$ACTUAL_SHORT_VERSION" != "$EXPECTED_PRODUCT_VERSION" ||
+      "$ACTUAL_BUILD_VERSION" != "$EXPECTED_PRODUCT_VERSION" ||
+      "$ACTUAL_BINARY_VERSION" != "Ashide $RELEASE_TAG" ]]; then
+    echo "error: release identity mismatch" >&2
+    printf '  tag: expected=%s actual=%s\n' "$RELEASE_TAG" "$ACTUAL_RELEASE_TAG" >&2
+    printf '  short version: expected=%s actual=%s\n' "$EXPECTED_PRODUCT_VERSION" "$ACTUAL_SHORT_VERSION" >&2
+    printf '  build version: expected=%s actual=%s\n' "$EXPECTED_PRODUCT_VERSION" "$ACTUAL_BUILD_VERSION" >&2
+    printf '  binary: expected=%s actual=%s\n' "Ashide $RELEASE_TAG" "$ACTUAL_BINARY_VERSION" >&2
+    exit 1
+  fi
+
+  echo "Verified release identity: $ACTUAL_BINARY_VERSION ($EXPECTED_PRODUCT_VERSION)"
+
   if [[ -f "$DMG_FILE" ]]; then
     # Prefer the DMG when present — it's the canonical macOS distributable.
     ditto -c -k --keepParent "$DMG_FILE" "$ZIP_PATH"
