@@ -312,7 +312,12 @@ jobs:
           if (-not $installer) { throw 'Windows installer was not produced' }
           Copy-Item $installer.FullName target\release-artifacts\Ashide-windows-x64-setup.exe -Force
           $hash = (Get-FileHash target\release-artifacts\Ashide-windows-x64-setup.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  Ashide-windows-x64-setup.exe" | Out-File -Encoding ascii target\release-artifacts\Ashide-windows-x64-setup.exe.sha256
+          $checksumPath = 'target\release-artifacts\Ashide-windows-x64-setup.exe.sha256'
+          [IO.File]::WriteAllText(
+            $checksumPath,
+            "$hash  Ashide-windows-x64-setup.exe`n",
+            [Text.Encoding]::ASCII
+          )
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
