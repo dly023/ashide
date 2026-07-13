@@ -626,10 +626,8 @@ settings-mcp-update-modal-no-updates = No updates available
 
 # --- ANCHOR-SUB-PLATFORM (agent-settings-platform) ---
 # 此锚点下放 settings_view/platform_page.rs 字符串
-    For more information, visit the
-
 # --- ANCHOR-SUB-KEYBINDINGS (agent-settings-keybindings) ---
-settings-keybindings-search-placeholder = Search by name or by keys (ex. "cmd d")
+settings-keybindings-search-placeholder = Search by name or by keys (ex. cmd d)
 settings-keybindings-conflict-warning = This shortcut conflicts with other keybinds
 settings-keybindings-button-default = Default
 settings-keybindings-button-cancel = Cancel
@@ -1057,7 +1055,6 @@ settings-exec-profile-editor-mcp-denylist-desc = MCP servers that are not allowe
 # Categories
 settings-appearance-category-themes = Themes
 settings-appearance-category-language = Language
-settings-appearance-category-icon = Icon
 settings-appearance-category-window = Window
 settings-appearance-category-input = Input
 settings-appearance-category-panes = Panes
@@ -1076,9 +1073,6 @@ settings-appearance-theme-sync-os-label = Sync with OS
 settings-appearance-theme-sync-os-description = Automatically switch between light and dark themes when your system does.
 
 # Custom App Icon widget
-settings-appearance-custom-icon-label = Customize your app icon
-settings-appearance-custom-icon-bundle-warning = Changing the app icon requires the app to be bundled.
-settings-appearance-custom-icon-restart-warning = You may need to restart Ashide for MacOS to apply the preferred icon style.
 
 # Window widgets
 settings-appearance-window-custom-size-label = Open new windows with custom size
@@ -2633,31 +2627,13 @@ wasm-nux-yes = Yes
 # Auth override warning (app/src/auth/auth_override_warning_body.rs)
 
 # Auth SSO link/login failures/paste token/logout/offline/privacy
-        [one] process
-       *[other] processes
-    } running.
-        [one] session
-       *[other] sessions
-    }.
-        [one] object
-       *[other] objects
-    }. Logging out will cause you to lose the { $count ->
-        [one] object
-       *[other] objects
-    }.
-        [one] file
-       *[other] files
-    }. Logging out will cause you to lose the { $count ->
-        [one] file
-       *[other] files
-    }.
 
 # CLI agent plugin instructions
 cli-agent-plugin-run-on-remote = Be sure to run these commands on your remote machine.
 cli-agent-plugin-codex-install-title = Enable Ashide Notifications for Codex
 cli-agent-plugin-codex-install-subtitle = Update Codex to the latest version, then enable in-focus notifications so Ashide can display them while you work.
 cli-agent-plugin-codex-update-step = Update Codex to the latest version.
-cli-agent-plugin-codex-notification-step = Set the notification condition to "always" in your Codex config. Open or create ~/.codex/config.toml and add:
+cli-agent-plugin-codex-notification-step = Set the notification condition to “always” in your Codex config. Open or create ~/.codex/config.toml and add:
 cli-agent-plugin-codex-restart-note = Restart Codex to apply the changes.
 cli-agent-plugin-deepseek-install-title = Enable Ashide Notifications for DeepSeek
 cli-agent-plugin-deepseek-install-subtitle = Add the following to your DeepSeek config file (~/.deepseek/config.toml) to enable turn-completion notifications.

@@ -82,7 +82,11 @@ package_helper() {
       grep -v "  ${archive_name}\$" SHA256SUMS > SHA256SUMS.tmp || true
       mv SHA256SUMS.tmp SHA256SUMS
     fi
-    shasum -a 256 "$archive_name" >> SHA256SUMS
+    if command -v shasum >/dev/null 2>&1; then
+      shasum -a 256 "$archive_name" >> SHA256SUMS
+    else
+      sha256sum "$archive_name" >> SHA256SUMS
+    fi
   )
 
   echo "Wrote $ARTIFACTS_DIR/$archive_name"
@@ -104,9 +108,6 @@ build_linux_helper() {
       --profile "$CARGO_PROFILE" --features "$FEATURES"
   fi
 
-  if [[ ! -f "$output_dir" ]]; then
-    output_dir="$HELPER_TARGET_DIR/$rust_target/$CARGO_PROFILE/ashide"
-  fi
   package_helper linux "$arch" "$output_dir"
 }
 
@@ -141,11 +142,7 @@ build_macos_helper() {
   package_helper macos "$arch" "$binary_path"
 }
 
-if [[ ! -f "$ARTIFACTS_DIR/ashide-linux-x86_64.tar.gz" ]]; then
-  build_linux_helper x86_64-unknown-linux-musl x86_64
-else
-  echo "Skipping x86_64 Linux helper build; archive already exists"
-fi
+build_linux_helper x86_64-unknown-linux-musl x86_64
 build_linux_helper aarch64-unknown-linux-musl aarch64
 
 if [[ "$(uname -s)" == "Darwin" ]]; then

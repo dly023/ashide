@@ -17,13 +17,13 @@ pub fn initialize_settings_for_tests_with_mode(
         drive::settings::LocalDriveSettings,
         search::command_search::settings::CommandSearchSettings,
         settings::{
-            app_icon::AppIconSettings, init_and_register_user_preferences,
-            manager::SettingsManager, network::NetworkSettings, network_secrets::ProxyCredentials,
-            AISettings, AccessibilitySettings, AliasExpansionSettings, AppEditorSettings,
-            BlockVisibilitySettings, CodeSettings, DebugSettings, EmacsBindingsSettings,
-            FontSettings, GPUSettings, InputModeSettings, InputSettings, LanguageSettings,
-            NativePreferenceSettings, PaneSettings, SameLinePromptBlockSettings, ScrollSettings,
-            SelectionSettings, SshSettings, ThemeSettings, VimBannerSettings,
+            init_and_register_user_preferences, manager::SettingsManager, network::NetworkSettings,
+            network_secrets::ProxyCredentials, AISettings, AccessibilitySettings,
+            AliasExpansionSettings, AppEditorSettings, BlockVisibilitySettings, CodeSettings,
+            DebugSettings, EmacsBindingsSettings, FontSettings, GPUSettings, InputModeSettings,
+            InputSettings, LanguageSettings, NativePreferenceSettings, PaneSettings,
+            SameLinePromptBlockSettings, ScrollSettings, SelectionSettings, SshSettings,
+            ThemeSettings, VimBannerSettings,
         },
         terminal::{
             general_settings::GeneralSettings, keys_settings::KeysSettings,
@@ -52,7 +52,6 @@ pub fn initialize_settings_for_tests_with_mode(
     BlockListSettings::register(app);
     CommandSearchSettings::register(app);
     DebugSettings::register(app);
-    AppIconSettings::register(app);
     EmacsBindingsSettings::register(app);
 
     #[cfg(feature = "local_fs")]

@@ -19,6 +19,7 @@ use super::{
     ConversationOrTask, HarnessFilter,
 };
 use warp_cli::agent::Harness;
+use warp_core::features::FeatureFlag;
 
 fn create_test_task(
     task_id: &str,
@@ -67,6 +68,7 @@ fn create_test_model() -> AgentConversationsModel {
 
 #[test]
 fn test_conversation_status_update_emits_conversation_updated() {
+    let _feature = FeatureFlag::InteractiveConversationManagementView.override_enabled(true);
     App::test((), |mut app| async move {
         let agent_model = app.add_singleton_model(|_| create_test_model());
         let saw_conversation_updated = Arc::new(AtomicBool::new(false));

@@ -5,7 +5,16 @@
 //! 不依赖 Workspace 的可变状态,不调用 ctx,不执行 IO。
 //! 接入层 (session_navigator.rs) 负责执行 side_effect。
 //!
-//! 契约: docs/SESSION_NAVIGATOR_SPEC.yaml §7
+//! 契约: `docs/SESSION_NAVIGATOR_SPEC.yaml` v6。
+//!
+//! ## 给人和 AI 修改者的边界
+//! - `SessionNavigatorState` 由 canonical EnvironmentKey 独占；authority alias 共享，
+//!   不同 Environment 禁止共用。
+//! - `display_order` 只在 `Refresh.FirstObserved` 和 `Reorder` 中写入。
+//! - Resume/materialize 通过 `row_id_by_identity` 增加 alias，绝不新建位置。
+//! - 组件只能发送 typed `SessionNavigatorAction`，不能直接排序或回写 selection。
+//! - 新增 action/state slice 时，必须先更新 SPEC 的 `write_ownership`、
+//!   `ux_contract_matrix` 及其绑定测试；矩阵链接测试会阻止漏项。
 
 use std::collections::{HashMap, HashSet};
 
@@ -16,24 +25,40 @@ use crate::workspace::util::PaneViewLocator;
 // 状态
 // ─────────────────────────────────────────────────────────
 
-/// Session Navigator 的核心状态 (从 Workspace 中提取的纯数据)。
-/// 这不是 Workspace 的字段,而是每次 reduce 时从 Workspace 快照出来的。
-#[derive(Clone, Debug)]
+/// 单个 Environment 独占的 Session Navigator 状态。
+///
+/// 它由 `EnvironmentTable` 按 canonical navigation key 分区。切换环境只切换
+/// 被投影的 state，authority alias、重连和 workspace root 变化不能制造新分区。
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionNavigatorState {
-    pub active_key: Option<String>,
-    pub restoring_keys: HashSet<String>,
-    pub deleting_keys: HashSet<String>,
+    pub selected_row_id: Option<String>,
+    pub restoring_row_ids: HashSet<String>,
+    /// 正在执行 provider/source 删除事务的 RowId。
+    pub deleting_row_ids: HashSet<String>,
+    /// 已提交删除的 RowId tombstone；阻止 stale provider/history source 复活。
+    pub deleted_row_ids: HashSet<String>,
+    /// 稳定 RowId → 显示位置。生命周期、焦点和环境切换无权写入。
     pub display_order: HashMap<String, u64>,
+    /// 观察身份（stable container/durable/logical）→ 稳定 RowId。
+    /// `tab:X:leaf:Y` 是 action locator，禁止进入该 registry。
+    /// virtual → live 只增加 alias，不创建新排序身份。
+    pub row_id_by_identity: HashMap<String, String>,
+    /// opaque RowId 的单调分配器。RowId 绝不能复用 pane/session identity，
+    /// 否则已删除行的 tombstone 会误伤未来复用同一物理坐标的新 session。
+    pub next_row_id: u64,
     pub next_display_order: u64,
 }
 
 impl SessionNavigatorState {
     pub fn new() -> Self {
         Self {
-            active_key: None,
-            restoring_keys: HashSet::new(),
-            deleting_keys: HashSet::new(),
+            selected_row_id: None,
+            restoring_row_ids: HashSet::new(),
+            deleting_row_ids: HashSet::new(),
+            deleted_row_ids: HashSet::new(),
             display_order: HashMap::new(),
+            row_id_by_identity: HashMap::new(),
+            next_row_id: 0,
             next_display_order: 0,
         }
     }
@@ -88,12 +113,31 @@ pub enum SessionNavigatorAction {
         session_logical_key: String,
         session_id: String,
         environment_authority_key: Option<String>,
+        /// 本次删除事务覆盖的全部 identity alias；reducer 必须一次性登记，
+        /// 禁止接入层在物理副作用之后再补写 lifecycle。
+        session_identity_keys: Vec<String>,
     },
     /// 激活 / 恢复一个 session
     Activate {
         session_logical_key: String,
         session_id: String,
         is_live: bool,
+    },
+    /// 显式修改 Navigator selection；focus projection 禁止使用此 action。
+    SelectionChanged { session_logical_key: Option<String> },
+    /// 恢复开始；一次性登记生命周期，并可选择对应行。
+    RestoreStarted {
+        session_keys: Vec<String>,
+        selected_logical_key: Option<String>,
+    },
+    /// 恢复成功、失败或取消后清理生命周期。
+    RestoreFinished { session_keys: Vec<String> },
+    /// provider/source 删除失败：回滚 in-flight tombstone。
+    DeleteRolledBack { session_keys: Vec<String> },
+    /// provider/source 删除成功：提交稳定 RowId tombstone，并释放 volatile identity alias。
+    DeleteCommitted {
+        session_keys: Vec<String>,
+        volatile_identity_keys: Vec<String>,
     },
     /// Pin / unpin
     Pin {
@@ -105,19 +149,91 @@ pub enum SessionNavigatorAction {
         new_sessions: Vec<WorkspaceSessionSnapshot>,
         pinned_session_ids: HashSet<String>,
     },
-    /// Tab 被激活
-    TabActivated {
-        tab_index: usize,
-    },
-    /// Pane 被聚焦
-    PaneFocused {
-        locator: PaneViewLocator,
-        session_logical_key: Option<String>,
-    },
-    /// 重排列表 (EC-08): 只改 display_order, focus/active_key 跟随 logical_key 不变
-    Reorder {
-        ordered_logical_keys: Vec<String>,
-    },
+    /// Tab 被激活；当前 pane 拓扑已经由 `pane_info` 表达，action 不重复携带无主数据。
+    TabActivated,
+    /// Pane 被聚焦；只携带 active projection 真正需要的会话 identity。
+    PaneFocused { session_logical_key: Option<String> },
+    /// 重排列表 (EC-08): 只改 display_order；focus/selected_row_id 绑定的 RowId 不变。
+    Reorder { ordered_logical_keys: Vec<String> },
+}
+
+/// Action 对持久状态切片的写权限。这个穷尽 `match` 是有意为之：新增 action 时
+/// 编译器会强制修改者（包括 AI agent）先声明它能改什么，再进入 reducer 实现。
+#[derive(Clone, Copy, Debug)]
+struct TransitionPermissions {
+    position: bool,
+    identity: bool,
+    selection: bool,
+    lifecycle: bool,
+}
+
+fn transition_permissions(action: &SessionNavigatorAction) -> TransitionPermissions {
+    match action {
+        SessionNavigatorAction::Delete { .. } | SessionNavigatorAction::Activate { .. } => {
+            TransitionPermissions {
+                position: false,
+                identity: true,
+                selection: true,
+                lifecycle: true,
+            }
+        }
+        SessionNavigatorAction::SelectionChanged { .. } => TransitionPermissions {
+            position: false,
+            identity: true,
+            selection: true,
+            lifecycle: false,
+        },
+        SessionNavigatorAction::RestoreStarted { .. } => TransitionPermissions {
+            position: false,
+            identity: true,
+            selection: true,
+            lifecycle: true,
+        },
+        SessionNavigatorAction::RestoreFinished { .. } => TransitionPermissions {
+            position: false,
+            identity: false,
+            selection: true,
+            lifecycle: true,
+        },
+        SessionNavigatorAction::DeleteRolledBack { .. } => TransitionPermissions {
+            position: false,
+            identity: false,
+            selection: false,
+            lifecycle: true,
+        },
+        SessionNavigatorAction::DeleteCommitted { .. } => TransitionPermissions {
+            position: false,
+            identity: true,
+            selection: false,
+            lifecycle: true,
+        },
+        SessionNavigatorAction::Pin { .. } => TransitionPermissions {
+            position: false,
+            identity: false,
+            selection: false,
+            lifecycle: false,
+        },
+        SessionNavigatorAction::Refresh { .. } => TransitionPermissions {
+            position: true,
+            identity: true,
+            selection: true,
+            lifecycle: true,
+        },
+        SessionNavigatorAction::TabActivated | SessionNavigatorAction::PaneFocused { .. } => {
+            TransitionPermissions {
+                position: false,
+                identity: false,
+                selection: false,
+                lifecycle: false,
+            }
+        }
+        SessionNavigatorAction::Reorder { .. } => TransitionPermissions {
+            position: true,
+            identity: false,
+            selection: false,
+            lifecycle: false,
+        },
+    }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -179,33 +295,7 @@ fn logical_key(session: &WorkspaceSessionSnapshot) -> String {
 }
 
 fn durable_key(session: &WorkspaceSessionSnapshot) -> Option<String> {
-    let environment_key = WorkspaceSessionSnapshot::logical_environment_key(
-        session.environment_authority_key.as_deref(),
-    );
-    if let Some(cli_agent_session_id) = session
-        .cli_agent_session_id
-        .as_deref()
-        .filter(|id| !id.trim().is_empty())
-    {
-        return Some(format!(
-            "{environment_key}::agent:{}:{}",
-            session
-                .cli_agent
-                .as_deref()
-                .or(session.cli_command.as_deref())
-                .unwrap_or_default(),
-            cli_agent_session_id
-        ));
-    }
-    if let Some(conversation_id) = session
-        .active_conversation_id
-        .iter()
-        .chain(session.conversation_ids.iter())
-        .find(|id| !id.trim().is_empty())
-    {
-        return Some(format!("{environment_key}::conversation:{conversation_id}"));
-    }
-    None
+    session.durable_identity_key()
 }
 
 fn locator_from_session_id(id: &str) -> Option<(usize, usize)> {
@@ -238,61 +328,120 @@ fn tab_index_for_session(session: &WorkspaceSessionSnapshot) -> Option<usize> {
 // 排序 (与历史 Workspace sort_session_navigator_sessions_by_display_order 语义一致)
 // ─────────────────────────────────────────────────────────
 
+fn session_identity_keys(session: &WorkspaceSessionSnapshot) -> Vec<String> {
+    session.observed_identity_keys()
+}
+
+fn row_id_for_identity(identity: &str, state: &SessionNavigatorState) -> Option<String> {
+    state.row_id_by_identity.get(identity).cloned()
+}
+
+fn allocate_row_id(state: &mut SessionNavigatorState) -> String {
+    let row_id = format!("row:{}", state.next_row_id);
+    state.next_row_id += 1;
+    row_id
+}
+
+fn existing_row_id_for_identities<'a>(
+    identities: impl IntoIterator<Item = &'a String>,
+    state: &SessionNavigatorState,
+) -> Option<String> {
+    identities
+        .into_iter()
+        .find_map(|identity| state.row_id_by_identity.get(identity).cloned())
+}
+
+fn bind_identities_to_row(
+    identities: impl IntoIterator<Item = String>,
+    row_id: &str,
+    state: &mut SessionNavigatorState,
+) {
+    for identity in identities {
+        state.row_id_by_identity.insert(identity, row_id.to_owned());
+    }
+}
+
+fn migrate_row_state(from_row_id: &str, to_row_id: &str, state: &mut SessionNavigatorState) {
+    if from_row_id == to_row_id {
+        return;
+    }
+
+    for row_id in state.row_id_by_identity.values_mut() {
+        if row_id == from_row_id {
+            *row_id = to_row_id.to_owned();
+        }
+    }
+    if state.selected_row_id.as_deref() == Some(from_row_id) {
+        state.selected_row_id = Some(to_row_id.to_owned());
+    }
+    for row_ids in [
+        &mut state.restoring_row_ids,
+        &mut state.deleting_row_ids,
+        &mut state.deleted_row_ids,
+    ] {
+        if row_ids.remove(from_row_id) {
+            row_ids.insert(to_row_id.to_owned());
+        }
+    }
+
+    if let Some(order) = state.display_order.remove(from_row_id) {
+        state
+            .display_order
+            .entry(to_row_id.to_owned())
+            .or_insert(order);
+    }
+}
+
+fn canonical_existing_row_id_for_session(
+    session: &WorkspaceSessionSnapshot,
+    identities: &[String],
+    state: &SessionNavigatorState,
+) -> Option<String> {
+    durable_key(session)
+        .and_then(|identity| row_id_for_identity(&identity, state))
+        .or_else(|| row_id_for_identity(&logical_key(session), state))
+        .or_else(|| existing_row_id_for_identities(identities, state))
+}
+
+fn row_id_for_session(session: &WorkspaceSessionSnapshot, state: &SessionNavigatorState) -> String {
+    let logical = logical_key(session);
+    state
+        .row_id_by_identity
+        .get(&logical)
+        .cloned()
+        .or_else(|| {
+            durable_key(session)
+                .and_then(|identity| state.row_id_by_identity.get(&identity).cloned())
+        })
+        .unwrap_or(logical)
+}
+
 fn display_order_for_session(
     session: &WorkspaceSessionSnapshot,
     state: &SessionNavigatorState,
 ) -> u64 {
-    use crate::app_state::SessionDisplayOrderStrategy;
-    match session.display_order_strategy() {
-        SessionDisplayOrderStrategy::Physical => {
-            let primary = state
-                .display_order
-                .get(&logical_key(session))
-                .copied();
-            let durable = durable_key(session)
-                .and_then(|key| state.display_order.get(&key).copied());
-            match (primary, durable) {
-                (Some(primary), Some(durable)) => primary.min(durable),
-                (Some(primary), None) => primary,
-                (None, Some(durable)) => durable,
-                (None, None) => u64::MAX,
-            }
-        }
-        SessionDisplayOrderStrategy::Durable => {
-            state
-                .display_order
-                .get(&logical_key(session))
-                .copied()
-                .unwrap_or(u64::MAX)
-        }
-        SessionDisplayOrderStrategy::Bridged => {
-            state
-                .display_order
-                .get(&logical_key(session))
-                .copied()
-                .unwrap_or(u64::MAX)
-        }
-    }
+    state
+        .display_order
+        .get(&row_id_for_session(session, state))
+        .copied()
+        .unwrap_or(0)
 }
 
-fn sort_sessions(
-    sessions: &mut Vec<WorkspaceSessionSnapshot>,
-    state: &SessionNavigatorState,
-) {
+fn sort_sessions(sessions: &mut Vec<WorkspaceSessionSnapshot>, state: &SessionNavigatorState) {
     let original_positions: HashMap<String, usize> = sessions
         .iter()
         .enumerate()
-        .map(|(idx, s)| (logical_key(s), idx))
+        .map(|(idx, session)| (row_id_for_session(session, state), idx))
         .collect();
 
-    // same_window_group_orders: tab_index → min display_order
+    // 同屏组位置：tab_index → 该组最大 display_order（值越大越靠上）。
     let mut same_window_group_orders: HashMap<usize, u64> = HashMap::new();
     for session in sessions.iter() {
         if let Some((tab_index, _)) = locator_from_session_id(&session.id) {
             let order = display_order_for_session(session, state);
             same_window_group_orders
                 .entry(tab_index)
-                .and_modify(|v| *v = (*v).min(order))
+                .and_modify(|value| *value = (*value).max(order))
                 .or_insert(order);
         }
     }
@@ -314,36 +463,39 @@ fn sort_sessions(
         right
             .is_pinned
             .cmp(&left.is_pinned)
-            // same_window_group_order
-            .then_with(|| left_group_order.cmp(&right_group_order))
-            // same_window_split leaf index
-            .then_with(|| match (left_tab, right_tab) {
-                (Some((lt, ll)), Some((rt, rl))) if lt == rt => ll.cmp(&rl),
-                _ => std::cmp::Ordering::Equal,
-            })
-            // display_order
-            .then_with(|| left_order.cmp(&right_order))
-            // updated_at DESC (None 排最后)
-            .then_with(|| right.updated_at_unix_ms.cmp(&left.updated_at_unix_ms))
-            // original_position
+            .then_with(|| right_group_order.cmp(&left_group_order))
             .then_with(|| {
-                let lp = original_positions
-                    .get(&logical_key(left))
-                    .copied()
-                    .unwrap_or(usize::MAX);
-                let rp = original_positions
-                    .get(&logical_key(right))
-                    .copied()
-                    .unwrap_or(usize::MAX);
-                lp.cmp(&rp)
+                if let (Some((left_tab, left_leaf)), Some((right_tab, right_leaf))) =
+                    (left_tab, right_tab)
+                {
+                    if left_tab == right_tab {
+                        left_leaf.cmp(&right_leaf)
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                } else {
+                    std::cmp::Ordering::Equal
+                }
             })
-            // logical_key ASC (v3: 不用 id)
-            .then_with(|| logical_key(left).cmp(&logical_key(right)))
+            .then_with(|| right_order.cmp(&left_order))
+            .then_with(|| right.updated_at_unix_ms.cmp(&left.updated_at_unix_ms))
+            .then_with(|| {
+                let left_position = original_positions
+                    .get(&row_id_for_session(left, state))
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                let right_position = original_positions
+                    .get(&row_id_for_session(right, state))
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                left_position.cmp(&right_position)
+            })
+            .then_with(|| row_id_for_session(left, state).cmp(&row_id_for_session(right, state)))
     });
 }
 
 // ─────────────────────────────────────────────────────────
-// Reconcile (分配 display_order)
+// Reconcile (唯一允许为新行分配 display_order 的入口)
 // ─────────────────────────────────────────────────────────
 
 fn reconcile_display_order(
@@ -351,7 +503,6 @@ fn reconcile_display_order(
     state: &mut SessionNavigatorState,
 ) {
     let mut sorted = sessions.to_vec();
-    // v3: tie-breaker 用 logical_key 不用 id
     sorted.sort_by(|left, right| {
         right
             .is_pinned
@@ -360,23 +511,36 @@ fn reconcile_display_order(
             .then_with(|| logical_key(left).cmp(&logical_key(right)))
     });
 
+    let mut pending_row_ids = Vec::new();
     for session in &sorted {
-        let order_key = logical_key(session);
-        if state.display_order.contains_key(&order_key) {
-            continue;
-        }
+        let identities = session_identity_keys(session);
+        let row_id = canonical_existing_row_id_for_session(session, &identities, state)
+            .unwrap_or_else(|| allocate_row_id(state));
 
-        // durable bridging
-        if let Some(durable) = durable_key(session) {
-            if let Some(&order) = state.display_order.get(&durable) {
-                state.display_order.insert(order_key.clone(), order);
-                continue;
-            }
+        let competing_row_ids = identities
+            .iter()
+            .filter_map(|identity| row_id_for_identity(identity, state))
+            .filter(|existing_row_id| existing_row_id != &row_id)
+            .collect::<HashSet<_>>();
+        for competing_row_id in competing_row_ids {
+            // 同一 observed row 的 durable/physical alias 若曾因异步时序短暂分配到
+            // 不同 RowId，Refresh 必须原子收敛全部 RowId-owned 状态。否则 identity
+            // registry 虽已统一，selection/lifecycle/order 仍会悬挂在孤儿 RowId 上。
+            migrate_row_state(&competing_row_id, &row_id, state);
         }
+        bind_identities_to_row(identities, &row_id, state);
 
+        if !state.display_order.contains_key(&row_id) && !pending_row_ids.contains(&row_id) {
+            pending_row_ids.push(row_id);
+        }
+    }
+
+    // 真正首次发现的 RowId 才拿新位置；Resume/Refresh/Focus/Environment switch
+    // 只增加 identity alias，不创建 position。
+    for row_id in pending_row_ids.into_iter().rev() {
         let order = state.next_display_order;
         state.next_display_order += 1;
-        state.display_order.insert(order_key, order);
+        state.display_order.insert(row_id, order);
     }
 }
 
@@ -385,199 +549,36 @@ fn reconcile_display_order(
 // ─────────────────────────────────────────────────────────
 
 fn recompute_active(
-    sessions: &mut Vec<WorkspaceSessionSnapshot>,
+    sessions: &mut [WorkspaceSessionSnapshot],
     state: &SessionNavigatorState,
-    _pane_info: &PaneGroupInfo,
+    active_row_override: Option<&str>,
 ) {
-    // 1. 清除所有 is_active
     for session in sessions.iter_mut() {
         session.is_active = false;
     }
 
-    // 2. 规则 1: active_key 指向 live container → is_active = true (最高优先级)
-    //    纯函数中无法访问 pane group 的 focused_pane_id, 所以用 active_key 是否指向
-    //    live container 来判断。接入层在 PaneFocused action 中设置 active_key。
-    let live_active_key: Option<String> = if let Some(active_key) = &state.active_key {
+    // active 是渲染投影：显式 focus RowId 优先于 Environment selection，随后依次是
+    // selected live、restoring、selected virtual。投影输入不回写任何持久状态切片。
+    let selected_row_id = active_row_override.or(state.selected_row_id.as_deref());
+    let selected_live_index = selected_row_id.and_then(|selected_row_id| {
+        sessions.iter().position(|session| {
+            is_live(session) && row_id_for_session(session, state) == selected_row_id
+        })
+    });
+    let restoring_index = sessions.iter().position(|session| {
+        state
+            .restoring_row_ids
+            .contains(&row_id_for_session(session, state))
+    });
+    let selected_index = selected_row_id.and_then(|selected_row_id| {
         sessions
             .iter()
-            .find(|s| is_live(s) && logical_key(s) == *active_key)
-            .map(logical_key)
-    } else {
-        None
-    };
-    if let Some(key) = &live_active_key {
-        for session in sessions.iter_mut() {
-            if is_live(session) && logical_key(session) == *key {
-                session.is_active = true;
-            }
-        }
-    }
-
-    // 3. 规则 2: restoring session → is_active = true
-    //    (不覆盖规则 1 的 live active)
-    for session in sessions.iter_mut() {
-        if session.is_active {
-            continue; // 规则 1 已设
-        }
-        let key = logical_key(session);
-        if state.restoring_keys.contains(&key)
-            || state.restoring_keys.contains(&session.id)
-        {
-            session.is_active = true;
-        }
-    }
-
-    // 4. 规则 3: active_key → is_active = true (如果没被规则 1/2 覆盖)
-    //    仅当 active_key 指向 virtual row (非 live) 时走到这里
-    if let Some(active_key) = &state.active_key {
-        for session in sessions.iter_mut() {
-            if session.is_active {
-                continue; // 规则 1/2 已设
-            }
-            if logical_key(session) == *active_key {
-                session.is_active = true;
-                break;
-            }
-        }
-    }
-
-    // 5. 去重: 只保留一个 active (最高优先级)
-    normalize_active(sessions, state);
-}
-
-fn normalize_active(sessions: &mut [WorkspaceSessionSnapshot], state: &SessionNavigatorState) {
-    let active_count = sessions.iter().filter(|s| s.is_active).count();
-    if active_count <= 1 {
-        return;
-    }
-
-    // 优先级: live active (规则 1) > restoring (规则 2) > active_key (规则 3) > 第一个
-    let preferred_key = {
-        // 先找 live active (active_key 指向 live container)
-        if let Some(active_key) = &state.active_key {
-            let live_match = sessions.iter().find(|s| {
-                s.is_active && is_live(s) && logical_key(s) == *active_key
-            });
-            if live_match.is_some() {
-                Some(logical_key(live_match.unwrap()))
-            } else {
-                // 再找 restoring 中的
-                let restoring = sessions.iter().find(|s| {
-                    s.is_active && {
-                        let key = logical_key(s);
-                        state.restoring_keys.contains(&key)
-                            || state.restoring_keys.contains(&s.id)
-                    }
-                });
-                if restoring.is_some() {
-                    Some(logical_key(restoring.unwrap()))
-                } else if sessions.iter().any(|s| s.is_active && logical_key(s) == *active_key) {
-                    Some(active_key.clone())
-                } else {
-                    None
-                }
-            }
-        } else {
-            // 没有 active_key, 找 restoring
-            let restoring = sessions.iter().find(|s| {
-                s.is_active && {
-                    let key = logical_key(s);
-                    state.restoring_keys.contains(&key) || state.restoring_keys.contains(&s.id)
-                }
-            });
-            restoring.map(logical_key)
-        }
-    };
-
-    let chosen = preferred_key.or_else(|| {
-        sessions
-            .iter()
-            .find(|s| s.is_active)
-            .map(|s| logical_key(s))
+            .position(|session| row_id_for_session(session, state) == selected_row_id)
     });
 
-    if let Some(chosen_key) = chosen {
-        for session in sessions.iter_mut() {
-            if session.is_active && logical_key(session) != chosen_key {
-                session.is_active = false;
-            }
-        }
+    if let Some(index) = selected_live_index.or(restoring_index).or(selected_index) {
+        sessions[index].is_active = true;
     }
-}
-
-// ─────────────────────────────────────────────────────────
-// Materialization 追踪 (§6.4)
-// ─────────────────────────────────────────────────────────
-
-/// 在 Refresh 时检查 virtual → live consume, 主动迁移 active_key (§6.4)。
-/// 含 durable-key 迁移与 binding (cli_agent_session_id / conversation) 迁移；
-/// 找不到匹配时清除 active_key，不猜测 live-active。
-fn track_materialization(
-    sessions: &[WorkspaceSessionSnapshot],
-    state: &mut SessionNavigatorState,
-) {
-    let Some(active_key) = state.active_key.clone() else {
-        return;
-    };
-
-    let stored = sessions.iter().find(|s| logical_key(s) == active_key);
-
-    if let Some(stored) = stored {
-        if is_live(stored) {
-            return;
-        }
-        // Virtual still present: migrate to live twin when env + binding match.
-        if let Some(live) = sessions.iter().find(|candidate| {
-            is_live(candidate)
-                && materialization_env_matches(stored, candidate)
-                && materialization_binding_matches(stored, candidate)
-        }) {
-            state.active_key = Some(logical_key(live));
-        }
-        return;
-    }
-
-    // Stored key missing: durable key equality only (no live-active guess).
-    for session in sessions.iter().filter(|s| is_live(s)) {
-        if durable_key(session).as_deref() == Some(active_key.as_str()) {
-            state.active_key = Some(logical_key(session));
-            return;
-        }
-    }
-
-    state.active_key = None;
-}
-
-fn materialization_env_matches(
-    stored: &WorkspaceSessionSnapshot,
-    live: &WorkspaceSessionSnapshot,
-) -> bool {
-    WorkspaceSessionSnapshot::logical_environment_key(stored.environment_authority_key.as_deref())
-        == WorkspaceSessionSnapshot::logical_environment_key(
-            live.environment_authority_key.as_deref(),
-        )
-}
-
-fn materialization_binding_matches(
-    stored: &WorkspaceSessionSnapshot,
-    live: &WorkspaceSessionSnapshot,
-) -> bool {
-    stored
-        .cli_agent_session_id
-        .as_deref()
-        .filter(|id| !id.trim().is_empty())
-        .zip(live.cli_agent_session_id.as_deref())
-        .is_some_and(|(a, b)| a == b)
-        || stored
-            .active_conversation_id
-            .iter()
-            .chain(stored.conversation_ids.iter())
-            .any(|conv| {
-                live.active_conversation_id
-                    .iter()
-                    .chain(live.conversation_ids.iter())
-                    .any(|live_conv| conv == live_conv)
-            })
 }
 
 // ─────────────────────────────────────────────────────────
@@ -619,21 +620,18 @@ fn decide_delete_effects(
     if let Some(info) = tab_info {
         if info.visible_pane_count > 1 {
             // 多 pane tab → focus 同 group 兄弟, ClosePane
-            let focus = info
-                .prev_pane_locator
-                .clone()
-                .or_else(|| {
-                    info.all_pane_locators.iter().find_map(|locator| {
-                        if deleted_locator
-                            .as_ref()
-                            .is_some_and(|deleted| deleted.pane_id == locator.pane_id)
-                        {
-                            None
-                        } else {
-                            Some(locator.clone())
-                        }
-                    })
-                });
+            let focus = info.prev_pane_locator.clone().or_else(|| {
+                info.all_pane_locators.iter().find_map(|locator| {
+                    if deleted_locator
+                        .as_ref()
+                        .is_some_and(|deleted| deleted.pane_id == locator.pane_id)
+                    {
+                        None
+                    } else {
+                        Some(locator.clone())
+                    }
+                })
+            });
             return SideEffect::DeleteEffects(DeleteEffects {
                 focus,
                 close: deleted_locator
@@ -685,37 +683,37 @@ pub fn reduce(
             session_logical_key,
             session_id: _,
             environment_authority_key: _,
+            session_identity_keys: delete_identity_keys,
         } => {
-            // 找到被删 session
             let deleted = sessions
                 .iter()
-                .find(|s| logical_key(s) == session_logical_key)
+                .find(|session| logical_key(session) == session_logical_key)
                 .cloned();
-
-            // 从 sessions 移除
-            sessions.retain(|s| logical_key(s) != session_logical_key);
-
-            // 加入 deleting_keys
-            state.deleting_keys.insert(session_logical_key.clone());
-
-            // 清除 active_key 如果指向被删 session
-            if state.active_key.as_deref() == Some(&session_logical_key) {
-                state.active_key = None;
+            let mut identities = delete_identity_keys;
+            identities.push(session_logical_key.clone());
+            if let Some(deleted) = &deleted {
+                identities.extend(session_identity_keys(deleted));
             }
+            identities.sort();
+            identities.dedup();
+            let row_id = existing_row_id_for_identities(identities.iter(), &state)
+                .unwrap_or_else(|| allocate_row_id(&mut state));
+            bind_identities_to_row(identities, &row_id, &mut state);
 
-            // 清除 restoring_keys 中的被删 session
-            state.restoring_keys.remove(&session_logical_key);
+            sessions.retain(|session| row_id_for_session(session, &state) != row_id);
+            state.deleting_row_ids.insert(row_id.clone());
+            state.deleted_row_ids.remove(&row_id);
+            if state.selected_row_id.as_deref() == Some(row_id.as_str()) {
+                state.selected_row_id = None;
+            }
+            state.restoring_row_ids.remove(&row_id);
 
-            // 决定 focus + close side_effect (一次 Delete 一个复合副作用)
             let side_effect = if let Some(ref deleted_session) = deleted {
                 decide_delete_effects(deleted_session, &sessions, pane_info)
             } else {
                 SideEffect::None
             };
-
-            // 重新计算 active
-            recompute_active(&mut sessions, &state, pane_info);
-
+            recompute_active(&mut sessions, &state, None);
             ReduceResult {
                 sessions,
                 state,
@@ -728,19 +726,28 @@ pub fn reduce(
             session_id: _,
             is_live,
         } => {
-            if is_live {
-                // 已 materialize → FocusPane
-                let session = sessions
-                    .iter()
-                    .find(|s| logical_key(s) == session_logical_key)
-                    .cloned();
+            let session = sessions
+                .iter()
+                .find(|session| logical_key(session) == session_logical_key)
+                .cloned();
+            let mut identities = session
+                .as_ref()
+                .map(session_identity_keys)
+                .unwrap_or_default();
+            identities.push(session_logical_key.clone());
+            identities.sort();
+            identities.dedup();
+            let row_id = existing_row_id_for_identities(identities.iter(), &state)
+                .unwrap_or_else(|| allocate_row_id(&mut state));
+            bind_identities_to_row(identities, &row_id, &mut state);
 
+            if is_live {
                 let side_effect = if let Some(ref session) = session {
                     if let Some((tab, leaf)) = locator_from_session_id(&session.id) {
                         if let Some(info) = pane_info.tabs.get(&tab) {
                             if leaf < info.all_pane_locators.len() {
-                                state.active_key = Some(session_logical_key.clone());
-                                state.restoring_keys.remove(&session_logical_key);
+                                state.selected_row_id = Some(row_id.clone());
+                                state.restoring_row_ids.remove(&row_id);
                                 SideEffect::FocusPane(info.all_pane_locators[leaf].clone())
                             } else {
                                 SideEffect::None
@@ -754,26 +761,17 @@ pub fn reduce(
                 } else {
                     SideEffect::None
                 };
-
-                recompute_active(&mut sessions, &state, pane_info);
+                recompute_active(&mut sessions, &state, None);
                 ReduceResult {
                     sessions,
                     state,
                     side_effect,
                 }
             } else {
-                // virtual row → spawn
-                state.restoring_keys.insert(session_logical_key.clone());
-                state.active_key = Some(session_logical_key.clone());
-
-                let spawn_session_id = sessions
-                    .iter()
-                    .find(|s| logical_key(s) == session_logical_key)
-                    .map(|s| s.id.clone())
-                    .unwrap_or_default();
-
-                recompute_active(&mut sessions, &state, pane_info);
-
+                state.restoring_row_ids.insert(row_id.clone());
+                state.selected_row_id = Some(row_id);
+                let spawn_session_id = session.map(|session| session.id).unwrap_or_default();
+                recompute_active(&mut sessions, &state, None);
                 ReduceResult {
                     sessions,
                     state,
@@ -782,6 +780,130 @@ pub fn reduce(
                         logical_key: session_logical_key,
                     },
                 }
+            }
+        }
+
+        SessionNavigatorAction::SelectionChanged {
+            session_logical_key,
+        } => {
+            state.selected_row_id = session_logical_key.map(|identity| {
+                let mut identities = sessions
+                    .iter()
+                    .find(|session| session_identity_keys(session).contains(&identity))
+                    .map(session_identity_keys)
+                    .unwrap_or_default();
+                identities.push(identity);
+                identities.sort();
+                identities.dedup();
+                let row_id = existing_row_id_for_identities(identities.iter(), &state)
+                    .unwrap_or_else(|| allocate_row_id(&mut state));
+                bind_identities_to_row(identities, &row_id, &mut state);
+                row_id
+            });
+            recompute_active(&mut sessions, &state, None);
+            ReduceResult {
+                sessions,
+                state,
+                side_effect: SideEffect::None,
+            }
+        }
+
+        SessionNavigatorAction::RestoreStarted {
+            mut session_keys,
+            selected_logical_key,
+        } => {
+            if let Some(selected_logical_key) = &selected_logical_key {
+                session_keys.push(selected_logical_key.clone());
+            }
+            session_keys.sort();
+            session_keys.dedup();
+            let fallback_identity = selected_logical_key
+                .as_ref()
+                .or_else(|| session_keys.first())
+                .cloned();
+            if fallback_identity.is_some() {
+                let row_id = existing_row_id_for_identities(session_keys.iter(), &state)
+                    .unwrap_or_else(|| allocate_row_id(&mut state));
+                bind_identities_to_row(session_keys, &row_id, &mut state);
+                state.restoring_row_ids.insert(row_id.clone());
+                if selected_logical_key.is_some() {
+                    state.selected_row_id = Some(row_id);
+                }
+            }
+            recompute_active(&mut sessions, &state, None);
+            ReduceResult {
+                sessions,
+                state,
+                side_effect: SideEffect::None,
+            }
+        }
+
+        SessionNavigatorAction::RestoreFinished { session_keys } => {
+            let row_ids = session_keys
+                .iter()
+                .filter_map(|identity| state.row_id_by_identity.get(identity).cloned())
+                .collect::<HashSet<_>>();
+            state
+                .restoring_row_ids
+                .retain(|row_id| !row_ids.contains(row_id));
+            if state
+                .selected_row_id
+                .as_ref()
+                .is_some_and(|selected_row_id| {
+                    row_ids.contains(selected_row_id)
+                        && !sessions
+                            .iter()
+                            .any(|session| row_id_for_session(session, &state) == *selected_row_id)
+                })
+            {
+                // Restore 的成功、失败和取消共用这个生命周期收口。仅当 RowId 已无
+                // 可渲染实体时清 selection；materialize 成 live row 时保持空间记忆。
+                state.selected_row_id = None;
+            }
+            recompute_active(&mut sessions, &state, None);
+            ReduceResult {
+                sessions,
+                state,
+                side_effect: SideEffect::None,
+            }
+        }
+
+        SessionNavigatorAction::DeleteRolledBack { session_keys } => {
+            let row_ids = session_keys
+                .iter()
+                .filter_map(|identity| state.row_id_by_identity.get(identity).cloned())
+                .collect::<HashSet<_>>();
+            state
+                .deleting_row_ids
+                .retain(|row_id| !row_ids.contains(row_id));
+            recompute_active(&mut sessions, &state, None);
+            ReduceResult {
+                sessions,
+                state,
+                side_effect: SideEffect::None,
+            }
+        }
+
+        SessionNavigatorAction::DeleteCommitted {
+            session_keys,
+            volatile_identity_keys,
+        } => {
+            let row_ids = session_keys
+                .iter()
+                .filter_map(|identity| state.row_id_by_identity.get(identity).cloned())
+                .collect::<HashSet<_>>();
+            for row_id in &row_ids {
+                state.deleting_row_ids.remove(row_id);
+                state.deleted_row_ids.insert(row_id.clone());
+            }
+            for identity in volatile_identity_keys {
+                state.row_id_by_identity.remove(&identity);
+            }
+            recompute_active(&mut sessions, &state, None);
+            ReduceResult {
+                sessions,
+                state,
+                side_effect: SideEffect::None,
             }
         }
 
@@ -803,55 +925,36 @@ pub fn reduce(
             mut new_sessions,
             pinned_session_ids,
         } => {
-            // merge (简化: 假设接入层已 merge)
-            // 应用 pinned 状态 (与 merge_for_session_navigator 的 pin 补齐一致)
             for session in &mut new_sessions {
                 if !is_live(session) {
                     let keys = session.stable_pin_keys();
-                    session.is_pinned = keys
-                        .iter()
-                        .any(|key| pinned_session_ids.contains(key));
+                    session.is_pinned = keys.iter().any(|key| pinned_session_ids.contains(key));
                 } else {
                     session.is_pinned = false;
                 }
             }
             sessions = new_sessions;
 
-            // filter deleting
-            sessions.retain(|s| {
-                let key = logical_key(s);
-                !state.deleting_keys.contains(&key)
+            // 先 reconcile identity alias，再按 RowId tombstone 过滤。这样 stale
+            // provider source 即使换了 physical identity，也无法复活已删除行。
+            reconcile_display_order(&sessions, &mut state);
+            sessions.retain(|session| {
+                let row_id = row_id_for_session(session, &state);
+                !state.deleting_row_ids.contains(&row_id)
+                    && !state.deleted_row_ids.contains(&row_id)
             });
 
-            // reconcile
-            reconcile_display_order(&sessions, &mut state);
-
-            // materialization 追踪
-            track_materialization(&sessions, &mut state);
-
-            // 清除已 materialize 的 restoring_keys
-            let materialized_keys: Vec<String> = sessions
+            let materialized_row_ids = sessions
                 .iter()
-                .filter(|s| is_live(s))
-                .map(|s| {
-                    let mut keys = vec![s.id.clone(), logical_key(s)];
-                    if let Some(d) = durable_key(s) {
-                        keys.push(d);
-                    }
-                    keys
-                })
-                .flatten()
-                .collect();
-            for key in materialized_keys {
-                state.restoring_keys.remove(&key);
-            }
+                .filter(|session| is_live(session))
+                .map(|session| row_id_for_session(session, &state))
+                .collect::<HashSet<_>>();
+            state
+                .restoring_row_ids
+                .retain(|row_id| !materialized_row_ids.contains(row_id));
 
-            // sort
             sort_sessions(&mut sessions, &state);
-
-            // recompute active
-            recompute_active(&mut sessions, &state, pane_info);
-
+            recompute_active(&mut sessions, &state, None);
             ReduceResult {
                 sessions,
                 state,
@@ -859,12 +962,8 @@ pub fn reduce(
             }
         }
 
-        SessionNavigatorAction::TabActivated { tab_index } => {
-            // 清除不属于当前 tab 的 active_key (如果 active_key 指向其他 env)
-            // 接入层会在 tab 切换时构建正确的 pane_info
-            let _ = tab_index;
-
-            recompute_active(&mut sessions, &state, pane_info);
+        SessionNavigatorAction::TabActivated => {
+            recompute_active(&mut sessions, &state, None);
 
             ReduceResult {
                 sessions,
@@ -874,15 +973,14 @@ pub fn reduce(
         }
 
         SessionNavigatorAction::PaneFocused {
-            locator: _,
             session_logical_key,
         } => {
-            // 规则 1: live container focused pane → is_active = true
-            if let Some(key) = session_logical_key {
-                state.active_key = Some(key);
-            }
-
-            recompute_active(&mut sessions, &state, pane_info);
+            // Focus 只作为本帧 active projection 的显式输入；它不借用、不修改
+            // Environment 保存的 selection，因此状态所有权在类型边界上就是单向的。
+            let focused_row_id = session_logical_key
+                .as_deref()
+                .and_then(|identity| row_id_for_identity(identity, &state));
+            recompute_active(&mut sessions, &state, focused_row_id.as_deref());
 
             ReduceResult {
                 sessions,
@@ -894,23 +992,24 @@ pub fn reduce(
         SessionNavigatorAction::Reorder {
             ordered_logical_keys,
         } => {
-            // EC-08: reassign display_order by logical_key; keep active_key / restoring.
-            let active_before = state.active_key.clone();
+            // EC-08：只按 logical key 重写 display_order，selection/restoring 保持不变。
+            // ordered_logical_keys[0] 是视觉首行，因此获得最大的 display_order。
+            let active_before = state.selected_row_id.clone();
+            let n = ordered_logical_keys.len();
             for (index, key) in ordered_logical_keys.iter().enumerate() {
-                state.display_order.insert(key.clone(), index as u64);
+                let order = (n - 1 - index) as u64;
+                if let Some(row_id) = state.row_id_by_identity.get(key).cloned() {
+                    state.display_order.insert(row_id, order);
+                }
             }
-            if let Some(max_index) = ordered_logical_keys
-                .len()
-                .checked_sub(1)
-                .map(|i| i as u64)
-            {
-                state.next_display_order = state.next_display_order.max(max_index + 1);
+            if n > 0 {
+                state.next_display_order = state.next_display_order.max(n as u64);
             }
             sort_sessions(&mut sessions, &state);
-            recompute_active(&mut sessions, &state, pane_info);
+            recompute_active(&mut sessions, &state, None);
             debug_assert_eq!(
-                state.active_key, active_before,
-                "Reorder must not change active_key"
+                state.selected_row_id, active_before,
+                "Reorder must not change selected_row_id"
             );
             ReduceResult {
                 sessions,
@@ -929,46 +1028,47 @@ pub fn validate_state(
     sessions: &[WorkspaceSessionSnapshot],
     state: &SessionNavigatorState,
 ) -> Result<(), String> {
-    // 1. 至少有一个 active 或列表为空
-    let active_count = sessions.iter().filter(|s| s.is_active).count();
+    let persisted_row_ids = state
+        .row_id_by_identity
+        .values()
+        .chain(state.display_order.keys())
+        .chain(state.restoring_row_ids.iter())
+        .chain(state.deleting_row_ids.iter())
+        .chain(state.deleted_row_ids.iter())
+        .chain(state.selected_row_id.iter());
+    for row_id in persisted_row_ids {
+        if !row_id.starts_with("row:") {
+            return Err(format!(
+                "validate_state: persisted RowId must be opaque row:N, got {row_id}"
+            ));
+        }
+    }
+
+    let active_count = sessions.iter().filter(|session| session.is_active).count();
     if active_count > 1 {
         return Err(format!(
-            "validate_state: {} active sessions, expected ≤ 1",
-            active_count
+            "validate_state: {active_count} active sessions, expected ≤ 1"
         ));
     }
 
-    // 2. deleting session 不在 sessions 中
     for session in sessions {
-        let key = logical_key(session);
-        if state.deleting_keys.contains(&key) {
+        let row_id = row_id_for_session(session, state);
+        if state.deleting_row_ids.contains(&row_id) || state.deleted_row_ids.contains(&row_id) {
             return Err(format!(
-                "validate_state: deleted session {key} still in sessions"
+                "validate_state: tombstoned RowId {row_id} still in sessions"
             ));
         }
     }
 
-    // 3. active_key 指向的 session 存在 (除非正在 restoring)
-    if let Some(active_key) = &state.active_key {
-        let exists = sessions.iter().any(|s| logical_key(s) == *active_key);
-        let is_restoring = state.restoring_keys.contains(active_key);
-        if !exists && !is_restoring {
-            // 允许: active_key 可能指向一个正在 spawn 的 virtual row
-            // 但如果不在 restoring_keys 中, 那是 stale
+    if let Some(selected_row_id) = &state.selected_row_id {
+        let exists = sessions
+            .iter()
+            .any(|session| row_id_for_session(session, state) == *selected_row_id);
+        if !exists && !state.restoring_row_ids.contains(selected_row_id) {
             return Err(format!(
-                "validate_state: active_key {active_key} not in sessions and not restoring"
+                "validate_state: selected RowId {selected_row_id} not in sessions and not restoring"
             ));
         }
-    }
-
-    // 4. restoring session 的 key 存在于 sessions 中 (除非已 materialize)
-    for key in &state.restoring_keys {
-        let _exists = sessions.iter().any(|s| {
-            logical_key(s) == *key || s.id == *key
-        });
-        // restoring 中的 session 可能还在 sessions 中 (virtual row)
-        // 如果它已经 materialize, 接入层应在 Refresh 后清除 restoring_keys
-        // 这里只警告不报错 (因为 reducer 的 Refresh 已经清了)
     }
 
     Ok(())
@@ -981,11 +1081,7 @@ pub fn validate_transition(
     pane_info: &PaneGroupInfo,
 ) -> Result<(), String> {
     // 1. active 不超过 1 个
-    let active_count = after
-        .sessions
-        .iter()
-        .filter(|s| s.is_active)
-        .count();
+    let active_count = after.sessions.iter().filter(|s| s.is_active).count();
     if active_count > 1 {
         return Err(format!(
             "validate_transition: {active_count} active sessions after reduce, expected ≤ 1"
@@ -1009,9 +1105,12 @@ pub fn validate_transition(
                 "validate_transition: deleted session {session_logical_key} still in sessions"
             ));
         }
-        if !after.state.deleting_keys.contains(session_logical_key) {
+        let row_id = row_id_for_identity(session_logical_key, &after.state).ok_or_else(|| {
+            format!("validate_transition: deleted identity {session_logical_key} missing RowId")
+        })?;
+        if !after.state.deleting_row_ids.contains(&row_id) {
             return Err(format!(
-                "validate_transition: deleted session {session_logical_key} missing from deleting_keys"
+                "validate_transition: deleted RowId {row_id} missing from deleting_row_ids"
             ));
         }
 
@@ -1050,10 +1149,10 @@ pub fn validate_transition(
         ordered_logical_keys,
     } = action
     {
-        if before.state.active_key != after.state.active_key {
+        if before.state.selected_row_id != after.state.selected_row_id {
             return Err(format!(
-                "validate_transition: Reorder changed active_key from {:?} to {:?}",
-                before.state.active_key, after.state.active_key
+                "validate_transition: Reorder changed selected_row_id from {:?} to {:?}",
+                before.state.selected_row_id, after.state.selected_row_id
             ));
         }
         if !matches!(after.side_effect, SideEffect::None) {
@@ -1065,6 +1164,75 @@ pub fn validate_transition(
         // Check the requested key sequence (sort may re-glue adjacency via group min order).
         validate_reorder_keys_preserve_split_groups(&before.sessions, ordered_logical_keys)?;
         validate_same_window_split_adjacency(&before.sessions, &after.sessions)?;
+    }
+
+    let permissions = transition_permissions(action);
+    if !permissions.position
+        && (before.state.display_order != after.state.display_order
+            || before.state.next_display_order != after.state.next_display_order)
+    {
+        return Err(format!(
+            "validate_transition: {action:?} 越权修改了 position state"
+        ));
+    }
+
+    if !permissions.identity
+        && (before.state.row_id_by_identity != after.state.row_id_by_identity
+            || before.state.next_row_id != after.state.next_row_id)
+    {
+        return Err(format!(
+            "validate_transition: {action:?} 越权修改了 identity registry"
+        ));
+    }
+
+    if !permissions.selection && before.state.selected_row_id != after.state.selected_row_id {
+        return Err(format!(
+            "validate_transition: {action:?} 越权修改了 selection"
+        ));
+    }
+
+    if matches!(action, SessionNavigatorAction::Refresh { .. })
+        && before.state.selected_row_id != after.state.selected_row_id
+    {
+        let Some(before_selected) = before.state.selected_row_id.as_deref() else {
+            return Err("validate_transition: Refresh 不得凭空创建 selection".to_string());
+        };
+        let Some(after_selected) = after.state.selected_row_id.as_deref() else {
+            return Err("validate_transition: Refresh 不得清除 selection".to_string());
+        };
+        let selected_aliases = before
+            .state
+            .row_id_by_identity
+            .iter()
+            .filter_map(|(identity, row_id)| {
+                (row_id == before_selected).then_some(identity.as_str())
+            })
+            .collect::<Vec<_>>();
+        if selected_aliases.is_empty()
+            || selected_aliases.iter().any(|identity| {
+                after
+                    .state
+                    .row_id_by_identity
+                    .get(*identity)
+                    .map(String::as_str)
+                    != Some(after_selected)
+            })
+        {
+            return Err(format!(
+                "validate_transition: Refresh 只能把 selected RowId 收敛到其 canonical alias，got {:?} -> {:?}",
+                before.state.selected_row_id, after.state.selected_row_id
+            ));
+        }
+    }
+
+    if !permissions.lifecycle
+        && (before.state.restoring_row_ids != after.state.restoring_row_ids
+            || before.state.deleting_row_ids != after.state.deleting_row_ids
+            || before.state.deleted_row_ids != after.state.deleted_row_ids)
+    {
+        return Err(format!(
+            "validate_transition: {action:?} 越权修改了 lifecycle state"
+        ));
     }
 
     // sessions 数量在非 Refresh 时不应增加
@@ -1142,9 +1310,7 @@ fn validate_split_groups_in_key_sequence(
     Ok(())
 }
 
-fn live_leaves_by_tab(
-    sessions: &[WorkspaceSessionSnapshot],
-) -> HashMap<usize, Vec<String>> {
+fn live_leaves_by_tab(sessions: &[WorkspaceSessionSnapshot]) -> HashMap<usize, Vec<String>> {
     let mut by_tab: HashMap<usize, Vec<(usize, String)>> = HashMap::new();
     for session in sessions {
         if !is_live(session) {
@@ -1182,9 +1348,7 @@ pub enum ReorderUnit {
         logical_keys: Vec<String>,
     },
     /// Virtual row or sole live pane.
-    Single {
-        logical_key: String,
-    },
+    Single { logical_key: String },
 }
 
 impl ReorderUnit {
@@ -1235,8 +1399,7 @@ pub fn build_reorder_units(sessions: &[WorkspaceSessionSnapshot]) -> Vec<Reorder
                             .iter()
                             .filter(|s| {
                                 is_live(s)
-                                    && locator_from_session_id(&s.id)
-                                        .is_some_and(|(t, _)| t == tab)
+                                    && locator_from_session_id(&s.id).is_some_and(|(t, _)| t == tab)
                             })
                             .filter_map(|s| {
                                 locator_from_session_id(&s.id)
@@ -1253,9 +1416,7 @@ pub fn build_reorder_units(sessions: &[WorkspaceSessionSnapshot]) -> Vec<Reorder
                 }
             }
         }
-        units.push(ReorderUnit::Single {
-            logical_key: key,
-        });
+        units.push(ReorderUnit::Single { logical_key: key });
     }
     units
 }

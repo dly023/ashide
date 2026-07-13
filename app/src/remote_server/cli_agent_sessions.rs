@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::DateTime;
 use serde_json::Value;
 
 use crate::cli_agent_jsonl::{nested_string, parse_jsonl_values, sha256_hex};
@@ -112,6 +113,13 @@ fn read_jsonl_prefix(path: &Path, limit: usize) -> Vec<Value> {
     parse_jsonl_values(&String::from_utf8_lossy(&bytes), Some(limit))
 }
 
+fn read_jsonl(path: &Path) -> Vec<Value> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    parse_jsonl_values(&String::from_utf8_lossy(&bytes), None)
+}
+
 /// First non-empty string among the candidates. Mirrors `first_string`.
 fn first_string(values: &[Option<&str>]) -> Option<String> {
     for value in values {
@@ -181,11 +189,24 @@ fn cwd_from_item(item: &Value) -> Option<String> {
 
 fn codex_title_from_item(item: &Value) -> Option<String> {
     first_string(&[
+        str_field(item, "thread_name"),
         str_field(item, "title"),
         nested_string(item, &["turn_context", "title"]),
         nested_string(item, &["payload", "title"]),
         nested_string(item, &["metadata", "title"]),
     ])
+}
+
+fn codex_index_modified_ms(item: &Value, index_path: &Path) -> i64 {
+    item.get("updated_at_unix_ms")
+        .and_then(Value::as_i64)
+        .or_else(|| {
+            item.get("updated_at")
+                .and_then(Value::as_str)
+                .and_then(|updated_at| DateTime::parse_from_rfc3339(updated_at).ok())
+                .map(|updated_at| updated_at.timestamp_millis())
+        })
+        .unwrap_or_else(|| mtime_ms(index_path))
 }
 
 /// 把首条用户消息压成一行短标题:取第一行非空内容,裁到 ~80 字符(UIREQ-014
@@ -337,13 +358,13 @@ pub fn scan_sessions(limit: usize) -> Vec<ScannedSession> {
     let index_path = home.join(".codex").join("session_index.jsonl");
     if index_path.is_file() {
         let index_path_str = index_path.to_string_lossy().into_owned();
-        for item in read_jsonl_prefix(&index_path, limit * 2) {
+        // session_index 是外置 enrichment，必须完整读取后按 durable session id
+        // 与 rollout 聚合；不能先截前 N 行，否则旧 thread_name 会依赖 Resume
+        // 更新 index 顺序后才出现。
+        for item in read_jsonl(&index_path) {
             let sid = first_string(&[str_field(&item, "id"), str_field(&item, "session_id")]);
             if let Some(sid) = sid {
-                let modified = item
-                    .get("updated_at_unix_ms")
-                    .and_then(Value::as_i64)
-                    .unwrap_or_else(|| mtime_ms(&index_path));
+                let modified = codex_index_modified_ms(&item, &index_path);
                 sessions.push(ScannedSession {
                     agent: "codex",
                     id: sid.clone(),
@@ -358,11 +379,20 @@ pub fn scan_sessions(limit: usize) -> Vec<ScannedSession> {
         }
     }
 
-    // Sort ascending by modified_ms (Python `sorted(..., key=modified_ms or 0)`),
-    // dedup by (agent, source|id), then keep the newest `limit`.
+    limit_scanned_session_sources(sessions, limit)
+}
+
+fn limit_scanned_session_sources(
+    mut sessions: Vec<ScannedSession>,
+    limit: usize,
+) -> Vec<ScannedSession> {
+    // 先清理完全重复的 physical source，再按 (agent, provider session id)
+    // 聚合 backing sources。limit 的单位是用户看到的逻辑会话，而不是 rollout
+    // 与 session_index 两类实现细节。
     sessions.sort_by_key(|s| s.modified_epoch_millis.unwrap_or(0));
     let mut seen = std::collections::HashSet::new();
-    let mut out: Vec<ScannedSession> = Vec::new();
+    let mut sources_by_session =
+        std::collections::HashMap::<(&'static str, String), Vec<ScannedSession>>::new();
     for session in sessions {
         let dedup_source = if session.source.is_empty() {
             session.id.clone()
@@ -372,10 +402,26 @@ pub fn scan_sessions(limit: usize) -> Vec<ScannedSession> {
         if !seen.insert((session.agent, dedup_source)) {
             continue;
         }
-        out.push(session);
+        sources_by_session
+            .entry((session.agent, session.id.clone()))
+            .or_default()
+            .push(session);
     }
-    let skip = out.len().saturating_sub(limit);
-    out.split_off(skip)
+    let mut groups = sources_by_session.into_values().collect::<Vec<_>>();
+    groups.sort_by(|left, right| {
+        left.last()
+            .and_then(|source| source.modified_epoch_millis)
+            .unwrap_or(0)
+            .cmp(
+                &right
+                    .last()
+                    .and_then(|source| source.modified_epoch_millis)
+                    .unwrap_or(0),
+            )
+            .then_with(|| left[0].id.cmp(&right[0].id))
+    });
+    let skip = groups.len().saturating_sub(limit);
+    groups.into_iter().skip(skip).flatten().collect()
 }
 
 // ── Path allow-list + resolution ──────────────────────────────────
@@ -700,6 +746,84 @@ pub fn mutate_session(source: &str, mutation: Mutation) -> Result<(), String> {
 mod uireq014_first_message_tests {
     use super::*;
     use serde_json::json;
+
+    fn codex_source(
+        session_id: &str,
+        source: &str,
+        label: Option<&str>,
+        modified_ms: i64,
+    ) -> ScannedSession {
+        ScannedSession {
+            agent: "codex",
+            id: session_id.to_owned(),
+            source: source.to_owned(),
+            label: label.map(str::to_owned),
+            cwd: None,
+            modified_epoch_millis: Some(modified_ms),
+        }
+    }
+
+    #[test]
+    fn test_remote_session_navigator_codex_alias_enrichment_does_not_compete_for_limit() {
+        let sources = vec![
+            codex_source("session-a", "rollout-a.jsonl", None, 300),
+            codex_source("session-b", "rollout-b.jsonl", None, 200),
+            codex_source("session-c", "session_index.jsonl:session-c", Some("C"), 150),
+            codex_source(
+                "session-a",
+                "session_index.jsonl:session-a",
+                Some("远程别名 A"),
+                10,
+            ),
+            codex_source(
+                "session-b",
+                "session_index.jsonl:session-b",
+                Some("远程别名 B"),
+                20,
+            ),
+        ];
+
+        let limited = limit_scanned_session_sources(sources, 2);
+        let ids = limited
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let labels = limited
+            .iter()
+            .filter_map(|session| {
+                session
+                    .label
+                    .as_deref()
+                    .map(|label| (session.id.as_str(), label))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(
+            ids,
+            std::collections::HashSet::from(["session-a", "session-b"])
+        );
+        assert_eq!(labels["session-a"], "远程别名 A");
+        assert_eq!(labels["session-b"], "远程别名 B");
+    }
+
+    #[test]
+    fn codex_session_index_thread_name_is_a_title_source() {
+        assert_eq!(
+            codex_title_from_item(&json!({"thread_name": "外置 Codex 别名"})),
+            Some("外置 Codex 别名".to_owned())
+        );
+    }
+
+    #[test]
+    fn codex_session_index_rfc3339_timestamp_drives_logical_recency() {
+        assert_eq!(
+            codex_index_modified_ms(
+                &json!({"updated_at": "2026-07-12T08:00:00Z"}),
+                Path::new("missing-session-index.jsonl"),
+            ),
+            1_783_843_200_000
+        );
+    }
 
     #[test]
     fn first_message_excerpt_takes_first_nonblank_line_and_truncates() {

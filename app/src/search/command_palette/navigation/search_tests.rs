@@ -168,6 +168,7 @@ fn restored_session_snapshot_yields_searchable_prompt_and_restore_target() {
     // search (live-panes-only) would miss.
     let snapshot = WorkspaceSessionSnapshot {
         id: "restored:agent:abc-123".to_string(),
+        container_uuid: None,
         kind: WorkspaceSessionKind::AgentTerminal,
         label: Some("Fix the login bug".to_string()),
         environment_authority_key: Some("local".to_string()),

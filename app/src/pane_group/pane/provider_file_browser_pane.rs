@@ -1,7 +1,7 @@
 //! Provider 文件浏览器 pane(中央 pane,通过 Environment provider 管理入口打开)。
 //!
 //! 仿 provider connection pane 的极简结构。pane 不持久化(
-//! `LeafContents::ProviderFileBrowser { .. }` 在 `is_persisted()` 返回 false),
+//! `PaneNodeSnapshot::into_persistable` 会裁剪 `LeafContents::ProviderFileBrowser { .. }`),
 //! 业务数据走 provider 文件传输连接操作。
 use warpui::{AppContext, ModelHandle, View, ViewContext, ViewHandle};
 

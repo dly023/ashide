@@ -16,6 +16,10 @@ use warpui::{AppContext, SingletonEntity, UpdateView, ViewContext, ViewHandle};
 
 use crate::workspace::environment_provider;
 
+use super::session_navigator_reducer::{
+    self, DeleteCloseKind, DeleteEffects, PaneGroupInfo, ReduceResult, SessionNavigatorAction,
+    SessionNavigatorState, SideEffect, TabPaneInfo,
+};
 use super::{
     AlertDialogWithCallbacks, Appearance, CLIAgentInputState, CLIAgentSession,
     CLIAgentSessionContext, CLIAgentSessionStatus, CLIAgentSessionsModel,
@@ -26,12 +30,6 @@ use super::{
     WorkspaceSessionActionTarget, WorkspaceSessionKind, WorkspaceSessionSnapshot,
     WORKSPACE_SESSIONS_REFRESH_TOAST_ID,
 };
-use super::session_navigator_reducer::{
-    self, DeleteCloseKind, DeleteEffects, PaneGroupInfo, ReduceResult, SessionNavigatorAction,
-    SessionNavigatorState, SideEffect, TabPaneInfo,
-};
-#[cfg(test)]
-use crate::app_state::SessionDisplayOrderStrategy;
 
 #[derive(Debug)]
 pub(super) struct WorkspaceSessionDeletePlan {
@@ -57,8 +55,15 @@ impl Workspace {
         &mut self,
         ctx: &AppContext,
     ) -> Vec<WorkspaceSessionSnapshot> {
-        // Display list is owned by reducer Refresh inside raw(); sync persists state.
-        self.raw_session_navigator_sessions(ctx)
+        // 用户动作必须基于“屏幕上刚看到的那次 Refresh”提交状态，不能重新从空/旧
+        // position state 开始。否则第一次点击 Resume 就可能把当前视觉顺序丢掉。
+        let reduced = self.reduce_session_navigator_refresh(ctx, true);
+        let current_authority = self.current_environment_authority_key(ctx);
+        let user_state = self.workspace_session_user_state_for_authority(&current_authority);
+        let mut sessions = reduced.sessions;
+        self.apply_session_navigator_state(reduced.state);
+        self.apply_workspace_session_aliases(&mut sessions, &user_state);
+        sessions
     }
 
     pub(super) fn raw_session_navigator_sessions(
@@ -70,17 +75,12 @@ impl Workspace {
             &self.current_environment_authority_key(ctx),
         );
         let mut sessions = reduced.sessions;
-        for session in &mut sessions {
-            if let Some(alias) = self.workspace_session_alias_with_state(session, &user_state) {
-                session.label = Some(alias);
-            }
-        }
+        self.apply_workspace_session_aliases(&mut sessions, &user_state);
         sessions
     }
 
-    /// Pure Refresh through the reducer. When `inject_focused_live` is true, temporarily
-    /// sets `active_key` to the focused live pane for §6.1 display `is_active` only —
-    /// callers must not apply that injected state onto `active_restored_*`.
+    /// 只通过 reducer 执行 Refresh。focus 是单向投影输入：typed `PaneFocused`
+    /// 只计算展示态 `is_active`，不会修改返回给调用方的 Environment selection。
     fn reduce_session_navigator_refresh(
         &self,
         ctx: &AppContext,
@@ -112,24 +112,36 @@ impl Workspace {
         self.filter_deleting_workspace_sessions(&mut merged);
 
         let pane_info = self.snapshot_pane_group_info(ctx);
-        let mut state = self.snapshot_session_navigator_state();
-        if inject_focused_live {
-            if let Some(focused_key) = self.logical_key_for_focused_live_pane(ctx) {
-                state.active_key = Some(focused_key);
-            }
-        }
+        let state = self.snapshot_session_navigator_state();
         let mut pinned_session_ids = user_state.pinned.clone();
         for session in &merged {
             if session.is_pinned {
                 pinned_session_ids.extend(session.stable_pin_keys());
             }
         }
-        session_navigator_reducer::reduce(
+        let refreshed = session_navigator_reducer::reduce(
             Vec::new(),
             state,
             SessionNavigatorAction::Refresh {
                 new_sessions: merged,
                 pinned_session_ids,
+            },
+            &pane_info,
+        );
+        if !inject_focused_live {
+            return refreshed;
+        }
+        let Some(focused_key) = self.logical_key_for_focused_live_pane(ctx) else {
+            return refreshed;
+        };
+        if self.tabs.get(self.active_tab_index).is_none() {
+            return refreshed;
+        }
+        session_navigator_reducer::reduce(
+            refreshed.sessions,
+            refreshed.state,
+            SessionNavigatorAction::PaneFocused {
+                session_logical_key: Some(focused_key),
             },
             &pane_info,
         )
@@ -156,65 +168,19 @@ impl Workspace {
     pub(super) fn workspace_session_display_order_key(
         session: &WorkspaceSessionSnapshot,
     ) -> String {
-        // 用枚举显式决定 key 策略,不靠字符串隐式相等。
-        match session.display_order_strategy() {
-            SessionDisplayOrderStrategy::Physical => Self::workspace_session_logical_key(session),
-            SessionDisplayOrderStrategy::Durable => {
-                Self::workspace_session_durable_display_order_key(session)
-                    .unwrap_or_else(|| Self::workspace_session_logical_key(session))
-            }
-            SessionDisplayOrderStrategy::Bridged => {
-                Self::workspace_session_logical_key(session)
-            }
-        }
+        Self::workspace_session_logical_key(session)
     }
 
     fn workspace_session_durable_display_order_key(
         session: &WorkspaceSessionSnapshot,
     ) -> Option<String> {
-        let environment_key = WorkspaceSessionSnapshot::logical_environment_key(
-            session.environment_authority_key.as_deref(),
-        );
-
-        if let Some(cli_agent_session_id) = session
-            .cli_agent_session_id
-            .as_deref()
-            .filter(|id| !id.trim().is_empty())
-        {
-            return Some(format!(
-                "{environment_key}::agent:{}:{}",
-                session
-                    .cli_agent
-                    .as_deref()
-                    .or(session.cli_command.as_deref())
-                    .unwrap_or_default(),
-                cli_agent_session_id
-            ));
-        }
-
-        if let Some(conversation_id) = session
-            .active_conversation_id
-            .iter()
-            .chain(session.conversation_ids.iter())
-            .find(|id| !id.trim().is_empty())
-        {
-            return Some(format!("{environment_key}::conversation:{conversation_id}"));
-        }
-
-        None
+        session.durable_identity_key()
     }
 
-    fn workspace_session_identity_keys(session: &WorkspaceSessionSnapshot) -> Vec<String> {
-        let mut keys = vec![
-            session.id.clone(),
-            Self::workspace_session_logical_key(session),
-        ];
-        if let Some(durable_key) = Self::workspace_session_durable_display_order_key(session) {
-            keys.push(durable_key);
-        }
-        keys.sort();
-        keys.dedup();
-        keys
+    pub(super) fn workspace_session_identity_keys(
+        session: &WorkspaceSessionSnapshot,
+    ) -> Vec<String> {
+        session.observed_identity_keys()
     }
 
     fn workspace_session_volatile_identity_keys(session: &WorkspaceSessionSnapshot) -> Vec<String> {
@@ -243,205 +209,39 @@ impl Workspace {
         keys
     }
 
-    fn workspace_session_matches_identity_keys(
+    pub(super) fn workspace_session_row_id(
         session: &WorkspaceSessionSnapshot,
-        identity_keys: &HashSet<String>,
-    ) -> bool {
+        state: &SessionNavigatorState,
+    ) -> String {
         Self::workspace_session_identity_keys(session)
             .into_iter()
-            .any(|key| identity_keys.contains(&key))
+            .find_map(|identity| state.row_id_by_identity.get(&identity).cloned())
+            .unwrap_or_else(|| Self::workspace_session_logical_key(session))
+    }
+
+    pub(super) fn session_navigator_row_id_for_identity(
+        identity: &str,
+        state: &SessionNavigatorState,
+    ) -> String {
+        state
+            .row_id_by_identity
+            .get(identity)
+            .cloned()
+            .unwrap_or_else(|| identity.to_owned())
     }
 
     pub(super) fn filter_deleting_workspace_sessions(
         &self,
         sessions: &mut Vec<WorkspaceSessionSnapshot>,
     ) {
-        if self.deleting_workspace_session_keys.is_empty() {
+        let state = self.snapshot_session_navigator_state();
+        if state.deleting_row_ids.is_empty() && state.deleted_row_ids.is_empty() {
             return;
         }
         sessions.retain(|session| {
-            !Self::workspace_session_matches_identity_keys(
-                session,
-                &self.deleting_workspace_session_keys,
-            )
+            let row_id = Self::workspace_session_row_id(session, &state);
+            !state.deleting_row_ids.contains(&row_id) && !state.deleted_row_ids.contains(&row_id)
         });
-    }
-
-    #[cfg(test)]
-    pub(super) fn reconcile_session_navigator_display_order(
-        &mut self,
-        sessions: &[WorkspaceSessionSnapshot],
-    ) {
-        // 按 pinned 优先 + updated_at 降序排序后再分配 order,不依赖 merge
-        // 的输出顺序。这保证"最近更新的行获得更小 order 号"的语义来自
-        // reconcile 自身,而非隐式继承上游排序——改 merge 不会影响 order 分配。
-        let mut sorted = sessions.to_vec();
-        sorted.sort_by(|left, right| {
-            right
-                .is_pinned
-                .cmp(&left.is_pinned)
-                .then_with(|| right.updated_at_unix_ms.cmp(&left.updated_at_unix_ms))
-                .then_with(|| {
-                    left.label
-                        .as_deref()
-                        .unwrap_or_default()
-                        .cmp(right.label.as_deref().unwrap_or_default())
-                })
-                // v3: tie-breaker 用 logical_key 不用 volatile id
-                // id 在 materialize 时从 agent:... 变成 tab:...,会导致 order 丢失
-                .then_with(|| {
-                    Self::workspace_session_logical_key(left)
-                        .cmp(&Self::workspace_session_logical_key(right))
-                })
-        });
-
-        for session in &sorted {
-            let order_key = Self::workspace_session_display_order_key(session);
-            if self
-                .session_navigator_display_order
-                .contains_key(&order_key)
-            {
-                continue;
-            }
-
-            if let Some(display_order) = Self::workspace_session_durable_display_order_key(session)
-                .and_then(|key| self.session_navigator_display_order.get(&key).copied())
-            {
-                self.session_navigator_display_order
-                    .insert(order_key, display_order);
-                continue;
-            }
-
-            let display_order = self.next_session_navigator_display_order;
-            self.next_session_navigator_display_order += 1;
-            self.session_navigator_display_order
-                .insert(order_key, display_order);
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn sort_session_navigator_sessions_by_display_order(
-        &self,
-        sessions: &mut [WorkspaceSessionSnapshot],
-    ) {
-        let original_positions = sessions
-            .iter()
-            .enumerate()
-            .map(|(index, session)| (Self::workspace_session_display_order_key(session), index))
-            .collect::<HashMap<_, _>>();
-        let same_window_group_orders =
-            sessions
-                .iter()
-                .fold(HashMap::<usize, u64>::new(), |mut orders, session| {
-                    if let Some((tab_index, _)) =
-                        Self::locator_from_restored_session_id(&session.id)
-                    {
-                        let order = self.session_navigator_display_order_for_session(session);
-                        orders
-                            .entry(tab_index)
-                            .and_modify(|group_order| *group_order = (*group_order).min(order))
-                            .or_insert(order);
-                    }
-                    orders
-                });
-
-        sessions.sort_by(|left, right| {
-            let left_key = Self::workspace_session_display_order_key(left);
-            let right_key = Self::workspace_session_display_order_key(right);
-            let left_same_window_position = Self::locator_from_restored_session_id(&left.id);
-            let right_same_window_position = Self::locator_from_restored_session_id(&right.id);
-            let left_order = self.session_navigator_display_order_for_session(left);
-            let right_order = self.session_navigator_display_order_for_session(right);
-            let left_original_position = original_positions
-                .get(&left_key)
-                .copied()
-                .unwrap_or(usize::MAX);
-            let right_original_position = original_positions
-                .get(&right_key)
-                .copied()
-                .unwrap_or(usize::MAX);
-            let left_group_order = left_same_window_position
-                .and_then(|(tab_index, _)| same_window_group_orders.get(&tab_index).copied())
-                .unwrap_or(left_order);
-            let right_group_order = right_same_window_position
-                .and_then(|(tab_index, _)| same_window_group_orders.get(&tab_index).copied())
-                .unwrap_or(right_order);
-
-            right
-                .is_pinned
-                .cmp(&left.is_pinned)
-                .then_with(|| left_group_order.cmp(&right_group_order))
-                .then_with(
-                    || match (left_same_window_position, right_same_window_position) {
-                        (Some((left_tab, left_leaf)), Some((right_tab, right_leaf)))
-                            if left_tab == right_tab =>
-                        {
-                            left_leaf.cmp(&right_leaf)
-                        }
-                        _ => std::cmp::Ordering::Equal,
-                    },
-                )
-                .then_with(|| left_order.cmp(&right_order))
-                // order 相同时(典型场景:尚未 sync/reconcile,所有行 order=MAX)
-                // 按 updated_at 降序——"最近更新排前面"。这是首次显示的初始顺序;
-                // sync 后 reconcile 分配稳定 order,此 fallback 不再生效。
-                .then_with(|| right.updated_at_unix_ms.cmp(&left.updated_at_unix_ms))
-                .then_with(|| left_original_position.cmp(&right_original_position))
-                .then_with(|| {
-                    left.label
-                        .as_deref()
-                        .unwrap_or_default()
-                        .cmp(right.label.as_deref().unwrap_or_default())
-                })
-                // v3: tie-breaker 用 logical_key 不用 volatile id
-                // id 在 materialize 时从 agent:... 变成 tab:...,会导致 order 丢失
-                .then_with(|| {
-                    Self::workspace_session_logical_key(left)
-                        .cmp(&Self::workspace_session_logical_key(right))
-                })
-        });
-    }
-
-    #[cfg(test)]
-    fn session_navigator_display_order_for_session(
-        &self,
-        session: &WorkspaceSessionSnapshot,
-    ) -> u64 {
-        // 用枚举显式决定 primary/durable key 取法,不靠 min 的隐式假设。
-        match session.display_order_strategy() {
-            SessionDisplayOrderStrategy::Physical => {
-                // live container:用 physical key。若该行是从 virtual 物化来的,
-                // 其 durable key(agent/conversation)可能已有 order——继承它
-                // 以保持原位。取 min 让 physical order 不晚于 durable order。
-                let primary = self
-                    .session_navigator_display_order
-                    .get(&Self::workspace_session_display_order_key(session))
-                    .copied();
-                let durable = Self::workspace_session_durable_display_order_key(session)
-                    .and_then(|key| self.session_navigator_display_order.get(&key).copied());
-                match (primary, durable) {
-                    (Some(primary), Some(durable)) => primary.min(durable),
-                    (Some(primary), None) => primary,
-                    (None, Some(durable)) => durable,
-                    (None, None) => u64::MAX,
-                }
-            }
-            SessionDisplayOrderStrategy::Durable => {
-                // virtual row with agent/conversation binding:primary key == durable key,
-                // 只查一次。
-                self.session_navigator_display_order
-                    .get(&Self::workspace_session_display_order_key(session))
-                    .copied()
-                    .unwrap_or(u64::MAX)
-            }
-            SessionDisplayOrderStrategy::Bridged => {
-                // virtual row without binding:fallback 到 logical key。
-                self.session_navigator_display_order
-                    .get(&Self::workspace_session_display_order_key(session))
-                    .copied()
-                    .unwrap_or(u64::MAX)
-            }
-        }
     }
 
     fn tab_is_same_window_split_group(&self, tab_index: usize, ctx: &AppContext) -> bool {
@@ -502,12 +302,12 @@ impl Workspace {
         group_numbers.get(&tab_index).copied()
     }
 
-    // preferred_active_* dual-path removed: Refresh track_materialization owns §6.4.
+    // preferred_active_* 双轨已删除：Refresh identity reconcile 独占 §6.4。
 
     #[cfg(test)]
     pub(super) fn normalize_session_navigator_active_state(
         sessions: &mut [WorkspaceSessionSnapshot],
-        preferred_active_key: Option<&str>,
+        preferred_selected_row_id: Option<&str>,
     ) {
         if sessions
             .iter()
@@ -519,7 +319,7 @@ impl Workspace {
             return;
         }
 
-        let preferred_key = preferred_active_key
+        let preferred_key = preferred_selected_row_id
             .filter(|key| {
                 sessions.iter().any(|session| {
                     session.is_active && Self::workspace_session_logical_key(session) == *key
@@ -547,10 +347,10 @@ impl Workspace {
         &self,
         session: &WorkspaceSessionSnapshot,
     ) -> bool {
-        self.restoring_workspace_session_keys.contains(&session.id)
-            || self
-                .restoring_workspace_session_keys
-                .contains(&Self::workspace_session_logical_key(session))
+        let state = self.snapshot_session_navigator_state();
+        state
+            .restoring_row_ids
+            .contains(&Self::workspace_session_row_id(session, &state))
     }
 
     pub(super) fn workspace_session_logical_key(session: &WorkspaceSessionSnapshot) -> String {
@@ -578,16 +378,7 @@ impl Workspace {
     pub(super) fn workspace_session_alias_keys_for_session(
         session: &WorkspaceSessionSnapshot,
     ) -> Vec<String> {
-        let mut keys = vec![
-            session.id.clone(),
-            Self::workspace_session_logical_key(session),
-        ];
-        if let Some(durable_key) = Self::workspace_session_durable_display_order_key(session) {
-            keys.push(durable_key);
-        }
-        keys.sort();
-        keys.dedup();
-        keys
+        session.stable_user_state_keys()
     }
 
     pub(super) fn workspace_session_alias_keys(
@@ -627,6 +418,18 @@ impl Workspace {
             .find_map(|key| user_state.aliases.get(&key).cloned())
     }
 
+    pub(super) fn apply_workspace_session_aliases(
+        &self,
+        sessions: &mut [WorkspaceSessionSnapshot],
+        user_state: &crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserState,
+    ) {
+        for session in sessions {
+            if let Some(alias) = self.workspace_session_alias_with_state(session, user_state) {
+                session.label = Some(alias);
+            }
+        }
+    }
+
     pub(super) fn workspace_session_user_state_for_authority(
         &self,
         authority: &str,
@@ -644,8 +447,10 @@ impl Workspace {
         crate::terminal::cli_agent_session_index::session_aliases()
     }
 
-    pub(super) fn scan_terminal_cli_agent_sessions(limit: usize) -> Vec<WorkspaceSessionSnapshot> {
-        crate::terminal::cli_agent_session_index::scan_current_app_cli_agent_sessions(limit)
+    pub(super) fn scan_terminal_cli_agent_sessions() -> Vec<WorkspaceSessionSnapshot> {
+        crate::terminal::cli_agent_session_index::scan_current_app_cli_agent_sessions(
+            crate::app_state::WORKSPACE_SESSION_NAVIGATOR_LOGICAL_LIMIT,
+        )
     }
 
     pub(super) fn backing_sessions_for_workspace_session(
@@ -1100,71 +905,59 @@ impl Workspace {
         ) && self.workspace_contains_terminal_view(event.terminal_view_id(), ctx)
         {
             self.sync_session_navigator_sessions(ctx);
+            if matches!(
+                event,
+                CLIAgentSessionsModelEvent::Started { .. }
+                    | CLIAgentSessionsModelEvent::SessionUpdated { .. }
+            ) {
+                // Provider binding 是 terminal pane 的持久身份。只刷新 UI 而不保存
+                // 会让下次冷启动再次丢失 session id，别名便只能等 Resume 后出现。
+                ctx.dispatch_global_action("workspace:save_app", ());
+            }
             ctx.notify();
         }
     }
 
     pub(super) fn sync_session_navigator_sessions(&mut self, ctx: &mut ViewContext<Self>) {
-        self.prune_stale_restoring_workspace_session_keys(ctx);
         // Single Refresh path: materialization + display_order + restoring cleanup.
+        // Restore 的 source 可能先被消费、live identity 后注册；Refresh 前禁止按瞬时
+        // source 集合 prune，否则会把合法的 in-flight selection 变成 stale state。
         // Do not inject focused live here — that would overwrite restored markers.
         let reduced = self.reduce_session_navigator_refresh(ctx, false);
         self.apply_session_navigator_state(reduced.state);
-        // Adapter: clear restoring keys for panes that already have a live locator,
-        // even if the reducer still saw a twin virtual row briefly.
-        let live_sessions = self.live_workspace_sessions(ctx);
-        let materialized_live_session_keys = live_sessions
-            .iter()
-            .filter(|session| {
-                self.locator_for_workspace_session_snapshot(session, ctx)
-                    .is_some()
-            })
-            .flat_map(|session| {
-                [
-                    session.id.clone(),
-                    Self::workspace_session_logical_key(session),
-                ]
-            })
-            .collect::<Vec<_>>();
-        for key in materialized_live_session_keys {
-            self.restoring_workspace_session_keys.remove(&key);
-        }
-        // Focus-aware: a restored marker pointing at an unfocused live pane is stale
-        // (split materialize / resume leftover). Virtual restoring markers are kept.
-        if let Some(active) = self.active_restored_workspace_session_key.clone() {
-            let focused = self.logical_key_for_focused_live_pane(ctx);
-            let still_restoring = self.restoring_workspace_session_keys.contains(&active);
-            let points_at_live = live_sessions.iter().any(|session| {
-                Self::workspace_session_logical_key(session) == active
-            });
-            if points_at_live && !still_restoring && focused.as_ref() != Some(&active) {
-                self.active_restored_workspace_session_key = None;
-            }
-        }
+        // Materialization lifecycle 由 Refresh 在 reducer 内清理；focus 只是本帧
+        // active projection，禁止反向清空 Environment 保存的 selection。
         ctx.notify();
     }
 
-    pub(super) fn clear_active_restored_workspace_session_key_if_present(
+    pub(super) fn clear_session_navigator_selection_key_if_present(
         &mut self,
         key: Option<String>,
         ctx: &mut ViewContext<Self>,
     ) {
-        if key
-            .as_deref()
-            .is_some_and(|key| self.active_restored_workspace_session_key.as_deref() == Some(key))
-        {
-            self.active_restored_workspace_session_key = None;
+        let state = self.snapshot_session_navigator_state();
+        let should_clear = key.as_deref().is_some_and(|identity| {
+            state.selected_row_id.as_deref()
+                == Some(Self::session_navigator_row_id_for_identity(identity, &state).as_str())
+        });
+        if should_clear {
+            self.dispatch_session_navigator_state_action(
+                SessionNavigatorAction::SelectionChanged {
+                    session_logical_key: None,
+                },
+                ctx,
+            );
             self.sync_session_navigator_sessions(ctx);
         }
     }
 
-    pub(super) fn active_restored_workspace_session_key_for_tab(
+    pub(super) fn session_navigator_selection_key_for_tab(
         &self,
         tab_index: usize,
         ctx: &AppContext,
     ) -> Option<String> {
-        let active_restored_workspace_session_key =
-            self.active_restored_workspace_session_key.as_deref()?;
+        let state = self.snapshot_session_navigator_state();
+        let session_navigator_selection_key = state.selected_row_id.as_deref()?;
         self.live_workspace_sessions(ctx)
             .into_iter()
             .filter(|session| {
@@ -1173,19 +966,21 @@ impl Workspace {
             })
             .filter_map(|session| {
                 let logical_key = Self::workspace_session_logical_key(&session);
-                (active_restored_workspace_session_key == logical_key).then_some(logical_key)
+                (session_navigator_selection_key
+                    == Self::workspace_session_row_id(&session, &state))
+                .then_some(logical_key)
             })
             .next()
     }
 
-    pub(super) fn active_restored_workspace_session_key_for_pane(
+    pub(super) fn session_navigator_selection_key_for_pane(
         &self,
         pane_group_id: warpui::EntityId,
         pane_id: PaneId,
         ctx: &AppContext,
     ) -> Option<String> {
-        let active_restored_workspace_session_key =
-            self.active_restored_workspace_session_key.as_deref()?;
+        let state = self.snapshot_session_navigator_state();
+        let session_navigator_selection_key = state.selected_row_id.as_deref()?;
         self.live_workspace_sessions(ctx)
             .into_iter()
             .filter(|session| {
@@ -1196,53 +991,28 @@ impl Workspace {
             })
             .filter_map(|session| {
                 let logical_key = Self::workspace_session_logical_key(&session);
-                (active_restored_workspace_session_key == logical_key).then_some(logical_key)
+                (session_navigator_selection_key
+                    == Self::workspace_session_row_id(&session, &state))
+                .then_some(logical_key)
             })
             .next()
     }
 
-    pub(super) fn workspace_session_key_belongs_to_authority(key: &str, authority: &str) -> bool {
-        key.strip_prefix(authority)
-            .is_some_and(|suffix| suffix.starts_with("::"))
-    }
-
-    pub(super) fn clear_active_restored_workspace_session_for_authority(
+    pub(super) fn clear_session_navigator_selection_if_matches(
         &mut self,
-        authority: &str,
+        session: &WorkspaceSessionSnapshot,
         ctx: &mut ViewContext<Self>,
     ) {
-        let should_clear = self
-            .active_restored_workspace_session_key
-            .as_deref()
-            .is_some_and(|key| Self::workspace_session_key_belongs_to_authority(key, authority));
+        let state = self.snapshot_session_navigator_state();
+        let should_clear = state.selected_row_id.as_deref()
+            == Some(Self::workspace_session_row_id(session, &state).as_str());
         if should_clear {
-            self.active_restored_workspace_session_key = None;
-            self.sync_session_navigator_sessions(ctx);
-        }
-    }
-
-    pub(super) fn set_active_restored_workspace_session_key_for_session(
-        &mut self,
-        session: &WorkspaceSessionSnapshot,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.active_restored_workspace_session_key =
-            Some(Self::workspace_session_logical_key(session));
-        self.sync_session_navigator_sessions(ctx);
-    }
-
-    pub(super) fn clear_active_restored_workspace_session_if_matches(
-        &mut self,
-        session: &WorkspaceSessionSnapshot,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        let logical_key = Self::workspace_session_logical_key(session);
-        if self
-            .active_restored_workspace_session_key
-            .as_deref()
-            .is_some_and(|key| key == logical_key)
-        {
-            self.active_restored_workspace_session_key = None;
+            self.dispatch_session_navigator_state_action(
+                SessionNavigatorAction::SelectionChanged {
+                    session_logical_key: None,
+                },
+                ctx,
+            );
             self.sync_session_navigator_sessions(ctx);
         }
     }
@@ -1368,9 +1138,13 @@ impl Workspace {
             }
 
             if let Some(placeholder_leaf_index) = placeholder_leaf_index {
-                let terminal_view = pane_group
+                let placeholder_pane_id = pane_group
                     .pane_id_from_index(placeholder_leaf_index)
-                    .and_then(|pane_id| pane_group.terminal_view_from_pane_id(pane_id, ctx));
+                    .expect("snapshot 中的 placeholder leaf 必须对应 live pane");
+                let container_uuid = pane_group
+                    .container_uuid_for_pane_id(placeholder_pane_id, ctx)
+                    .expect("Navigator 可见 live pane 必须拥有稳定 container UUID");
+                let terminal_view = pane_group.terminal_view_from_pane_id(placeholder_pane_id, ctx);
                 let cli_agent_session = terminal_view.as_ref().and_then(|terminal_view| {
                     CLIAgentSessionsModel::as_ref(ctx)
                         .session(terminal_view.id())
@@ -1406,6 +1180,7 @@ impl Workspace {
                     .and_then(|session| session.session_context.session_id.clone());
                 let mut session = WorkspaceSessionSnapshot {
                     id: format!("tab:{tab_index}:leaf:{placeholder_leaf_index}"),
+                    container_uuid: Some(container_uuid),
                     kind: if cli_agent_session.is_some() {
                         WorkspaceSessionKind::AgentTerminal
                     } else {
@@ -1535,7 +1310,6 @@ impl Workspace {
         let refresh_generation = self.begin_workspace_sessions_refresh(ctx);
         self.refresh_indexed_cli_agent_sessions();
         self.prune_restored_workspace_sessions_with_missing_cli_sources();
-        self.prune_stale_restoring_workspace_session_keys(ctx);
         self.open_vertical_tabs_panel_for_recoverable_sessions(ctx);
         self.sync_session_navigator_sessions(ctx);
         let current_authority = self.current_environment_authority_key(ctx);
@@ -1557,43 +1331,8 @@ impl Workspace {
         );
     }
 
-    pub(super) fn prune_stale_restoring_workspace_session_keys(&mut self, ctx: &AppContext) {
-        if self.restoring_workspace_session_keys.is_empty() {
-            return;
-        }
-
-        let current_session_keys = self
-            .raw_session_navigator_sessions(ctx)
-            .into_iter()
-            .flat_map(|session| {
-                vec![
-                    session.id.clone(),
-                    Self::workspace_session_logical_key(&session),
-                ]
-            })
-            .collect::<HashSet<_>>();
-        let materialized_live_session_keys = self
-            .live_workspace_sessions(ctx)
-            .into_iter()
-            .filter(|session| {
-                self.locator_for_workspace_session_snapshot(session, ctx)
-                    .is_some()
-            })
-            .flat_map(|session| {
-                vec![
-                    session.id.clone(),
-                    Self::workspace_session_logical_key(&session),
-                ]
-            })
-            .collect::<HashSet<_>>();
-
-        self.restoring_workspace_session_keys.retain(|key| {
-            current_session_keys.contains(key) && !materialized_live_session_keys.contains(key)
-        });
-    }
-
     pub(super) fn refresh_indexed_cli_agent_sessions(&mut self) {
-        self.indexed_cli_agent_sessions = Self::scan_terminal_cli_agent_sessions(80);
+        self.indexed_cli_agent_sessions = Self::scan_terminal_cli_agent_sessions();
     }
 
     fn remove_workspace_session_from_cached_sources(
@@ -1657,13 +1396,23 @@ impl Workspace {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn begin_workspace_session_delete_plan(
         &mut self,
         plan: &WorkspaceSessionDeletePlan,
         ctx: &mut ViewContext<Self>,
     ) {
-        self.deleting_workspace_session_keys
-            .extend(plan.identity_keys.iter().cloned());
+        // 测试也必须走和生产一致的原子 Delete，而不是先写一个无法独立成立的
+        // 删除 lifecycle 必须由完整 Delete 原子建立。side effect 在此夹具中有意不执行。
+        self.dispatch_session_navigator_state_action(
+            SessionNavigatorAction::Delete {
+                session_logical_key: Self::workspace_session_logical_key(&plan.requested_session),
+                session_id: plan.requested_session.id.clone(),
+                environment_authority_key: plan.requested_session.environment_authority_key.clone(),
+                session_identity_keys: plan.identity_keys.clone(),
+            },
+            ctx,
+        );
         self.sync_session_navigator_sessions(ctx);
     }
 
@@ -1672,9 +1421,12 @@ impl Workspace {
         plan: &WorkspaceSessionDeletePlan,
         ctx: &mut ViewContext<Self>,
     ) {
-        for key in &plan.identity_keys {
-            self.deleting_workspace_session_keys.remove(key);
-        }
+        self.dispatch_session_navigator_state_action(
+            SessionNavigatorAction::DeleteRolledBack {
+                session_keys: plan.identity_keys.clone(),
+            },
+            ctx,
+        );
         self.sync_session_navigator_sessions(ctx);
     }
 
@@ -1686,9 +1438,14 @@ impl Workspace {
         self.remove_workspace_session_from_cached_sources(&plan.cache_sessions);
         self.clear_workspace_session_delete_plan_user_state(plan, ctx);
         self.refresh_indexed_cli_agent_sessions();
-        for key in Self::workspace_session_volatile_identity_keys(&plan.requested_session) {
-            self.deleting_workspace_session_keys.remove(&key);
-        }
+        let volatile_keys = Self::workspace_session_volatile_identity_keys(&plan.requested_session);
+        self.dispatch_session_navigator_state_action(
+            SessionNavigatorAction::DeleteCommitted {
+                session_keys: plan.identity_keys.clone(),
+                volatile_identity_keys: volatile_keys,
+            },
+            ctx,
+        );
         // v3 §8: finish only clears user state; focus/close already applied via reducer.
         self.sync_session_navigator_sessions(ctx);
     }
@@ -1948,17 +1705,14 @@ impl Workspace {
         let sessions = self.session_navigator_sessions(ctx);
         let units = session_navigator_reducer::build_reorder_units(&sessions);
         let Some(from_index) = units.iter().position(|unit| unit.id() == dragged_unit_id) else {
-            log::warn!(
-                "reorder_session_navigator_unit: unknown unit id {dragged_unit_id}"
-            );
+            log::warn!("reorder_session_navigator_unit: unknown unit id {dragged_unit_id}");
             return;
         };
         if from_index == target_index || from_index + 1 == target_index {
             // Dropped on own boundaries — no-op.
             return;
         }
-        let ordered =
-            session_navigator_reducer::move_reorder_unit(units, from_index, target_index);
+        let ordered = session_navigator_reducer::move_reorder_unit(units, from_index, target_index);
         self.reorder_session_navigator_sessions(ordered, ctx);
     }
 
@@ -2011,8 +1765,10 @@ impl Workspace {
         }
 
         let logical_key = Self::workspace_session_logical_key(&session);
-        if self.restoring_workspace_session_keys.contains(&session.id)
-            || self.restoring_workspace_session_keys.contains(&logical_key)
+        let navigator_state = self.snapshot_session_navigator_state();
+        if navigator_state
+            .restoring_row_ids
+            .contains(&Self::workspace_session_row_id(&session, &navigator_state))
         {
             log::info!(
                 "activate_restored_workspace_session: session {} is already restoring",
@@ -2040,12 +1796,12 @@ impl Workspace {
             );
             self.apply_session_navigator_state(reduced.state);
             let _ = self.apply_session_navigator_side_effect(&reduced.side_effect, None, ctx);
-            self.clear_workspace_session_restoring(&session);
+            self.clear_workspace_session_restoring(&session, ctx);
             ctx.notify();
             return;
         }
 
-        // v3: virtual Activate → reducer sets restoring + active_key + SpawnTerminal.
+        // virtual Activate 由 reducer 原子设置 restoring、selection 和 SpawnTerminal。
         let pane_info = self.snapshot_pane_group_info(ctx);
         let state = self.snapshot_session_navigator_state();
         let sessions = self.raw_session_navigator_sessions(ctx);
@@ -2060,11 +1816,7 @@ impl Workspace {
             &pane_info,
         );
         self.apply_session_navigator_state(reduced.state);
-        let _ = self.apply_session_navigator_side_effect(
-            &reduced.side_effect,
-            Some(&session),
-            ctx,
-        );
+        let _ = self.apply_session_navigator_side_effect(&reduced.side_effect, Some(&session), ctx);
     }
 
     /// Spawn / restore a virtual session after reducer emitted `SpawnTerminal`.
@@ -2085,8 +1837,7 @@ impl Workspace {
                 Some(session),
                 ctx,
             );
-            self.set_active_restored_workspace_session_key_for_session(session, ctx);
-            self.clear_workspace_session_restoring(session);
+            self.sync_session_navigator_sessions(ctx);
             ctx.notify();
             return;
         }
@@ -2110,11 +1861,6 @@ impl Workspace {
             None
         };
 
-        // restoring_keys already set by reducer; keep id twin for legacy lookups.
-        self.restoring_workspace_session_keys
-            .insert(session.id.clone());
-        ctx.notify();
-
         if session
             .environment_authority_key
             .as_deref()
@@ -2133,7 +1879,6 @@ impl Workspace {
             terminal_bootstrap_restore_command,
             ctx,
         );
-        self.set_active_restored_workspace_session_key_for_session(session, ctx);
         self.sync_session_navigator_sessions(ctx);
     }
 
@@ -2195,67 +1940,93 @@ impl Workspace {
         ctx.show_native_platform_modal(dialog);
     }
 
-    pub(super) fn snapshot_session_navigator_state(&self) -> SessionNavigatorState {
-        SessionNavigatorState {
-            active_key: self.active_restored_workspace_session_key.clone(),
-            restoring_keys: self.restoring_workspace_session_keys.clone(),
-            deleting_keys: self.deleting_workspace_session_keys.clone(),
-            display_order: self.session_navigator_display_order.clone(),
-            next_display_order: self.next_session_navigator_display_order,
+    /// Session Navigator 持久状态的唯一接入入口。
+    ///
+    /// 组件只能发送 typed action；Reducer 先计算并校验 state-slice 写权限，校验失败
+    /// 时拒绝提交。这样 selection/lifecycle/position 不会再从事件适配层被随手改写。
+    pub(super) fn dispatch_session_navigator_state_action(
+        &mut self,
+        action: SessionNavigatorAction,
+        ctx: &AppContext,
+    ) -> bool {
+        let pane_info = self.snapshot_pane_group_info(ctx);
+        let state = self.snapshot_session_navigator_state();
+        let sessions = self.raw_session_navigator_sessions(ctx);
+        let before = ReduceResult {
+            sessions: sessions.clone(),
+            state: state.clone(),
+            side_effect: SideEffect::None,
+        };
+        let reduced =
+            session_navigator_reducer::reduce(sessions, state, action.clone(), &pane_info);
+        if let Err(error) =
+            session_navigator_reducer::validate_transition(&before, &reduced, &action, &pane_info)
+        {
+            log::error!("session_navigator state action rejected: {error}");
+            debug_assert!(false, "session_navigator state action rejected: {error}");
+            return false;
         }
+        self.apply_session_navigator_state(reduced.state);
+        true
+    }
+
+    pub(super) fn snapshot_session_navigator_state(&self) -> SessionNavigatorState {
+        self.environments
+            .active_session_navigator_state()
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub(super) fn logical_key_for_focused_live_pane(&self, ctx: &AppContext) -> Option<String> {
         let tab = self.tabs.get(self.active_tab_index)?;
         let pane_group = tab.pane_group.as_ref(ctx);
         let focused_id = pane_group.focused_pane_id(ctx);
-        self.live_workspace_sessions(ctx).into_iter().find_map(|session| {
-            self.locator_for_workspace_session_snapshot(&session, ctx)
-                .filter(|locator| locator.pane_id == focused_id)
-                .map(|_| Self::workspace_session_logical_key(&session))
-        })
+        self.live_workspace_sessions(ctx)
+            .into_iter()
+            .find_map(|session| {
+                self.locator_for_workspace_session_snapshot(&session, ctx)
+                    .filter(|locator| locator.pane_id == focused_id)
+                    .map(|_| Self::workspace_session_logical_key(&session))
+            })
     }
 
-    /// After tab/pane focus changes, clear stale restored active markers and refresh
-    /// navigator display. Display `is_active` still follows focused live pane via raw
-    /// Refresh injection (§6.1). Do **not** apply PaneFocused `active_key` into
-    /// `active_restored_workspace_session_key` — that marker is reserved for
-    /// virtual/restored highlight and must clear on tab switch.
-    pub(super) fn notify_session_navigator_focus_changed(
-        &mut self,
-        ctx: &mut ViewContext<Self>,
-    ) {
+    /// 显式创建会话完成后，由创建行为接管当前 Environment 的 Navigator selection。
+    ///
+    /// 普通 tab/pane focus 只能改变 active projection，不能写 selection；但用户点击
+    /// “新建会话”表达了新的持久选择意图。远程 placeholder 尚未 materialize 时这里会
+    /// 先清掉旧 selection，真正 terminal 创建完成后再以 live identity 绑定新 RowId。
+    pub(super) fn select_explicitly_created_session_in_navigator(&mut self, ctx: &AppContext) {
+        let session_logical_key = self.logical_key_for_focused_live_pane(ctx);
+        self.dispatch_session_navigator_state_action(
+            SessionNavigatorAction::SelectionChanged {
+                session_logical_key,
+            },
+            ctx,
+        );
+    }
+
+    /// Tab/pane focus 变化后清理已经失效的恢复 selection，并刷新 projection。
+    /// `PaneFocused` 只能决定本帧 `is_active`，不能反向写入 Environment 独立保存的
+    /// selection；这是 focus 与 Navigator 状态之间的单向边界。
+    pub(super) fn notify_session_navigator_focus_changed(&mut self, ctx: &mut ViewContext<Self>) {
         let focused_key = self.logical_key_for_focused_live_pane(ctx);
-        if let Some(active) = self.active_restored_workspace_session_key.clone() {
-            let still_focused = focused_key.as_ref() == Some(&active);
-            let still_restoring = self.restoring_workspace_session_keys.contains(&active);
-            if !still_focused && !still_restoring {
-                self.active_restored_workspace_session_key = None;
-            }
-        }
 
         // Drive reducer TabActivated / PaneFocused for session-list is_active bookkeeping.
-        // Only persist restoring/display fields — never write live focus into the restored marker.
-        let tab_index = self.active_tab_index;
+        // Focus 只能改变 projection，不能改 Environment-owned selection。
         let pane_info = self.snapshot_pane_group_info(ctx);
         let state = self.snapshot_session_navigator_state();
         let sessions = self.live_workspace_sessions(ctx);
         let after_tab = session_navigator_reducer::reduce(
             sessions,
             state,
-            SessionNavigatorAction::TabActivated { tab_index },
+            SessionNavigatorAction::TabActivated,
             &pane_info,
         );
-        let reduced = if let Some(tab) = self.tabs.get(tab_index) {
-            let locator = PaneViewLocator {
-                pane_group_id: tab.pane_group.id(),
-                pane_id: tab.pane_group.as_ref(ctx).focused_pane_id(ctx),
-            };
+        let reduced = if self.tabs.get(self.active_tab_index).is_some() {
             session_navigator_reducer::reduce(
                 after_tab.sessions,
                 after_tab.state,
                 SessionNavigatorAction::PaneFocused {
-                    locator,
                     session_logical_key: focused_key,
                 },
                 &pane_info,
@@ -2263,18 +2034,13 @@ impl Workspace {
         } else {
             after_tab
         };
-        self.session_navigator_display_order = reduced.state.display_order;
-        self.next_session_navigator_display_order = reduced.state.next_display_order;
-        self.restoring_workspace_session_keys = reduced.state.restoring_keys;
-        self.deleting_workspace_session_keys = reduced.state.deleting_keys;
+        self.apply_session_navigator_state(reduced.state);
     }
 
     pub(super) fn apply_session_navigator_state(&mut self, state: SessionNavigatorState) {
-        self.active_restored_workspace_session_key = state.active_key;
-        self.restoring_workspace_session_keys = state.restoring_keys;
-        self.deleting_workspace_session_keys = state.deleting_keys;
-        self.session_navigator_display_order = state.display_order;
-        self.next_session_navigator_display_order = state.next_display_order;
+        if let Some(environment_state) = self.environments.active_session_navigator_state_mut() {
+            *environment_state = state;
+        }
     }
 
     pub(super) fn snapshot_pane_group_info(&self, ctx: &AppContext) -> PaneGroupInfo {
@@ -2312,12 +2078,13 @@ impl Workspace {
                         pane_id: focused_id,
                     })
                 });
-            let prev_pane_locator = pane_group
-                .prev_pane_id(focused_id)
-                .map(|pane_id| PaneViewLocator {
-                    pane_group_id: tab.pane_group.id(),
-                    pane_id,
-                });
+            let prev_pane_locator =
+                pane_group
+                    .prev_pane_id(focused_id)
+                    .map(|pane_id| PaneViewLocator {
+                        pane_group_id: tab.pane_group.id(),
+                        pane_id,
+                    });
             info.tabs.insert(
                 tab_index,
                 TabPaneInfo {
@@ -2387,9 +2154,8 @@ impl Workspace {
         deleted_session: Option<&WorkspaceSessionSnapshot>,
         ctx: &mut ViewContext<Self>,
     ) -> bool {
-        if let Some(session) = deleted_session {
-            self.clear_active_restored_workspace_session_if_matches(session, ctx);
-        }
+        // Navigator selection/lifecycle 已由 Delete typed action 原子计算；side-effect
+        // adapter 只负责物理 focus/close，禁止反向写 SessionNavigatorState。
         // Adapter: refuse closing the window's last visible pane.
         if matches!(effects.close, DeleteCloseKind::CloseTab(_))
             && self.tabs.len() == 1
@@ -2416,8 +2182,8 @@ impl Workspace {
 
         // Focus first (SPEC §8: Focus then Close), except multi-pane ClosePane where
         // close_pane_permanently already focuses the sibling via focus_next.
-        let skip_explicit_focus = matches!(effects.close, DeleteCloseKind::ClosePane(_))
-            && effects.focus.is_some();
+        let skip_explicit_focus =
+            matches!(effects.close, DeleteCloseKind::ClosePane(_)) && effects.focus.is_some();
         if !skip_explicit_focus {
             if let Some(locator) = &effects.focus {
                 self.focus_pane(locator.clone(), ctx);
@@ -2508,8 +2274,9 @@ impl Workspace {
             return;
         }
 
-        if crate::workspace::environment_runtime::authority_uses_terminal_bootstrap(target_authority)
-        {
+        if crate::workspace::environment_runtime::authority_uses_terminal_bootstrap(
+            target_authority,
+        ) {
             let active_is_local = self
                 .tabs
                 .get(self.active_tab_index)
@@ -2530,9 +2297,10 @@ impl Workspace {
         }
 
         // Non-bootstrap env: recreate / reselect environment tab when no same-env live remains.
-        let has_same_env_live = self.live_workspace_sessions(ctx).into_iter().any(|session| {
-            Self::session_matches_current_environment(&session, target_authority)
-        });
+        let has_same_env_live = self
+            .live_workspace_sessions(ctx)
+            .into_iter()
+            .any(|session| Self::session_matches_current_environment(&session, target_authority));
         if !has_same_env_live {
             if self.ensure_environment_tab_for_authority(target_authority, ctx) {
                 self.prepare_active_environment_after_visible_tab_activation(ctx);
@@ -2548,7 +2316,32 @@ impl Workspace {
         session: &WorkspaceSessionSnapshot,
         ctx: &mut ViewContext<Self>,
     ) {
-        self.clear_workspace_session_restoring(session);
+        self.delete_workspace_session_for_session_with_forced_side_effect_result(
+            session, None, ctx,
+        );
+    }
+
+    /// 测试故障注入点：无需依赖窗口 ContextFlag 或平台 close 行为，就能稳定验证
+    /// “reducer 已提交、物理副作用失败”这一事务边界。生产调用始终传 None。
+    #[cfg(test)]
+    pub(super) fn delete_workspace_session_for_session_with_refused_side_effect(
+        &mut self,
+        session: &WorkspaceSessionSnapshot,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.delete_workspace_session_for_session_with_forced_side_effect_result(
+            session,
+            Some(false),
+            ctx,
+        );
+    }
+
+    fn delete_workspace_session_for_session_with_forced_side_effect_result(
+        &mut self,
+        session: &WorkspaceSessionSnapshot,
+        forced_side_effect_result: Option<bool>,
+        ctx: &mut ViewContext<Self>,
+    ) {
         let plan = self.workspace_session_delete_plan(session.clone());
 
         // v3 unified delete: one reducer.Delete decides focus + close.
@@ -2559,6 +2352,7 @@ impl Workspace {
             session_logical_key: Self::workspace_session_logical_key(&plan.requested_session),
             session_id: plan.requested_session.id.clone(),
             environment_authority_key: plan.requested_session.environment_authority_key.clone(),
+            session_identity_keys: plan.identity_keys.clone(),
         };
         let before = ReduceResult {
             sessions: sessions_before.clone(),
@@ -2578,12 +2372,18 @@ impl Workspace {
         }
         self.apply_session_navigator_state(reduced.state);
 
-        let applied = self.apply_session_navigator_side_effect(
-            &reduced.side_effect,
-            Some(&plan.requested_session),
-            ctx,
-        );
+        let applied = forced_side_effect_result.unwrap_or_else(|| {
+            self.apply_session_navigator_side_effect(
+                &reduced.side_effect,
+                Some(&plan.requested_session),
+                ctx,
+            )
+        });
         if !applied {
+            // Delete reducer 已经预计算 selection/lifecycle，但物理关闭被拒绝时必须
+            // 原子回滚，不能留下“行消失 / selection 丢失”的半事务状态。
+            self.apply_session_navigator_state(before.state);
+            self.sync_session_navigator_sessions(ctx);
             self.show_workspace_session_error_toast(
                 "无法关闭当前唯一会话窗口，删除已取消".to_owned(),
                 ctx,
@@ -2591,8 +2391,6 @@ impl Workspace {
             ctx.notify();
             return;
         }
-
-        self.begin_workspace_session_delete_plan(&plan, ctx);
 
         #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
         {
@@ -2704,9 +2502,16 @@ impl Workspace {
     ) -> bool {
         session.is_active
             || self
-                .active_restored_workspace_session_key
+                .snapshot_session_navigator_state()
+                .selected_row_id
                 .as_deref()
-                .is_some_and(|key| key == Self::workspace_session_logical_key(session))
+                .is_some_and(|row_id| {
+                    row_id
+                        == Self::workspace_session_row_id(
+                            session,
+                            &self.snapshot_session_navigator_state(),
+                        )
+                })
             || self
                 .locator_for_workspace_session_snapshot(session, ctx)
                 .is_some_and(|locator| {
@@ -2722,37 +2527,20 @@ impl Workspace {
 
     // ── 恢复中状态清理 ─────────────────────────────────────────────────────
 
-    pub(super) fn clear_workspace_session_restoring(&mut self, session: &WorkspaceSessionSnapshot) {
-        self.restoring_workspace_session_keys.remove(&session.id);
-        self.restoring_workspace_session_keys
-            .remove(&Self::workspace_session_logical_key(session));
-    }
-
-    pub(super) fn clear_workspace_session_restoring_for_authority(
+    pub(super) fn clear_workspace_session_restoring(
         &mut self,
-        authority: &str,
+        session: &WorkspaceSessionSnapshot,
         ctx: &AppContext,
     ) {
-        let mut keys = self
-            .live_workspace_sessions(ctx)
-            .into_iter()
-            .chain(self.indexed_cli_agent_sessions_for_authority(authority))
-            .chain(self.restored_workspace_sessions.clone())
-            .filter(|session| {
-                crate::workspace::environment_runtime::session_authority_matches(
-                    session.environment_authority_key.as_deref(),
-                    authority,
-                )
-            })
-            .flat_map(|session| {
-                let logical_key = Self::workspace_session_logical_key(&session);
-                [session.id, logical_key]
-            })
-            .collect::<HashSet<_>>();
-
-        let authority_prefix = format!("{authority}::");
-        self.restoring_workspace_session_keys
-            .retain(|key| !keys.remove(key) && !key.starts_with(&authority_prefix));
+        self.dispatch_session_navigator_state_action(
+            SessionNavigatorAction::RestoreFinished {
+                session_keys: vec![
+                    session.id.clone(),
+                    Self::workspace_session_logical_key(session),
+                ],
+            },
+            ctx,
+        );
     }
 
     // ── 恢复会话注册 · 环境主机键 · pane 定位 ───────────────────────────────

@@ -272,6 +272,7 @@ fn snapshot_to_flat_panes(
             my_id
         }
         PaneNodeSnapshot::Leaf(LeafSnapshot {
+            container_uuid: _,
             is_focused,
             custom_vertical_tabs_title: _,
             contents,

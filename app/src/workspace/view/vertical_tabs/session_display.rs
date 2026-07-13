@@ -265,6 +265,7 @@ mod tests {
     fn agent_session(agent: CLIAgent, label: Option<&str>) -> WorkspaceSessionSnapshot {
         WorkspaceSessionSnapshot {
             id: "external:test-session.jsonl".to_string(),
+            container_uuid: None,
             kind: WorkspaceSessionKind::AgentTerminal,
             label: label.map(str::to_owned),
             environment_authority_key: Some("local".to_string()),

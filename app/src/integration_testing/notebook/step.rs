@@ -45,7 +45,7 @@ pub fn create_a_personal_notebook(key: impl Into<String>, title: impl Into<Strin
                         .expect("User UID must be set in tests"),
                     None,
                     Default::default(),
-                    StoredObjectEventEntrypoint::ManagementUI,
+                    StoredObjectEventEntrypoint::Unknown,
                     true,
                     ctx,
                 );

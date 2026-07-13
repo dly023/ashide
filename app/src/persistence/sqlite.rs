@@ -829,7 +829,10 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
                     .environment
                     .as_ref()
                     .and_then(|environment| serde_json::to_string(environment).ok()),
-                workspace_sessions_json: serde_json::to_string(&window.workspace_sessions).ok(),
+                restored_workspace_sessions_json: serde_json::to_string(
+                    &window.restored_workspace_sessions,
+                )
+                .ok(),
             };
             diesel::insert_into(schema::windows::dsl::windows)
                 .values(new_window)
@@ -915,19 +918,6 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
                         parent_pane_node_id,
                     } = pane_nodes.pop_front().expect("Should have node");
 
-                    // Skip leaves whose content types don't get a
-                    // corresponding `pane_leaves` row on save. Otherwise the
-                    // `pane_nodes` insert below would create an orphan row
-                    // (is_leaf=true, but no matching row in `pane_leaves`),
-                    // and `read_node` would fail to resolve the leaf on
-                    // restore, causing the entire surrounding tab to be
-                    // dropped. See `LeafContents::is_persisted`.
-                    if let PaneNodeSnapshot::Leaf(leaf) = pane_node {
-                        if !leaf.contents.is_persisted() {
-                            continue;
-                        }
-                    }
-
                     let is_leaf = matches!(pane_node, PaneNodeSnapshot::Leaf(_));
                     let new_pane_node = model::NewPaneNode {
                         tab_id: *tab_id,
@@ -964,6 +954,14 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
                             }
                         }
                         PaneNodeSnapshot::Leaf(pane) => {
+                            diesel::insert_into(
+                                schema::pane_container_identities::dsl::pane_container_identities,
+                            )
+                            .values(model::NewPaneContainerIdentity {
+                                pane_node_id,
+                                uuid: pane.container_uuid.clone(),
+                            })
+                            .execute(conn)?;
                             save_pane_state(conn, pane_node_id, pane)?;
                         }
                     }
@@ -1006,28 +1004,11 @@ fn save_pane_state(
         LeafContents::Welcome { .. } => WELCOME_PANE_KIND,
         LeafContents::EnvironmentRuntimePlaceholder => ENVIRONMENT_RUNTIME_PLACEHOLDER_PANE_KIND,
         LeafContents::AIDocument(_) => AI_DOCUMENT_PANE_KIND,
-        // Environment-management pane variants are transient provider surfaces
-        // and are filtered out before persistence.
         LeafContents::ProviderConnection { .. } => {
-            // These pane types are filtered out before this function is
-            // called; see `LeafContents::is_persisted` and the skip in
-            // `save_app_state`. Reaching this arm would mean a `pane_nodes`
-            // row had already been inserted with no corresponding
-            // `pane_leaves` row, which would break restoration.
-            debug_assert!(
-                false,
-                "save_pane_state called for non-persisted LeafContents variant"
-            );
-            return Ok(());
+            unreachable!("transient provider pane must be pruned before persistence")
         }
         LeafContents::ProviderFileBrowser { .. } => {
-            // Provider file browser panes are transient and use the same
-            // non-persistence path as provider connection editors.
-            debug_assert!(
-                false,
-                "save_pane_state called for non-persisted LeafContents variant"
-            );
-            return Ok(());
+            unreachable!("transient provider pane must be pruned before persistence")
         }
     };
 
@@ -1077,6 +1058,13 @@ fn save_pane_state(
                 active_conversation_id: terminal_snapshot
                     .active_conversation_id
                     .map(|id| id.to_string()),
+                cli_agent: terminal_snapshot.cli_agent.clone(),
+                cli_command: terminal_snapshot.cli_command.clone(),
+                cli_agent_origin: terminal_snapshot
+                    .cli_agent_origin
+                    .as_ref()
+                    .and_then(|origin| serde_json::to_string(origin).ok()),
+                cli_agent_session_id: terminal_snapshot.cli_agent_session_id.clone(),
             };
 
             diesel::insert_into(schema::terminal_panes::dsl::terminal_panes)
@@ -2195,11 +2183,16 @@ fn read_node(conn: &mut SqliteConnection, node: model::PaneNode) -> Result<PaneN
                     let active_conversation_id = terminal_pane
                         .active_conversation_id
                         .and_then(|id_str| AIConversationId::try_from(id_str).ok());
+                    let cli_agent_origin = terminal_pane
+                        .cli_agent_origin
+                        .and_then(|origin| serde_json::from_str(&origin).ok());
 
                     LeafContents::Terminal(TerminalPaneSnapshot {
                         uuid: terminal_pane.uuid,
                         cwd: terminal_pane.cwd,
                         is_active: terminal_pane.is_active,
+                        // persistable tree 已保证只读 transcript 不会写入数据库；
+                        // 因此任何成功恢复的 terminal 都是新的可写运行时容器。
                         is_read_only: false,
                         shell_launch_data,
                         input_config,
@@ -2207,10 +2200,10 @@ fn read_node(conn: &mut SqliteConnection, node: model::PaneNode) -> Result<PaneN
                         active_profile_id,
                         conversation_ids_to_restore,
                         active_conversation_id,
-                        cli_agent: None,
-                        cli_command: None,
-                        cli_agent_origin: None,
-                        cli_agent_session_id: None,
+                        cli_agent: terminal_pane.cli_agent,
+                        cli_command: terminal_pane.cli_command,
+                        cli_agent_origin,
+                        cli_agent_session_id: terminal_pane.cli_agent_session_id,
                     })
                 }
                 NOTEBOOK_PANE_KIND => {
@@ -2402,7 +2395,18 @@ fn read_node(conn: &mut SqliteConnection, node: model::PaneNode) -> Result<PaneN
                 other => bail!("Unrecognized pane kind: {other}"),
             };
 
+            let container_uuid = schema::pane_container_identities::dsl::pane_container_identities
+                .find(node.id)
+                .select(schema::pane_container_identities::columns::uuid)
+                .first::<Vec<u8>>(conn)?;
+            anyhow::ensure!(
+                !container_uuid.is_empty(),
+                "pane node {} 的 container UUID 不能为空",
+                node.id
+            );
+
             Ok(PaneNodeSnapshot::Leaf(LeafSnapshot {
+                container_uuid,
                 is_focused: pane.is_focused,
                 custom_vertical_tabs_title: pane.custom_vertical_tabs_title,
                 contents,
@@ -2589,16 +2593,14 @@ fn read_sqlite_data(
             let environment = window
                 .environment_json
                 .and_then(|s| serde_json::from_str::<EnvironmentSnapshot>(&s).ok());
-            let workspace_sessions = window
-                .workspace_sessions_json
+            let restored_workspace_sessions = window
+                .restored_workspace_sessions_json
                 .and_then(|s| serde_json::from_str::<Vec<WorkspaceSessionSnapshot>>(&s).ok())
-                .unwrap_or_else(|| {
-                    WorkspaceSessionSnapshot::from_tabs(&saved_tabs, environment.as_ref())
-                });
+                .unwrap_or_default();
 
             WindowSnapshot {
                 environment,
-                workspace_sessions,
+                restored_workspace_sessions,
                 tabs: saved_tabs,
                 active_tab_index: tab_index,
                 quake_mode: window.quake_mode,

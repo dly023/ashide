@@ -18,7 +18,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../.. && pwd)"
 cd "${REPO_ROOT}"
 
 # Keep local app-bundle runs aligned with `script/macos/bundle`: app/build.rs
-# needs this while building the DockTilePlugin during `cargo bundle`.
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.14}"
 
 : "${ASHIDE_BIN_NAME:?ASHIDE_BIN_NAME must be set (invoke via ./script/run)}"
@@ -101,6 +100,7 @@ channel_icon_asset_channel() {
   if [ -d "$REPO_ROOT/app/channels/$1" ]; then
     printf '%s\n' "$1"
   else
+    echo "No app/channels/$1 icon tree; using canonical app/channels/oss/icon/" >&2
     printf 'oss\n'
   fi
 }
@@ -140,7 +140,6 @@ DEV_BUNDLE_INPUT_SCOPES=(
   "app/i18n"
   "app/assets"
   "app/channels"
-  "app/DockTilePlugin"
   "crates"
   "resources"
   "script/run"
@@ -255,13 +254,11 @@ assemble_dev_app_bundle() {
   local built_binary
   local bundle_name
   local resources_dir
-  local dock_tile_plugin_dir
 
   profile_dir="$(dev_bundle_profile_dir)"
   built_binary="target/$profile_dir/$ASHIDE_BIN_NAME"
   bundle_name="$(basename "$ASHIDE_APP_PATH" .app)"
   resources_dir="$ASHIDE_APP_PATH/Contents/Resources"
-  dock_tile_plugin_dir="target/$profile_dir/AshideDockTilePlugin.docktileplugin"
 
   echo "Building app binary (bin: $ASHIDE_BIN_NAME)..."
   cargo build -p warp --bin "$ASHIDE_BIN_NAME" --features "$FEATURES" $PARAMS
@@ -300,17 +297,6 @@ assemble_dev_app_bundle() {
   NO_LICENSES=1 "${REPO_ROOT}/script/prepare_bundled_resources" "$resources_dir" "$ASHIDE_CHANNEL" "$profile_dir" "$FEATURES"
 
   "${REPO_ROOT}/script/compile_icon" "$ASHIDE_ICON_ASSET_CHANNEL" "$ASHIDE_APP_PATH"
-
-  if [ -d "$dock_tile_plugin_dir" ]; then
-    echo "Copying DockTilePlugin..."
-    mkdir -p "$ASHIDE_APP_PATH/Contents/PlugIns"
-    rm -rf "$ASHIDE_APP_PATH/Contents/PlugIns/AshideDockTilePlugin.docktileplugin"
-    cp -R "$dock_tile_plugin_dir" "$ASHIDE_APP_PATH/Contents/PlugIns/"
-    plutil -insert NSDockTilePlugIn -string "AshideDockTilePlugin.docktileplugin" "$ASHIDE_APP_PATH/Contents/Info.plist" 2>/dev/null || \
-      plutil -replace NSDockTilePlugIn -string "AshideDockTilePlugin.docktileplugin" "$ASHIDE_APP_PATH/Contents/Info.plist"
-    plutil -insert MainAppBundleIdentifier -string "$(plutil -extract CFBundleIdentifier raw "$ASHIDE_APP_PATH/Contents/Info.plist")" "$ASHIDE_APP_PATH/Contents/PlugIns/AshideDockTilePlugin.docktileplugin/Contents/Info.plist" 2>/dev/null || \
-      plutil -replace MainAppBundleIdentifier -string "$(plutil -extract CFBundleIdentifier raw "$ASHIDE_APP_PATH/Contents/Info.plist")" "$ASHIDE_APP_PATH/Contents/PlugIns/AshideDockTilePlugin.docktileplugin/Contents/Info.plist"
-  fi
 
   if [[ ",$FEATURES," =~ ",heap_usage_tracking," ]]; then
     echo "Bundling pprof..."

@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn test_has_horizontal_split() {
     let single_leaf = PaneNodeSnapshot::Leaf(LeafSnapshot {
+        container_uuid: vec![6; 16],
         is_focused: false,
         custom_vertical_tabs_title: None,
         contents: LeafContents::Code(CodePaneSnapShot::Local {
@@ -21,6 +22,7 @@ fn test_has_horizontal_split() {
             (
                 PaneFlex(1.),
                 PaneNodeSnapshot::Leaf(LeafSnapshot {
+                    container_uuid: vec![24; 16],
                     is_focused: false,
                     custom_vertical_tabs_title: None,
                     contents: LeafContents::Code(CodePaneSnapShot::Local {
@@ -35,6 +37,7 @@ fn test_has_horizontal_split() {
             (
                 PaneFlex(1.),
                 PaneNodeSnapshot::Leaf(LeafSnapshot {
+                    container_uuid: vec![38; 16],
                     is_focused: false,
                     custom_vertical_tabs_title: None,
                     contents: LeafContents::Code(CodePaneSnapShot::Local {
@@ -49,6 +52,109 @@ fn test_has_horizontal_split() {
         ],
     });
     assert!(horizontal_split.has_horizontal_split());
+}
+
+#[cfg(feature = "local_fs")]
+fn terminal_pane_node(uuid: u8, is_read_only: bool) -> PaneNodeSnapshot {
+    PaneNodeSnapshot::Leaf(LeafSnapshot {
+        container_uuid: vec![57; 16],
+        is_focused: false,
+        custom_vertical_tabs_title: None,
+        contents: LeafContents::Terminal(TerminalPaneSnapshot {
+            uuid: vec![uuid],
+            cwd: Some(format!("/tmp/{uuid}")),
+            shell_launch_data: None,
+            is_active: false,
+            is_read_only,
+            input_config: None,
+            llm_model_override: None,
+            active_profile_id: None,
+            conversation_ids_to_restore: Vec::new(),
+            active_conversation_id: None,
+            cli_agent: None,
+            cli_command: None,
+            cli_agent_origin: None,
+            cli_agent_session_id: None,
+        }),
+    })
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_read_only_terminal_is_not_persistable() {
+    assert_eq!(terminal_pane_node(1, true).into_persistable(), None);
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_persistable_tree_prunes_read_only_sibling_and_collapses_branch() {
+    let tree = PaneNodeSnapshot::Branch(BranchSnapshot {
+        direction: SplitDirection::Horizontal,
+        children: vec![
+            (PaneFlex(1.0), terminal_pane_node(1, true)),
+            (PaneFlex(2.0), terminal_pane_node(2, false)),
+        ],
+    });
+
+    let persisted = tree
+        .into_persistable()
+        .expect("writable sibling must survive");
+    let PaneNodeSnapshot::Leaf(LeafSnapshot {
+        contents: LeafContents::Terminal(terminal),
+        ..
+    }) = persisted
+    else {
+        panic!("single surviving child must collapse to a terminal leaf");
+    };
+    assert_eq!(terminal.uuid, vec![2]);
+    assert!(!terminal.is_read_only);
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_persistable_tree_drops_tab_when_all_children_are_read_only() {
+    let tree = PaneNodeSnapshot::Branch(BranchSnapshot {
+        direction: SplitDirection::Vertical,
+        children: vec![
+            (PaneFlex(1.0), terminal_pane_node(1, true)),
+            (PaneFlex(1.0), terminal_pane_node(2, true)),
+        ],
+    });
+
+    assert_eq!(tree.into_persistable(), None);
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_persistable_tree_prunes_transient_provider_panes_before_sqlite() {
+    let tree = PaneNodeSnapshot::Branch(BranchSnapshot {
+        direction: SplitDirection::Horizontal,
+        children: vec![
+            (
+                PaneFlex(1.0),
+                PaneNodeSnapshot::Leaf(LeafSnapshot {
+                    container_uuid: vec![132; 16],
+                    is_focused: true,
+                    custom_vertical_tabs_title: None,
+                    contents: LeafContents::ProviderConnection {
+                        node_id: "node-1".to_string(),
+                    },
+                }),
+            ),
+            (PaneFlex(1.0), terminal_pane_node(3, false)),
+        ],
+    });
+
+    let persisted = tree
+        .into_persistable()
+        .expect("terminal sibling must survive");
+    assert!(matches!(
+        persisted,
+        PaneNodeSnapshot::Leaf(LeafSnapshot {
+            contents: LeafContents::Terminal(TerminalPaneSnapshot { uuid, .. }),
+            ..
+        }) if uuid == vec![3]
+    ));
 }
 
 #[test]
@@ -161,6 +267,7 @@ fn terminal_tab(environment: Option<EnvironmentSnapshot>, cwd: &str, title: &str
         environment,
         custom_title: Some(title.to_string()),
         root: PaneNodeSnapshot::Leaf(LeafSnapshot {
+            container_uuid: vec![14; 16],
             is_focused: true,
             custom_vertical_tabs_title: None,
             contents: LeafContents::Terminal(TerminalPaneSnapshot {
@@ -241,6 +348,7 @@ fn test_workspace_session_snapshot_collects_terminal_metadata() {
         environment: None,
         custom_title: Some("Codex".to_string()),
         root: PaneNodeSnapshot::Leaf(LeafSnapshot {
+            container_uuid: vec![94; 16],
             is_focused: true,
             custom_vertical_tabs_title: None,
             contents: LeafContents::Terminal(TerminalPaneSnapshot {
@@ -286,6 +394,7 @@ fn test_workspace_session_snapshot_carries_cli_agent_command() {
         environment: None,
         custom_title: Some("Codex".to_string()),
         root: PaneNodeSnapshot::Leaf(LeafSnapshot {
+            container_uuid: vec![139; 16],
             is_focused: true,
             custom_vertical_tabs_title: None,
             contents: LeafContents::Terminal(TerminalPaneSnapshot {
@@ -329,6 +438,7 @@ fn test_workspace_session_snapshot_collects_welcome_startup_directory() {
         environment: None,
         custom_title: None,
         root: PaneNodeSnapshot::Leaf(LeafSnapshot {
+            container_uuid: vec![182; 16],
             is_focused: false,
             custom_vertical_tabs_title: None,
             contents: LeafContents::Welcome {
@@ -347,6 +457,11 @@ fn test_workspace_session_snapshot_collects_welcome_startup_directory() {
     assert_eq!(sessions[0].kind, WorkspaceSessionKind::Welcome);
     assert_eq!(sessions[0].startup_directory.as_deref(), Some("/repo"));
     assert_eq!(sessions[0].environment_authority_key, None);
+    assert_eq!(sessions[0].container_uuid, Some(vec![182; 16]));
+    assert_eq!(
+        sessions[0].logical_key(),
+        format!("local::pane:{}", "b6".repeat(16))
+    );
 }
 
 fn test_workspace_session(
@@ -374,13 +489,12 @@ fn test_workspace_session_in_environment(
     updated_at_unix_ms: Option<i64>,
     environment_authority_key: Option<&str>,
 ) -> WorkspaceSessionSnapshot {
-    // 与生产一致:live container 由 id 的 tab: 前缀决定(from_tabs 产出的
-    // snapshot id 都是 tab:X:leaf:Y),不由 is_active 推断。一个 live container
-    // 可以 is_active=false(非聚焦 pane),一个 virtual container 永远
-    // is_live_container=false。
+    // 与生产一致:live container 由 id 的 tab: 前缀决定，不由 is_active 推断；
+    // 同时必须携带稳定 pane UUID，不能让测试 fixture 继续保护 tab/leaf 身份债务。
     let is_live_container = id.starts_with("tab:");
     WorkspaceSessionSnapshot {
         id: id.to_string(),
+        container_uuid: is_live_container.then(|| id.as_bytes().to_vec()),
         kind: if cli_agent.is_some() {
             WorkspaceSessionKind::AgentTerminal
         } else {
@@ -511,6 +625,7 @@ fn test_session_navigator_merges_terminal_bootstrap_authority_variants() {
         Some(200),
         Some("local:/Users/admin/ashide"),
     );
+    let live_container_key = live_source.logical_key();
 
     let sessions = WorkspaceSessionSnapshot::merge_for_session_navigator(
         vec![indexed_source, live_source],
@@ -520,10 +635,7 @@ fn test_session_navigator_merges_terminal_bootstrap_authority_variants() {
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].id, "tab:1:leaf:0");
     assert!(sessions[0].is_active);
-    assert_eq!(
-        sessions[0].logical_key(),
-        "local::agent:Codex:shared-local-session"
-    );
+    assert_eq!(sessions[0].logical_key(), live_container_key);
     assert!(sessions[0]
         .stable_pin_keys()
         .contains(&"local::agent:Codex:shared-local-session".to_string()));
@@ -819,4 +931,108 @@ fn test_session_navigator_merge_preserves_source_order_and_marks_pinned() {
             .expect("older session exists")
             .is_pinned
     );
+}
+
+#[test]
+fn test_live_pane_identity_uses_container_uuid_not_layout_coordinate() {
+    let container_uuid = vec![0x10, 0x20, 0x30, 0x40];
+    let mut first_tab = terminal_tab(Some(EnvironmentSnapshot::local(None)), "/repo", "Codex");
+    let PaneNodeSnapshot::Leaf(LeafSnapshot {
+        container_uuid: leaf_container_uuid,
+        contents: LeafContents::Terminal(terminal),
+        ..
+    }) = &mut first_tab.root
+    else {
+        panic!("terminal_tab 必须生成 terminal leaf");
+    };
+    *leaf_container_uuid = container_uuid.clone();
+    terminal.uuid = vec![0xee; 16];
+
+    let first = WorkspaceSessionSnapshot::from_tabs(&[first_tab.clone()], None)
+        .pop()
+        .expect("first live terminal");
+    assert_eq!(
+        first.container_uuid.as_deref(),
+        Some(container_uuid.as_slice())
+    );
+    assert_eq!(first.logical_key(), "local::pane:10203040");
+    assert!(!first.stable_user_state_keys().contains(&first.id));
+    assert!(first
+        .stable_user_state_keys()
+        .contains(&"local::pane:10203040".to_owned()));
+
+    let shifted = WorkspaceSessionSnapshot::from_tabs(
+        &[
+            terminal_tab(Some(EnvironmentSnapshot::local(None)), "/other", "Other"),
+            first_tab,
+        ],
+        None,
+    )
+    .into_iter()
+    .find(|session| session.container_uuid.as_deref() == Some(container_uuid.as_slice()))
+    .expect("shifted live terminal");
+
+    assert_eq!(shifted.id, "tab:1:leaf:0");
+    assert_eq!(shifted.logical_key(), first.logical_key());
+    assert_eq!(
+        shifted.stable_user_state_keys(),
+        first.stable_user_state_keys()
+    );
+}
+
+#[test]
+fn test_session_navigator_merge_is_source_order_independent_for_live_container_ownership() {
+    let provider_session_id = "codex-order-independent";
+    let virtual_session = WorkspaceSessionSnapshot {
+        id: "external:Codex:order-independent".to_owned(),
+        container_uuid: None,
+        kind: WorkspaceSessionKind::AgentTerminal,
+        label: Some("外置标题".to_owned()),
+        environment_authority_key: Some("local".to_owned()),
+        cwd: Some("/repo".to_owned()),
+        startup_directory: None,
+        cli_agent: Some("Codex".to_owned()),
+        cli_command: Some("codex".to_owned()),
+        cli_agent_origin: Some(CliAgentSessionOrigin::PluginObserved),
+        conversation_ids: Vec::new(),
+        active_conversation_id: None,
+        cli_agent_session_id: Some(provider_session_id.to_owned()),
+        is_active: false,
+        is_pinned: false,
+        updated_at_unix_ms: Some(20),
+        is_live_container: false,
+    };
+    let live_session = WorkspaceSessionSnapshot {
+        id: "tab:3:leaf:0".to_owned(),
+        container_uuid: Some(vec![0xde, 0xad, 0xbe, 0xef]),
+        kind: WorkspaceSessionKind::AgentTerminal,
+        label: Some("Codex".to_owned()),
+        environment_authority_key: Some("local".to_owned()),
+        cwd: Some("/repo".to_owned()),
+        startup_directory: None,
+        cli_agent: Some("Codex".to_owned()),
+        cli_command: Some("codex".to_owned()),
+        cli_agent_origin: Some(CliAgentSessionOrigin::PluginObserved),
+        conversation_ids: Vec::new(),
+        active_conversation_id: None,
+        cli_agent_session_id: Some(provider_session_id.to_owned()),
+        is_active: true,
+        is_pinned: false,
+        updated_at_unix_ms: None,
+        is_live_container: true,
+    };
+
+    for sources in [
+        vec![virtual_session.clone(), live_session.clone()],
+        vec![live_session.clone(), virtual_session.clone()],
+    ] {
+        let merged =
+            WorkspaceSessionSnapshot::merge_for_session_navigator(sources, &HashSet::new());
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].is_live_container());
+        assert_eq!(merged[0].id, live_session.id);
+        assert_eq!(merged[0].container_uuid, live_session.container_uuid);
+        assert_eq!(merged[0].logical_key(), "local::pane:deadbeef");
+        assert_eq!(merged[0].label.as_deref(), Some("外置标题"));
+    }
 }

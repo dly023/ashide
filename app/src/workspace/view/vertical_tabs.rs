@@ -449,8 +449,8 @@ fn render_restored_session_row(
             }
         })
         .on_drop(move |ctx, _app, _bounds, data| {
-            if let Some(drop) = data
-                .and_then(|d| d.as_any().downcast_ref::<SessionNavigatorReorderDropData>())
+            if let Some(drop) =
+                data.and_then(|d| d.as_any().downcast_ref::<SessionNavigatorReorderDropData>())
             {
                 ctx.dispatch_typed_action(WorkspaceAction::ReorderWorkspaceSessionUnit {
                     unit_id: unit_id_for_drop.clone(),
@@ -539,24 +539,17 @@ fn render_restored_sessions_group(
     let mut last_unit_index: Option<usize> = None;
     for session in visible {
         let logical_key = Workspace::workspace_session_logical_key(session);
-        let unit_index = unit_index_by_key
-            .get(&logical_key)
-            .copied()
-            .unwrap_or(0);
+        let unit_index = unit_index_by_key.get(&logical_key).copied().unwrap_or(0);
         if last_unit_index != Some(unit_index) {
             // Unit-boundary drop slot (not between sibling leaves).
             column.add_child(render_session_unit_insertion_target(
-                unit_index,
-                false,
-                theme,
+                unit_index, false, theme,
             ));
             last_unit_index = Some(unit_index);
         }
 
-        let row_key = vtab_session_row_key(
-            &session.id,
-            session.environment_authority_key.as_deref(),
-        );
+        let row_key =
+            vtab_session_row_key(&session.id, session.environment_authority_key.as_deref());
         let mouse_state = state
             .session_row_mouse_states
             .borrow_mut()

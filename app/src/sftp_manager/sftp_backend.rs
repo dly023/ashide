@@ -7,16 +7,16 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "integration_tests"))]
 use dunce;
-#[cfg(test)]
+#[cfg(any(test, feature = "integration_tests"))]
 use std::fs;
-#[cfg(test)]
+#[cfg(any(test, feature = "integration_tests"))]
 use std::io::{Read, Write};
 
 use super::sftp_ops::{ProgressCallback, SftpOpsError};
 use super::types::FileEntry;
-#[cfg(test)]
+#[cfg(any(test, feature = "integration_tests"))]
 use super::types::FileEntryType;
 
 /// SFTP 后端操作抽象，用于解耦 UI 层与协议层
@@ -63,13 +63,13 @@ pub trait SftpBackend: Send + Sync {
 // ============================================================
 
 /// 基于内存（本地临时目录）的 SFTP 后端，用于测试
-#[cfg(test)]
+#[cfg(any(test, feature = "integration_tests"))]
 pub struct InMemorySftpBackend {
     /// 根目录，模拟远程文件系统的根
     root: PathBuf,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "integration_tests"))]
 impl InMemorySftpBackend {
     /// 创建新的内存后端，使用指定目录作为根
     pub fn new(root: PathBuf) -> Self {
@@ -127,7 +127,7 @@ impl InMemorySftpBackend {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "integration_tests"))]
 impl SftpBackend for InMemorySftpBackend {
     fn list_dir(&self, path: &Path) -> Result<Vec<FileEntry>, SftpOpsError> {
         let local = self.to_local(path);

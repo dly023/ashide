@@ -1,8 +1,33 @@
-# Ashide Session Navigator 语义规范 v3
+# Ashide Session Navigator 语义规范 v7
 #
 # 这是 Session Navigator 排序、合并、置顶、删除、恢复、focus/active/selection
 # 行为的唯一权威定义。代码实现和所有测试必须与此 spec 一致。
 # 当 spec 与代码冲突时,以 spec 为准;修改行为先改 spec 再改代码。
+#
+# v7 变更摘要:
+#   - 所有 live pane 的身份统一收敛到 PaneConfiguration.container_uuid
+#   - LeafSnapshot/SQLite 显式持久化 container UUID；terminal runtime UUID 不再兼任 UI 容器身份
+#   - live container 缺 UUID 立即失败，禁止退回 tab/leaf locator
+#   - runtime placeholder 与 Welcome 等非 terminal pane 同样获得稳定身份
+#
+# v6 变更摘要:
+#   - app-state pane tree 在进入 SQLite 前统一裁剪不可恢复 leaf 并折叠 branch
+#   - read-only transcript/provider/runtime-only pane 不得冷恢复成另一种可写语义
+#   - SQLite 只接受结构完整的 persistable tree，禁止遍历期间静默跳 leaf
+#
+# v5 变更摘要:
+#   - live terminal 稳定容器身份改为 pane UUID；tab:X:leaf:Y 降级为纯 locator
+#   - identity/user-state key 统一归属 WorkspaceSessionSnapshot，删除各层重复拼 key
+#   - local/remote sidecar 主动清理历史 tab/source:tab 键，不保留位置身份兼容债
+#   - merge 对 source 顺序无关；virtual 先到时 live owner 仍必须接管 pane UUID/container
+#
+# v4 变更摘要:
+#   - Environment 成为状态分区第一层;每个环境独立保存 rows/order/selection/lifecycle
+#   - 新增稳定 RowId + identity registry;virtual/live 是同一行生命周期而非排序身份
+#   - RowId 是 reducer 单调分配的 opaque row:N，永不复用 physical/durable/logical identity
+#   - 位置状态与 active/focus/restoring 解耦;事件只能修改授权 state slice
+#   - 删除 physical/durable 双 order 与 max/min 猜测桥接
+#   - 外置 alias/title/pin 等 enrichment 在初次 scan/Refresh 即合并，不依赖 Resume
 #
 # v3 变更摘要:
 #   - 新增 focus/active/selection 优先级链 (§6)
@@ -13,12 +38,104 @@
 #   - 新增边界条件全量覆盖 (§9)
 #   - 新增测试矩阵: 序列测试 + oracle + 排序稳定性 + tie-break (§10)
 #
-# 版本: 3
 # v2 = codex commit 8aef2d2 的隐式语义 (已废弃)
 # v1 = 更早的隐式语义 (已废弃)
 
-spec_version: 3
-last_updated: "2026-07-11"
+spec_version: 7
+last_updated: "2026-07-12"
+
+# ─────────────────────────────────────────────────────────
+# 0. 内聚状态模型 (Cohesive State Model)
+# ─────────────────────────────────────────────────────────
+state_model:
+  root:
+    type: "SessionNavigatorModel"
+    fields:
+      active_environment: "EnvironmentKey"
+      environments: "HashMap<EnvironmentKey, EnvironmentNavigatorState>"
+    invariant: "任何行状态必须且只能属于一个 canonical EnvironmentKey；authority alias 与 transport generation 不是 EnvironmentKey"
+
+  environment_partition:
+    type: "EnvironmentNavigatorState"
+    owns:
+      rows: "HashMap<RowId, RowState>"
+      order: "Vec<RowId> / 等价稳定 position map"
+      selected_row: "Option<RowId>"
+      restoring: "HashMap<RowId, RestoreAttempt>"
+      deleting: "HashSet<RowId>"
+      deleted: "HashSet<RowId> durable tombstone"
+      identity_registry: "stable container/durable/logical identity → RowId（不含 tab/leaf locator）"
+      next_row_id: "opaque RowId 单调分配器"
+    isolation: "后台或前台事件只能修改事件所属环境分区"
+
+  row_identity:
+    row_id: "reducer 首次观察时单调分配的 opaque row:N；在 virtual/restoring/live 生命周期中不变，绝不等于或复用任何 identity"
+    stable_container_identity: "所有 live pane 使用 PaneConfiguration.container_uuid（pane:<uuid>）；经 LeafSnapshot 与 pane_container_identities 跨 tab/pane 重排和冷启动持久化"
+    physical_locator: "tab:X:leaf:Y 只用于当前布局 action 路由；禁止进入 identity registry、alias、pin、selection 或 display order"
+    durable_identity: "agent/conversation binding；可增加，不直接拥有 position"
+    key_ownership: "logical/durable/observed/user-state key 只能由 WorkspaceSessionSnapshot 生成；组件/reducer/Workspace/remote adapter 禁止重复拼 key"
+    materialization: "只把 stable container/durable identity 绑定到既有 RowId，不创建新 position"
+    conflict_reconcile: "若异步时序曾让同一 observed row 的 durable/container alias 指向不同 RowId，Refresh 必须选择 durable canonical RowId，并原子迁移 selection/lifecycle/order/全部 aliases，禁止留下孤儿 RowId"
+    command_detection: "普通 live pane 后续识别出 agent binding 时仍保留原 RowId"
+    deletion_reuse: "删除只 tombstone 旧 RowId；释放 volatile pane alias 后，未来复用相同 tab/leaf 坐标的新 session 必须分配新 RowId"
+
+  metadata_enrichment:
+    ownership: "alias/title/pin/cwd/provider metadata 是逻辑会话的投影输入，不是独立 row，也不拥有 display position"
+    loading: "外置 metadata 必须在初次 scan/Refresh 时按 durable session identity 与实体 source 聚合；Activate/Resume/materialize 不得作为加载前置条件"
+    budgeting: "limit/pagination 按逻辑会话计算；同一会话的 rollout/index/user-state 等 backing source 不互相竞争配额"
+    discovery_limit: "local initial scan、local Refresh、remote scan 共用 WORKSPACE_SESSION_NAVIGATOR_LOGICAL_LIMIT；禁止各调用点写独立魔法数字"
+    isolation: "metadata 只能 enrich 同 EnvironmentKey + durable identity 的 row，不得跨环境串写"
+    failure_boundary: "metadata/user-state 读取失败不得丢弃已成功扫描的实体 rows；保留该 Environment 已缓存 enrichment 并允许后续 Refresh 重试"
+    binding_persistence: "live terminal 的 cli_agent/command/origin/provider session id 必须由 pane owner 落盘并在冷启动恢复；Started/SessionUpdated 必须触发 app-state save，禁止把 Resume 当成 identity 恢复机制"
+    user_state_key_hygiene: "local/remote alias/pin sidecar 只允许稳定 key；历史 tab:* 与 *::source:tab:* 必须在读取时清除并重写，禁止兼容债继续扩散"
+
+  app_state_persistence:
+    live_authority: "WindowSnapshot.tabs 是 live pane 唯一持久化权威；restored_workspace_sessions 只保存 virtual restore targets"
+    tree_boundary: "PaneNodeSnapshot::into_persistable 是 pane 可恢复性的唯一结构边界；必须在写 SQLite 前递归裁剪不可恢复 leaf"
+    transient_semantics: "read-only terminal transcript、provider editor/browser、runtime-only code pane 不可跨重启恢复，禁止降级成可写或空 pane"
+    structural_normalization: "branch 裁剪后 0 child 删除整 branch，1 child 折叠为 child，多 child 保留；SQLite 禁止二次静默跳 leaf"
+    container_identity: "PaneConfiguration.container_uuid 是所有 leaf pane 身份的运行时唯一归属，经 LeafSnapshot.container_uuid 写入 pane_container_identities；terminal UUID 只属于 terminal runtime"
+    hard_cut: "旧 pane tree 不含 container UUID，migration 为每个现存 leaf 一次性分配随机 UUID；禁止从 tab index、leaf index、数据库自增 id 或 terminal runtime UUID 猜测迁移"
+
+  write_ownership:
+    position:
+      allowed_events: ["Refresh.FirstObserved", "Reorder"]
+      forbidden_events: ["Activate", "Resume", "Materialized", "Focus", "RefreshExisting", "EnvironmentSwitched"]
+    selection:
+      allowed_events: ["Activate", "Resume", "Materialized", "ExplicitSessionCreated", "DeleteSelectedFallback"]
+      forbidden_events: ["PaneFocused", "TabActivated", "RefreshOrder", "BackgroundEnvironmentUpdated"]
+    lifecycle:
+      allowed_events: ["RestoreStarted", "RestoreFinished", "Delete", "DeleteRolledBack", "DeleteCommitted", "Refresh.Materialized"]
+      forbidden_events: ["Reorder", "Pin", "EnvironmentSwitched"]
+    active_environment:
+      allowed_events: ["EnvironmentSwitched", "EnvironmentDisconnectedFallback"]
+
+  action_write_ownership:
+    state_slices:
+      position: ["display_order", "next_display_order"]
+      identity: ["row_id_by_identity", "next_row_id"]
+      selection: ["selected_row_id"]
+      lifecycle: ["restoring_row_ids", "deleting_row_ids", "deleted_row_ids"]
+    actions:
+      Delete: ["identity", "selection", "lifecycle"]
+      Activate: ["identity", "selection", "lifecycle"]
+      SelectionChanged: ["identity", "selection"]
+      RestoreStarted: ["identity", "selection", "lifecycle"]
+      RestoreFinished: ["selection", "lifecycle"]
+      DeleteRolledBack: ["lifecycle"]
+      DeleteCommitted: ["identity", "lifecycle"]
+      Pin: []
+      Refresh: ["position", "identity", "selection", "lifecycle"]
+      TabActivated: []
+      PaneFocused: []
+      Reorder: ["position"]
+    direct_write_boundary: "除 session_navigator_reducer.rs 与测试夹具外，生产代码禁止直接修改以上 state slices；adapter 只能发送 typed action"
+
+  environment_switch:
+    save: "保存来源环境自己的 selected row 与 last-active tab/pane"
+    restore: "投影目标环境自己的 rows/order/selection 与 last-active tab/pane"
+    forbidden: "不得 reconcile 其他环境顺序；不得用来源 focus 覆盖目标 selection"
+    background_update: "非 active environment 的 refresh/materialize 只更新其分区，不抢焦点"
 
 # ─────────────────────────────────────────────────────────
 # 1. 容器模型 (Container Model)
@@ -26,7 +143,8 @@ last_updated: "2026-07-11"
 container_model:
   live_container:
     description: "由真实 pane 支撑的会话 (from_tabs 产出, id=tab:X:leaf:Y)"
-    identity: "物理身份 source:tab:X:leaf:Y,不随 agent 变化"
+    identity: "所有 pane 使用 pane:{container_uuid} 稳定容器身份；id=tab:X:leaf:Y 仅负责当前 action 路由"
+    missing_identity: "模型错误并立即失败；禁止 fallback 到 source:tab:*"
     is_live_container: true
     is_pinned_initial: false
     pin_inheritance: "不继承 durable pin key"
@@ -50,22 +168,22 @@ sort_intent_chain:
     intent: "pinned 行优先"
     applies_when: "always"
 
-  - key: "same_window_group_order (升序)"
-    intent: "同一 tab 的 split pane 相邻;用同 tab 所有 pane 的最小 display_order"
+  - key: "same_window_group_order (降序)"
+    intent: "同一 tab 的 split pane 相邻;用同 tab 所有 pane 的最大 display_order（越大越靠顶）"
     applies_when: "id 可解析为 tab:X:leaf:Y"
 
   - key: "same_window_split leaf index (升序)"
     intent: "同 tab 内按 leaf 序号排"
     applies_when: "同 tab 的 pane 之间"
 
-  - key: "display_order (升序)"
-    intent: "稳定序号。一旦分配不因 updated_at 变化而重排"
+  - key: "display_order (降序)"
+    intent: "稳定序号，越大越靠顶/越新。一旦分配不因 updated_at 变化而重排"
     applies_when: "已 sync/reconcile 的行"
-    fallback_when_empty: "order=u64::MAX"
+    fallback_when_empty: "order=0（未分配时排在非 pin 段末尾）"
 
   - key: "updated_at_unix_ms (降序, None 排最后)"
     intent: "最近更新排前面 —— 仅在 order 未分配时生效"
-    applies_when: "order == u64::MAX"
+    applies_when: "两行 position 相同或尚未分配；正常已 reconcile 行不依赖它重排"
 
   - key: "original_position (升序)"
     intent: "merge 后的原始位置作为 tiebreaker"
@@ -80,33 +198,32 @@ sort_intent_chain:
 # 3. display_order 分配策略 (Reconcile Strategy)
 # ─────────────────────────────────────────────────────────
 reconcile_strategy:
-  description: "为新行分配稳定序号"
-  allocation_order: "按 pinned 优先 + updated_at 降序排序后,依次分配递增序号"
+  description: "为新行分配稳定序号（越大越靠顶）"
+  allocation_order: |
+    候选按 pinned DESC → updated_at DESC → logical_key ASC（newest-first）排出;
+    对需要新 order 的行从旧到新（oldest-first）依次 next++，使最新拿到最大号
   not_depends_on: "不依赖 merge 的输出顺序"
   existing_row: "已有 order 的行跳过"
-  durable_bridging: "新行先查 durable key 是否已有 order;都没有才分配 next"
+  identity_lookup: "所有 observed identity 先经 registry 解析 RowId；只有 RowId 没有 position 才分配 next"
   tie_breaker: "pinned DESC → updated_at DESC (None 排最后) → logical_key ASC"
+  new_row_position: "新增行拿到更大 order，排在非 pin 组顶端"
   note: "v3 修正: tie-breaker 从 id ASC 改为 logical_key ASC,因为 id 是 volatile"
 
 # ─────────────────────────────────────────────────────────
 # 4. display_order 键策略 (Key Strategy)
 # ─────────────────────────────────────────────────────────
 key_strategy:
-  Physical:
-    description: "live container"
-    primary_key: "logical_key (source:tab:X:leaf:Y)"
-    durable_key: "agent:{agent}:{session_id} (如果有,用于继承旧序号)"
-    order_lookup: "min(primary_order, durable_order)"
-
-  Durable:
-    description: "virtual row 有 agent session id 或 conversation id"
-    primary_key: "durable_key (== primary_key)"
-    order_lookup: "只查一次 primary_key"
-
-  Bridged:
-    description: "virtual row 无 agent/conversation 绑定"
-    primary_key: "logical_key (fallback)"
-    order_lookup: "只查一次 primary_key"
+  row_id:
+    description: "display_order 只以稳定 RowId 为 key"
+    lookup: "identity_registry[observed identity] → RowId → position"
+  alias_registration:
+    virtual_first: "durable identity 建立 RowId；materialize 后 container UUID identity 指向同一 RowId"
+    live_first: "container UUID identity 建立 RowId；后续 agent detection 只新增 durable alias"
+    restoring_conflict: "正在 restoring/selected 的 RowId 优先，确保 Resume 原位替换"
+  forbidden:
+    - "同一行同时保存 primary_order 与 durable_order"
+    - "用 max/min 在读取阶段猜测哪个 order 正确"
+    - "materialization 为 physical key 分配新 position"
 
 # ─────────────────────────────────────────────────────────
 # 5. merge_for_session_navigator 职责
@@ -129,7 +246,7 @@ merge_responsibility:
 # 三个概念:
 #   - focus: 物理输入焦点 (pane group 的 focused_pane_id)
 #   - active: Session Navigator 中高亮的行 (snapshot.is_active)
-#   - selection: workspace 级恢复标记 (active_restored_workspace_session_key)
+#   - selection: 当前 Environment 独立保存的恢复/选择标记 (state.selected_row_id)
 #
 # 这三者可能指向不同行。mutation 之后谁说了算,由下面的优先级链决定。
 
@@ -144,11 +261,11 @@ focus_active_selection:
     - rule: "restoring session"
       priority: 2
       description: "restoring_workspace_session_keys 中的 session → is_active=true"
-      overrides: "active_restored_workspace_session_key"
+      overrides: "当前 Environment 的 virtual/restored selection"
 
-    - rule: "active_restored_workspace_session_key"
+    - rule: "EnvironmentNavigatorState.selected_row_id"
       priority: 3
-      description: "workspace 级恢复标记指向的 virtual row → is_active=true"
+      description: "当前 Environment 的恢复/选择标记指向 virtual row → is_active=true"
       overridden_by: "规则 1 (live focus) 和规则 2 (restoring)"
 
     - rule: "其余"
@@ -212,18 +329,94 @@ focus_active_selection:
         focus_target: "activate_tab → focus_active_tab (pane group 的 focused pane)"
         rule: "切 tab 时由 pane group 的 focus_state 决定焦点"
 
-  # 6.4 Materialization 追踪 (v3 修正)
+    pane_focus_projection:
+      - condition: "PaneFocused / TabActivated"
+        focus_target: "只计算本帧 snapshot.is_active"
+        rule: "不得把 focused live logical key 写回 EnvironmentNavigatorState.selected_row_id"
+
+  # 6.4 Materialization identity reconcile
   materialization_tracking:
     old_behavior: "找不到 stored session 就假设 materialized,返回 live active key"
     new_behavior: |
-      Refresh.track_materialization:
-        - stored 仍在且为 live → 保持
-        - stored 为 virtual 且存在同 env + binding 的 live twin → 迁移到 live logical_key
-        - stored 已消失且 live 的 durable key == stored key → 迁移
-        - 否则清除 active_key (不猜测 live-active)
+      Refresh.reconcile_identity:
+        - 所有 observed physical/durable/logical identity 先查 identity registry
+        - virtual 与 live 有任一 durable alias 相交 → 全部 alias 绑定既有 opaque RowId
+        - alias 冲突时 durable identity 所属 RowId 为 canonical，并原子迁移 competing RowId 的 selection/lifecycle/order/aliases
+        - selected_row_id 始终保存 RowId，不随 logical/physical identity 变化
+        - 只有真正首次观察且无任何 alias 命中时才 allocate row:N + position
+        - Refresh 不因瞬时 source 消失主动清除 in-flight selection
     deletion_behavior: "session 被删时不做 active 转移猜测;走 focus_after_mutation.delete 的决策"
     rationale: "猜测是不可靠的 —— 被删和 materialize 都表现为'stored session 不在了',但需要不同处理"
     workspace_path: "sync 只 apply reduce(Refresh) 的 state; 已删除 preferred_active_* 双轨"
+
+# ─────────────────────────────────────────────────────────
+# 6.5 Environment 导航上下文 UX 矩阵
+# ─────────────────────────────────────────────────────────
+environment_navigation_context:
+  identity:
+    current_app: "authority=local 与 local:<root> 归一为同一个 navigation key: local"
+    remote: "remote authority_key 本身就是 navigation key"
+    comparison_rule: "环境导航、关闭后的同环境选择与 strip 去重一律比较 navigation key,不比较完整 EnvironmentSnapshot"
+
+  memory:
+    owner: "Workspace 的 EnvironmentTable"
+    key: "canonical environment navigation key"
+    value: "上次激活 tab 的 pane_group EntityId"
+    forbidden: "不得记录 tab index;reorder/insert/close 会让 index 失效"
+    update_point: "所有 tab 激活与 active tab 环境归属变更的统一入口"
+    stale_value: "remembered EntityId 已关闭或已移到其他环境时,回退到同环境第一个 tab,激活后立即重写记忆"
+
+  navigator_state_partition:
+    owner: "EnvironmentTable.session_navigator_state_by_navigation_key"
+    key: "canonical environment navigation key"
+    current_app_aliases: "local、local:<root> 共用同一分区"
+    remote_reconnect: "同一 remote navigation key 的 transport 重连复用原分区"
+    forbidden: "不得把 Session Navigator state 挂在单次 authority entry/connection generation 上"
+
+  switch_matrix:
+    - id: "ENV-SW-01"
+      transition: "current-app/local → remote"
+      expected: "记住 local 当前 tab,恢复 remote 上次激活 tab 及该 tab 内已有 focused pane"
+    - id: "ENV-SW-02"
+      transition: "remote → current-app/local"
+      expected: "恢复 local 上次激活 tab,不固定选择该环境第一个 tab"
+    - id: "ENV-SW-03"
+      condition: "remembered tab 已关闭"
+      expected: "确定性回退到同 navigation key 的第一个 tab并重写记忆;没有 tab 才创建环境 tab"
+    - id: "ENV-SW-04"
+      condition: "remembered tab 被 reorder"
+      expected: "按 EntityId 恢复同一 tab,不受 index 变化影响"
+    - id: "ENV-SW-05"
+      condition: "用户切走后 remote connect/root-resolution 异步完成"
+      expected: "只更新目标 authority 的 runtime/table/tab 状态,不得抢 focus、不得改 active authority、不得把 pending entry 投递到当前 local tab"
+    - id: "ENV-SW-06"
+      condition: "关闭 active tab"
+      expected: "优先选择同 canonical navigation key 的邻居;root/label/lifecycle 元数据变化不应造成跨环境跳转"
+    - id: "ENV-SW-07"
+      condition: "disconnect 一个拥有多个 tab 的 remote environment"
+      expected: "关闭该 authority 的全部 tab并清除导航记忆,不得留下 stale remote tab;若该环境原本 active,恢复 current-app/local 上次激活 tab"
+    - id: "ENV-SW-08"
+      condition: "在切换完成后新建 tab、agent 或 split"
+      expected: "新内容继承当前 active environment;切回 local 后不得投递到 remote,切回 remote 后不得投递到 local"
+
+  entrypoint_rule:
+    applies_to:
+      - "Environment Strip 点击"
+      - "Environment provider open/switch"
+      - "session restore environment activation"
+      - "ensure/recreate environment tab"
+    invariant: "所有入口必须调用同一个 preferred-tab 选择规则,不得各自 position() 选择第一个 tab"
+
+  checks:
+    canonical_identity: "environment_navigation_key_collapses_current_app_authority_aliases"
+    stable_memory: "remembers_last_active_tab_by_navigation_key"
+    round_trip_restore: "test_switching_between_environments_restores_each_last_active_tab"
+    active_pane_restore: "test_switching_between_environments_preserves_each_active_pane"
+    stale_and_reorder: "test_environment_last_active_tab_fallback_and_reorder"
+    async_no_focus_steal: "test_environment_runtime_root_resolution_updates_non_active_environment_tab_without_stealing_focus"
+    close_boundary: "test_closing_active_tab_prefers_same_navigation_environment"
+    disconnect_cleanup: "test_disconnect_environment_closes_all_authority_tabs_and_restores_local"
+    build_gate: "cargo check"
 
 # ─────────────────────────────────────────────────────────
 # 7. 纯 Reducer 契约 (v3 新增)
@@ -238,7 +431,7 @@ focus_active_selection:
 reducer_contract:
   input:
     sessions: "Vec<WorkspaceSessionSnapshot> — 当前排序后的 session 列表"
-    state: "SessionNavigatorState — 包含 active_key, restoring_keys, deleting_keys, display_order"
+    state: "SessionNavigatorState — 包含 selected_row_id, restoring_row_ids, deleting_row_ids, display_order"
     action: "SessionNavigatorAction"
     pane_group_info: "PaneGroupInfo — 各 tab 的 visible pane 数、focused pane、pane_history"
 
@@ -252,16 +445,23 @@ reducer_contract:
       input: "session_id: String"
       output: |
         1. 从 sessions 中移除被删 session
-        2. 加入 deleting_keys
+        2. 加入 deleting_row_ids
         3. 根据 focus_after_mutation.delete 决定 side_effect
-        4. 如果被删 session 的 key == active_key → 清除 active_key
+        4. 如果被删 session 的 key == selected_row_id → 清除 selected_row_id
 
     Activate:
       input: "session_id: String"
       output: |
         1. 如果 target 已 materialize → side_effect = FocusPane
-        2. 如果 target 是 virtual → 加入 restoring_keys, side_effect = SpawnTerminal
-        3. 设置 active_key = target logical_key
+        2. 如果 target 是 virtual → 加入 restoring_row_ids, side_effect = SpawnTerminal
+        3. 解析或分配 target RowId，并设置 selected_row_id = target RowId
+
+    SelectionChanged:
+      input: "session_logical_key: Option<String>"
+      output: |
+        1. 显式 Navigator 选择或显式新建会话 deliver 完成后，解析/分配对应 RowId
+        2. 设置当前 Environment 的 selected_row_id；None 只用于 placeholder 阶段清除旧选择
+        3. 普通 PaneFocused / TabActivated 禁止借用此 action 反写 selection
 
     Pin:
       input: "session_id: String, pinned: bool"
@@ -271,10 +471,10 @@ reducer_contract:
         3. 下一次 refresh 时 is_pinned 由 user_state 预赋值
 
     Reorder:
-      input: "ordered_logical_keys: Vec<String> — Workspace 按拖动单元 flatten 后的 keys"
+      input: "ordered_logical_keys: Vec<String> — Workspace 按拖动单元 flatten 后的 keys；[0]=列表顶"
       output: |
-        1. 按 keys 重写 display_order
-        2. 不改 active_key / restoring_keys / is_active 指向的 logical_key
+        1. 按 keys 重写 display_order（顶行最大号，底行最小号；配合降序 sort）
+        2. 不改 selected_row_id / restoring_row_ids；active projection 继续解析同一 RowId
         3. side_effect = None
       invariants:
         - "同 tab 的 live split leaf 在结果中必须连续"
@@ -285,22 +485,22 @@ reducer_contract:
       input: "new_raw_sessions: Vec<WorkspaceSessionSnapshot>"
       output: |
         1. merge + reconcile + sort
-        2. track_materialization (§6.4 durable + binding)
+        2. reconcile_identity (§6.4 durable + binding)
         3. 根据 active_priority_chain 重新计算 is_active
-        4. 清除已 materialize 的 restoring_keys
+        4. 清除已 materialize 的 restoring_row_ids
 
     TabActivated:
-      input: "tab_index: usize"
+      input: "无 payload；当前 pane 拓扑由 pane_info 单向提供"
       output: |
-        1. 根据 pane group 的 focused pane 设置 live session 的 is_active
-        2. 清除不属于当前 environment 的 active_key
+        1. 不修改持久 state；pane focus 由 PaneFocused projection 单独提供
+        2. 保留当前 Environment 自己的 selection/lifecycle/position
 
     PaneFocused:
-      input: "locator: PaneViewLocator"
+      input: "session_logical_key: Option<String>；只表达 active projection 所需 identity"
       output: |
         1. 对应 live session 的 is_active = true
         2. 其他 live session 的 is_active = false
-        3. 不改 active_restored_workspace_session_key (除非被删)
+        3. 不改 EnvironmentNavigatorState.selected_row_id / lifecycle / position
 
   side_effects:
     FocusPane: "PaneViewLocator — 调用 workspace.focus_pane"
@@ -404,7 +604,7 @@ edge_cases:
   - id: "EC-08"
     name: "reorder 后 focus 跟随稳定 id"
     expected: "focus 不因 reorder 丢失, 跟随 logical_key; 同屏 split 邻接不被拆散"
-    reducer_rule: "Reorder → 只改 display_order; active_key 不变; same_window leaf 连续且相对序不变"
+    reducer_rule: "Reorder → 只改 display_order; selected_row_id 不变; same_window leaf 连续且相对序不变"
     ship_status: covered
 
   - id: "EC-09"
@@ -415,26 +615,26 @@ edge_cases:
 
   - id: "EC-10"
     name: "pin/unpin 后不改 selection 或 focus"
-    expected: "pin 只改排序组, is_active / active_key / focus 不变"
+    expected: "pin 只改排序组, is_active / selected_row_id / focus 不变"
     reducer_rule: "Pin → NoEffect (focus)"
     ship_status: covered
 
   - id: "EC-11"
-    name: "virtual row consume 时 active 迁移"
-    expected: "active_key 从 virtual logical_key 迁移到 live logical_key"
-    reducer_rule: "Refresh → materialization_tracking 主动迁移"
+    name: "virtual row consume 时 RowId 连续"
+    expected: "selected_row_id 保持原 opaque RowId；live identity 只新增 alias"
+    reducer_rule: "Refresh → identity registry bind alias；禁止迁移 selection 或新建 position"
     ship_status: covered
 
   - id: "EC-12"
     name: "restoring 中用户切走"
-    expected: "restoring 行保持 active highlight, 但物理焦点跟随用户"
-    reducer_rule: "active_priority_chain: restoring > active_key, live focus > restoring"
+    expected: "物理 highlight 跟随用户 focus；restoring lifecycle 与 Environment selection 保留"
+    reducer_rule: "active_priority_chain: restoring > selected_row_id, live focus > restoring"
     ship_status: covered
 
   - id: "EC-13"
     name: "被删 session 的 active 不猜测转移"
-    expected: "被删 session 是 active → 清除 active_key, 走 focus 决策, 不猜 materialize"
-    reducer_rule: "materialization_tracking: deletion 不猜测"
+    expected: "被删 session 是 active → 清除 selected_row_id, 走 focus 决策, 不猜 materialize"
+    reducer_rule: "Delete: 清 selected RowId + lifecycle tombstone；identity reconcile 不猜测 active 转移"
     ship_status: covered
 
   - id: "EC-14"
@@ -459,9 +659,260 @@ edge_cases:
     name: "同屏 split 组拖拽重排"
     expected: |
       拖组内任意行 = 整组平移; 落点不能插入同组 leaf 之间;
-      展示不全仍以 tab:X 组为单位; active_key 不变; 组内 leaf 相对序不变
+      展示不全仍以 tab:X 组为单位; selected_row_id 不变; 组内 leaf 相对序不变
     reducer_rule: "Workspace build_reorder_units → flatten → Reorder; validate same_window adjacency"
     ship_status: covered
+
+# ─────────────────────────────────────────────────────────
+# 9.5 可执行 UX 契约矩阵 (新增事件必须补一行并绑定测试)
+# ─────────────────────────────────────────────────────────
+ux_contract_matrix:
+  required_fields: ["id", "scope", "event", "may_change", "must_preserve", "test"]
+  rows:
+    - id: "SN-INTRA-RESUME-01"
+      scope: "within_environment"
+      event: "ResumeStarted → Materialized"
+      may_change: ["selection", "lifecycle", "physical_binding"]
+      must_preserve: ["row_id", "position", "other_rows", "environment"]
+      test: "test_resume_materialization_preserves_exact_display_position"
+    - id: "SN-INTRA-RESUME-02"
+      scope: "within_environment"
+      event: "RepeatedResume + shuffled Refresh"
+      may_change: ["selection", "lifecycle", "physical_binding"]
+      must_preserve: ["all_existing_positions", "relative_order"]
+      test: "test_repeated_resume_and_refresh_never_reorders_existing_rows"
+    - id: "SN-INTRA-MATERIALIZE-CONFLICT-01"
+      scope: "within_environment"
+      event: "Historical Activate → provisional terminal → durable identity materialized"
+      may_change: ["physical_binding", "identity_registry", "selection_row_id_canonicalization", "lifecycle"]
+      must_preserve: ["canonical_row_id", "position", "semantic_selection", "other_rows"]
+      test: "test_refresh_merges_provisional_materialization_row_state_into_canonical_row"
+    - id: "SN-INTRA-RESTORE-ASHIDE-01"
+      scope: "within_environment"
+      event: "Historical Ashide conversation restore deliver"
+      may_change: ["physical_binding", "active_projection", "lifecycle"]
+      must_preserve: ["activated_row_selection", "position", "explicit_creation_boundary"]
+      test: "test_activate_historical_ashide_conversation_uses_conversation_restore_path"
+    - id: "SN-INTRA-REFRESH-01"
+      scope: "within_environment"
+      event: "RefreshExisting"
+      may_change: ["metadata", "lifecycle"]
+      must_preserve: ["row_id", "position", "selection"]
+      test: "test_sort_stability_multiple_sorts"
+    - id: "SN-INTRA-ALIAS-01"
+      scope: "within_environment"
+      event: "InitialScan/Refresh observes external session user-state alias"
+      may_change: ["label_projection"]
+      must_preserve: ["logical_session_limit", "row_id", "position", "selection", "resume_independence"]
+      test: "test_session_navigator_external_user_alias_is_projected_before_resume"
+    - id: "SN-INTRA-ENRICHMENT-QUOTA-01"
+      scope: "within_environment"
+      event: "Codex rollout + session_index backing sources exceed source-level limit"
+      may_change: ["label_projection"]
+      must_preserve: ["logical_session_limit", "selected_session_metadata_sources", "resume_independence"]
+      test: "test_session_navigator_codex_alias_enrichment_is_visible_before_resume"
+    - id: "SN-INTRA-CODEX-COLD-ALIAS-01"
+      scope: "within_environment"
+      event: "ColdStart reads real-shape Codex rollout + session_index.jsonl"
+      may_change: ["label_projection", "cwd_projection"]
+      must_preserve: ["provider_session_identity", "resume_independence", "source_merge"]
+      test: "test_codex_cold_scan_preloads_real_session_index_thread_name_without_resume"
+    - id: "SN-INTRA-BINDING-PERSIST-01"
+      scope: "within_environment"
+      event: "SaveAppState → process restart → SQLite terminal pane restore"
+      may_change: ["runtime_process"]
+      must_preserve: ["cli_agent", "cli_command", "cli_agent_origin", "provider_session_id", "alias_resolvability"]
+      test: "test_sqlite_round_trips_terminal_cli_agent_binding_for_cold_restore"
+    - id: "SN-INTRA-BINDING-SAVE-01"
+      scope: "within_environment"
+      event: "CLI agent Started/SessionUpdated"
+      may_change: ["provider_binding", "persisted_app_state"]
+      must_preserve: ["position", "selection", "resume_independence"]
+      test: "test_cli_agent_binding_updates_trigger_app_state_save"
+    - id: "SN-INTRA-PANE-IDENTITY-01"
+      scope: "within_environment"
+      event: "Tab/pane insertion shifts a live pane from one layout coordinate to another"
+      may_change: ["physical_locator"]
+      must_preserve: ["container_uuid", "logical_identity", "alias_keys", "row_id", "position", "selection"]
+      test: "test_live_pane_identity_uses_container_uuid_not_layout_coordinate"
+    - id: "SN-INTRA-CONTAINER-PERSIST-01"
+      scope: "within_environment"
+      event: "SaveAppState → process restart → SQLite pane tree restore"
+      may_change: ["runtime_entity_id", "terminal_runtime_uuid"]
+      must_preserve: ["container_uuid", "logical_identity", "row_id_resolvability"]
+      test: "test_sqlite_round_trips_pane_container_identity"
+    - id: "SN-ENV-PLACEHOLDER-IDENTITY-01"
+      scope: "cross_environment"
+      event: "EnvironmentRuntimePlaceholder local → remote → local/remote round-trip"
+      may_change: ["active_environment", "physical_focus"]
+      must_preserve: ["placeholder_container_uuid", "logical_identity", "locator_independence"]
+      test: "test_environment_runtime_placeholder_preserves_container_identity_across_environment_round_trip"
+    - id: "SN-INTRA-PANE-REUSE-01"
+      scope: "within_environment"
+      event: "A closed pane's tab:leaf coordinate is reused by a different container UUID"
+      may_change: ["physical_locator", "row_population"]
+      must_preserve: ["row_separation", "tombstone_isolation", "selection_isolation", "position_isolation"]
+      test: "test_tab_coordinate_reuse_cannot_merge_distinct_container_uuid_rows"
+    - id: "SN-INTRA-MERGE-ORDER-01"
+      scope: "within_environment"
+      event: "virtual/live backing sources arrive in either order"
+      may_change: ["metadata_projection", "source_order"]
+      must_preserve: ["live_container_ownership", "container_uuid", "logical_identity", "single_row"]
+      test: "test_session_navigator_merge_is_source_order_independent_for_live_container_ownership"
+    - id: "SN-INTRA-COLD-LIVE-SOURCE-01"
+      scope: "within_environment"
+      event: "SaveAppState → cold restore of tabs plus virtual restore-target store"
+      may_change: ["runtime_process", "physical_locator"]
+      must_preserve: ["tabs_as_live_authority", "virtual_store_purity", "single_live_row", "container_uuid"]
+      test: "test_cold_restore_keeps_live_tabs_out_of_virtual_session_store"
+    - id: "SN-INTRA-READONLY-PERSIST-01"
+      scope: "within_environment"
+      event: "SaveAppState snapshots a split pane containing read-only transcript and writable terminal"
+      may_change: ["persisted_pane_tree_shape"]
+      must_preserve: ["writable_sibling", "transient_read_only_exclusion", "restored_write_semantics", "structural_validity"]
+      test: "test_persistable_tree_prunes_read_only_sibling_and_collapses_branch"
+    - id: "SN-INTRA-USER-STATE-HYGIENE-01"
+      scope: "cross_environment"
+      event: "Read local/remote alias and pin sidecar containing historical layout-coordinate keys"
+      may_change: ["sidecar_cleanup"]
+      must_preserve: ["stable_pane_keys", "durable_agent_keys", "stable_aliases", "stable_pins"]
+      test: "test_session_user_state_drops_volatile_layout_identity_debt"
+    - id: "SN-DISCOVERY-LIMIT-01"
+      scope: "cross_environment"
+      event: "InitialScan → Refresh → RemoteScan"
+      may_change: ["session_metadata"]
+      must_preserve: ["logical_session_limit", "discovery_population_semantics"]
+      test: "test_session_navigator_initial_refresh_and_remote_share_logical_limit"
+    - id: "SN-INTRA-REORDER-01"
+      scope: "within_environment"
+      event: "Reorder"
+      may_change: ["position"]
+      must_preserve: ["selection", "lifecycle", "split_group_adjacency"]
+      test: "test_ec08_reorder_keeps_active_on_logical_key"
+    - id: "SN-INTRA-PIN-01"
+      scope: "within_environment"
+      event: "PinGroupChanged"
+      may_change: ["pin_group"]
+      must_preserve: ["group_relative_order", "selection", "focus"]
+      test: "test_ec10_pin_does_not_change_focus"
+    - id: "SN-INTRA-FOCUS-01"
+      scope: "within_environment"
+      event: "PaneFocused"
+      may_change: ["active_projection", "physical_focus"]
+      must_preserve: ["selection", "position", "lifecycle"]
+      test: "test_ec12_restoring_user_switch_away"
+    - id: "SN-INTRA-CREATE-LOCAL-01"
+      scope: "within_environment"
+      event: "Explicit local terminal creation delivered"
+      may_change: ["rows", "identity_registry", "selection", "active_projection"]
+      must_preserve: ["existing_row_positions", "existing_row_lifecycle", "other_environment_state"]
+      test: "test_explicit_new_terminal_selects_new_live_session_in_local_environment"
+    - id: "SN-ENV-CREATE-REMOTE-01"
+      scope: "remote_environment"
+      event: "Explicit remote terminal placeholder/materialization delivered"
+      may_change: ["rows", "identity_registry", "selection", "active_projection"]
+      must_preserve: ["existing_row_positions", "existing_row_lifecycle", "other_environment_state"]
+      test: "test_explicit_new_terminal_selects_new_live_session_in_remote_environment"
+    - id: "SN-INTRA-DELETE-01"
+      scope: "within_environment"
+      event: "DeletePhysicalSideEffectRefused"
+      may_change: []
+      must_preserve: ["rows", "selection", "lifecycle", "position", "identity_registry", "counters"]
+      test: "test_deleting_only_live_local_session_does_not_close_window"
+    - id: "SN-INTRA-DELETE-02"
+      scope: "within_environment"
+      event: "DeleteCommitted → NewSessionReusesPaneCoordinates"
+      may_change: ["rows", "identity_registry", "next_row_id"]
+      must_preserve: ["deleted_row_tombstone", "unrelated_new_row_visibility"]
+      test: "test_session_navigator_live_row_delete_keeps_materialized_backing_source"
+    - id: "SN-ENV-SWITCH-01"
+      scope: "cross_environment"
+      event: "EnvironmentSwitched"
+      may_change: ["active_environment"]
+      must_preserve: ["source_environment_state", "target_environment_state"]
+      test: "test_switching_between_environments_restores_each_last_active_tab"
+    - id: "SN-ENV-PANE-01"
+      scope: "cross_environment"
+      event: "EnvironmentSwitched with split panes in source and target"
+      may_change: ["active_environment", "physical_focus"]
+      must_preserve: ["source_active_pane", "target_active_pane", "pane_layout"]
+      test: "test_switching_between_environments_preserves_each_active_pane"
+    - id: "SN-ENV-SWITCH-FALLBACK-01"
+      scope: "cross_environment"
+      event: "RememberedTabClosed/Reordered → EnvironmentSwitched"
+      may_change: ["target_last_active_tab"]
+      must_preserve: ["navigation_environment", "surviving_tab_order", "future_switch_stability"]
+      test: "test_environment_last_active_tab_fallback_and_reorder"
+    - id: "SN-ENV-ORDER-01"
+      scope: "cross_environment"
+      event: "LocalAndRemoteIndependentRefresh"
+      may_change: ["target_environment_rows"]
+      must_preserve: ["other_environment_order", "other_environment_selection"]
+      test: "test_session_navigator_state_is_partitioned_by_environment"
+    - id: "SN-ENV-ALIAS-01"
+      scope: "remote_environment"
+      event: "RemoteInitialScan observes Codex session_index.thread_name"
+      may_change: ["remote_label_projection"]
+      must_preserve: ["logical_session_limit", "remote_order", "remote_selection", "resume_independence"]
+      test: "test_remote_session_navigator_codex_alias_enrichment_does_not_compete_for_limit"
+    - id: "SN-ENV-METADATA-01"
+      scope: "remote_environment"
+      event: "RemoteSessionScanSucceeded + UserStateEnrichmentFailed"
+      may_change: ["remote_rows"]
+      must_preserve: ["cached_aliases", "cached_pins", "remote_selection", "entity_scan_result"]
+      test: "test_remote_session_navigator_metadata_failure_preserves_cached_enrichment"
+    - id: "SN-ENV-IDENTITY-01"
+      scope: "within_logical_environment"
+      event: "AuthorityAliasChanged(local → local:<root>)"
+      may_change: ["authority_metadata", "workspace_root"]
+      must_preserve: ["environment_key", "order", "selection", "lifecycle"]
+      test: "test_session_navigator_state_uses_canonical_environment_key"
+    - id: "SN-ENV-BG-01"
+      scope: "background_environment"
+      event: "RemoteMaterializedWhileLocalActive"
+      may_change: ["remote_lifecycle", "remote_binding"]
+      must_preserve: ["active_environment", "local_order", "local_selection", "focus"]
+      test: "test_environment_runtime_root_resolution_updates_non_active_environment_tab_without_stealing_focus"
+    - id: "SN-ENV-CLOSE-01"
+      scope: "cross_environment"
+      event: "CloseActiveTab"
+      may_change: ["current_environment_rows", "current_environment_selection"]
+      must_preserve: ["other_environment_state"]
+      test: "test_closing_active_tab_prefers_same_navigation_environment"
+    - id: "SN-ENV-DISCONNECT-01"
+      scope: "cross_environment"
+      event: "EnvironmentDisconnected"
+      may_change: ["disconnected_environment_state", "active_environment"]
+      must_preserve: ["fallback_environment_order", "fallback_environment_selection"]
+      test: "test_disconnect_environment_closes_all_authority_tabs_and_restores_local"
+
+  check:
+    parser_test: "test_session_navigator_spec_matrix_is_complete_and_linked"
+    rule: "ID/test 唯一；字段完整；test 必须存在；action_write_ownership 与 reducer action/permissions 精确一致；生产 adapter 直接写 state slice 必须为 0"
+
+# ─────────────────────────────────────────────────────────
+# 9.1 面向 AI 编程的原生变更契约
+# ─────────────────────────────────────────────────────────
+ai_change_contract:
+  typed_boundary: "UI/adapter 只能发送 SessionNavigatorAction；不得直接拼接一套平行排序/激活流程"
+  exhaustive_ownership: "transition_permissions 对每个 action 穷尽声明 position/selection/lifecycle 写权限；新增 variant 必须先通过编译器这一关"
+  canonical_identity: "代码和测试统一使用 EnvironmentKey/RowId/identity registry 概念；禁止把 authority alias、tab index、volatile pane id 当领域身份"
+  projection_boundary: "focus/hover/spinner 等渲染输入不得回写持久 selection/order，除非 SPEC 明确授权"
+  persistence_boundary: "pane 可恢复性只能由 PaneNodeSnapshot::into_persistable 归一化；container identity 只能走 PaneConfiguration → LeafSnapshot → pane_container_identities；禁止在 SQLite saver/loader 或单个 UI 调用点补第二套身份/过滤分支"
+  live_identity_failure: "任何 is_live_container=true 的 WorkspaceSessionSnapshot 缺 container_uuid 必须立即失败；禁止为了容错退回 tab/leaf locator"
+  stable_traceability: "每个用户可见契约使用稳定 matrix ID，并绑定一个真实存在的 test 函数"
+  change_protocol: ["SPEC", "UX_MATRIX", "CHECK", "TEST", "GUI_VERIFY"]
+  comment_policy:
+    explain: ["状态所有权", "身份稳定性", "为什么某事件无权写某 state slice", "跨环境边界"]
+    avoid: ["复述语法", "保留已删除旧路径的历史说明", "用临时 workaround 冒充领域规则"]
+
+ai_programming_ux_principles:
+  spatial_memory: "Resume/materialize 原位完成；agent 从历史记录变成 live terminal 时行不跳，用户不用重新寻找上下文"
+  environment_memory: "每个 Environment 记住自己的 tab、pane、Session 顺序与 selection；在本地/远程代码库间往返像切 workspace，而不是重置 UI"
+  background_safety: "后台 agent refresh、remote connect、状态更新只更新所属环境，不抢输入焦点、不改变当前排序"
+  identity_continuity: "同一个 agent session 在 indexed/virtual/restoring/live 阶段保持同一 RowId，状态 chip 或 spinner 变化不制造新行"
+  compact_native_actions: "Resume、Pin、Reorder、Fork/SessionBridge 使用同一行上下文与 typed action，避免跳转到管理页打断编码流"
+  deterministic_feedback: "恢复中、失败、删除中等生命周期由 state machine 投影；重复点击可判定，失败可回滚，不依赖时间猜测"
 
 # ─────────────────────────────────────────────────────────
 # 10. 测试矩阵 (v3 新增)
@@ -470,7 +921,8 @@ test_matrix:
   # 10.1 单步 fixture 测试 (已有, 保留)
   single_step:
     - "pin 组切换不重排"
-    - "refresh append 不跳"
+    - "refresh 已有 order 的行不跳"
+    - "新建行置顶（更大 display_order）"
     - "resume 不跳"
     - "hidden 恢复原位"
     - "merge 不断言排序结果"
@@ -483,7 +935,7 @@ test_matrix:
         - "新建 terminal pane → 检查 is_active=true"
         - "activate 另一个 session → 检查 focus 切换"
         - "pin 当前 session → 检查排序变但 focus 不变"
-        - "reorder 列表 → 检查 active_key 仍指向同一 logical_key"
+        - "reorder 列表 → 检查 selected_row_id 仍指向同一 opaque RowId"
         - "remove 当前 session → 检查 focus 到兄弟"
         - "restore 被删 session → 检查 focus 到新 pane"
 
@@ -498,7 +950,7 @@ test_matrix:
         - "同 tab 两个 leaf + 旁侧 virtual 行"
         - "拖组内任一行跨过 virtual → 整组平移"
         - "两 leaf 仍相邻且 leaf 相对序不变"
-        - "active_key 不变"
+        - "selected_row_id 不变"
 
     - name: "multi-tab delete → same-env neighbor"
       steps:
@@ -507,10 +959,10 @@ test_matrix:
 
     - name: "virtual → live materialize → active 迁移"
       steps:
-        - "有 virtual row, active_key 指向它"
+        - "有 virtual row, selected_row_id 指向它"
         - "activate 它 → spawn terminal"
-        - "terminal materialize → 检查 active_key 迁移到 live key"
-        - "检查旧 virtual key 不在 active_key"
+        - "terminal materialize → 检查 selected_row_id 保持原 opaque RowId"
+        - "检查 live identity alias 解析到同一 RowId，且 position 未变化"
 
     - name: "restoring → user switch away → materialize"
       steps:
@@ -537,7 +989,7 @@ test_matrix:
   sort_stability:
     - "相同 sort key 的多个 session, 排序结果稳定 (多次排序结果相同)"
     - "updated_at 变化后, 已有 order 的行不跳"
-    - "新增行 append 到末尾, 不影响已有行"
+    - "新增行拿到更大 order, 排在非 pin 组顶端, 不影响已有行相对序"
     - "pin 组切换后, 组内顺序不变"
     - "reorder 不得拆散 same_window split 邻接 (EC-17)"
 
@@ -546,7 +998,7 @@ test_matrix:
     - "同一时刻创建的多个 session → logical_key 升序"
     - "updated_at 为 None 的行排最后"
     - "label 相同 → logical_key 兜底"
-    - "materialize 后 id 变化 → order 不丢 (用 logical_key)"
+    - "materialize 后 identity 变化 → order 不丢 (用 opaque RowId)"
 
   # 10.6 预检查 / state transition validator (v3 新增)
   validator:
@@ -558,8 +1010,17 @@ test_matrix:
       - "新建并激活后不能 pin / move-to-top (如果适用)"
       - "deleting session 不在 sessions 中"
       - "restoring session 的 key 存在于 sessions 中 (除非已 materialize)"
-      - "active_key 指向的 session 存在于 sessions 中 (除非正在 restoring)"
+      - "selected_row_id 指向的 session 存在于 sessions 中 (除非正在 restoring)"
       - "Reorder 后同 tab live leaf 必须连续且 leaf 相对序不变"
+
+  environment_navigation:
+    - "ENV-SW-01/02: local 与 remote 往返均恢复各自上次激活 tab"
+    - "ENV-SW-03: remembered tab 关闭后同环境 fallback 并修正记忆"
+    - "ENV-SW-04: tab reorder 后仍按 pane_group EntityId 恢复"
+    - "ENV-SW-05: background remote connect/root resolution 不抢 local focus"
+    - "ENV-SW-06: 同 authority snapshot 元数据变化后关闭 active tab仍留在同环境"
+    - "ENV-SW-07: disconnect multi-tab remote 清除全部 remote tabs 与 remembered tab"
+    - "ENV-SW-08: switch 后 new tab/agent/split 继承当前环境"
 
 # ─────────────────────────────────────────────────────────
 # 11. 标签名解析 (Label Resolution)
@@ -570,6 +1031,10 @@ label_resolution:
     - "display_title (agent session 的 query → summary → fallback_title)"
     - "custom_title (pane group 自定义标题)"
     - "environment_label (环境名, 最后兜底)"
+  enrichment_contract:
+    initial_visibility: "Codex session_index.thread_name、Claude history title、Ashide user alias 必须在列表首次 scan/Refresh 即可见"
+    lifecycle_independence: "Resume/Activate 只能改变 selection/lifecycle/physical binding，禁止承担 label metadata 加载"
+    source_quota: "实体 source 与 sidecar metadata 先按 durable identity 聚合，再按逻辑会话数量应用 limit"
 
 # ─────────────────────────────────────────────────────────
 # 12. 测试约束 (Test Constraints)
@@ -577,10 +1042,10 @@ label_resolution:
 test_constraints:
   isolation: "所有测试用 tempfile::TempDir 隔离"
   snapshot_helper:
-    test_workspace_session_in_environment: "is_live_container 由 id.starts_with('tab:') 决定"
+    test_workspace_session_in_environment: "is_live_container 是显式来源事实；所有 live fixture 必须提供稳定 container_uuid，禁止由 tab locator 推断身份"
     test_indexed_session_snapshot: "构建后立即 is_pinned_by 预赋值"
   merge_test_rule: "merge 测试断言 sources 原始顺序, 不断言排序结果"
-  sort_test_rule: "排序测试覆盖: pin 组切换不重排 / refresh append 不跳 / resume 不跳 / hidden 恢复原位"
+  sort_test_rule: "排序测试覆盖: pin 组切换不重排 / 新建置顶 / refresh 已有行不跳 / resume 不跳 / hidden 恢复原位"
 
 # ─────────────────────────────────────────────────────────
 # 13. 本发布覆盖状态 (ship checklist)
@@ -589,14 +1054,24 @@ ship_coverage:
   production_delete: "unified_flow via reduce(Delete) + DeleteEffects; no preselect/reselect"
   production_activate: "live FocusPane + virtual SpawnTerminal via apply_session_navigator_side_effect"
   production_focus: "activate_tab_internal + Event::PaneFocused → notify/sync; restored marker not overwritten by live key"
-  production_refresh: "single reduce(Refresh) path; track_materialization owns §6.4; no preferred_active_* dual-path"
-  production_reorder: "group-aware UI (split tab = one drag unit) → flatten → reduce(Reorder); active_key + same_window adjacency preserved"
+  production_refresh: "single reduce(Refresh) path; identity reconcile owns §6.4; no preferred_active_* dual-path"
+  production_reorder: "group-aware UI (split tab = one drag unit) → flatten → reduce(Reorder); selected_row_id + same_window adjacency preserved"
   workspace_integration:
     - "EC-01 test_deleting_split_pane_session_keeps_focus_on_sibling_in_same_tab"
     - "EC-02/16 test_deleting_local_tab_session_focuses_same_env_neighbor_tab"
     - "EC-03/09 test_deleting_only_live_local_session_does_not_close_window"
-    - "EC-08/17 test_reorder_session_navigator_sessions_keeps_active_key + split group reorder"
+    - "EC-08/17 test_reorder_session_navigator_sessions_keeps_selected_row_id + split group reorder"
     - "EC-10 test_pin_workspace_session_does_not_change_focus"
     - "EC-14 env delete suite (test_deleting_*_environment_*)"
+    - "ENV-SW-01/02 test_switching_between_environments_restores_each_last_active_tab"
+    - "ENV-SW-PANE-01 test_switching_between_environments_preserves_each_active_pane"
+    - "ENV-SW-03/04 test_environment_last_active_tab_fallback_and_reorder"
+    - "ENV-SW-05 test_environment_runtime_root_resolution_updates_non_active_environment_tab_without_stealing_focus"
+    - "ENV-SW-06 test_closing_active_tab_prefers_same_navigation_environment"
+    - "ENV-SW-07 test_disconnect_environment_closes_all_authority_tabs_and_restores_local"
+    - "SN-INTRA-READONLY-PERSIST-01 persistable pane tree 在 SQLite 前裁剪只读/transient leaf 并折叠 branch"
+    - "SN-INTRA-CONTAINER-PERSIST-01 所有 leaf pane 的 container UUID 独立于 terminal runtime UUID 跨冷启动保持"
+    - "SN-ENV-PLACEHOLDER-IDENTITY-01 runtime placeholder 跨 Environment 往返不退回布局坐标身份"
+    - "ENV-SW-08 existing environment-scoped new terminal/agent/split inheritance suite"
   reducer_unit: "session_navigator_reducer_tests (EC-01..17 + sequences + combinatorial oracle + validator)"
   deferred: []

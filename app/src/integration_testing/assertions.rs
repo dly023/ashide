@@ -96,7 +96,7 @@ pub fn create_a_personal_workflow() -> TestStep {
                         .expect("User UID must be set in tests"),
                     None,
                     ClientId::default(),
-                    StoredObjectEventEntrypoint::ManagementUI,
+                    StoredObjectEventEntrypoint::Unknown,
                     true,
                     ctx,
                 )

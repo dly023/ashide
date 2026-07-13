@@ -45,60 +45,6 @@ fn main() -> Result<()> {
             .file("src/platform/mac/objc/services.m")
             .compile("warp_objc");
 
-        // Build the dock tile plugin
-        println!("cargo:rerun-if-changed=DockTilePlugin/AshideDockTilePlugin.m");
-        println!("cargo:rerun-if-changed=DockTilePlugin/AshideDockTilePlugin.h");
-        println!("cargo:rerun-if-changed=DockTilePlugin/Info.plist");
-        println!("cargo:rerun-if-changed=DockTilePlugin/Makefile");
-
-        let min_macos_version = match env::var("MACOSX_DEPLOYMENT_TARGET") {
-            Ok(v) => v,
-            Err(_) => "10.14".to_string(),
-        };
-        let status = Command::new("make")
-            .current_dir("DockTilePlugin")
-            .env("MACOSX_DEPLOYMENT_TARGET", min_macos_version)
-            .status()
-            .expect("Failed to build dock tile plugin");
-        if !status.success() {
-            panic!("Dock tile plugin build failed");
-        }
-
-        // Copy the dock tile plugin to the output directory
-        let profile = get_build_profile_name();
-        let target_dir = app_target_dir(&profile).expect("Failed to get app target directory");
-        let plugin_src = Path::new("DockTilePlugin/AshideDockTilePlugin.docktileplugin");
-        let plugin_dst = target_dir.join("AshideDockTilePlugin.docktileplugin");
-
-        if !status.success() {
-            fs::remove_dir_all(plugin_src).expect("Failed to clean up plugin directory");
-            panic!("Dock tile plugin build failed");
-        }
-
-        if plugin_src.exists() {
-            fs::remove_dir_all(&plugin_dst).ok(); // Remove existing if any
-            fs::create_dir_all(&plugin_dst).expect("Failed to create plugin directory");
-
-            // Copy the plugin directory recursively
-            for entry in WalkDir::new(plugin_src) {
-                let entry = entry.expect("Failed to read plugin directory");
-                let path = entry.path();
-                let relative = path
-                    .strip_prefix(plugin_src)
-                    .expect("Failed to strip path prefix");
-                let target = plugin_dst.join(relative);
-
-                if path.is_dir() {
-                    fs::create_dir_all(target).expect("Failed to create plugin subdirectory");
-                } else {
-                    fs::copy(path, target).expect("Failed to copy plugin file");
-                }
-            }
-
-            // Clean up the source plugin directory after copying
-            fs::remove_dir_all(plugin_src).expect("Failed to clean up plugin directory");
-        }
-
         // In standalone mode, embed the Info.plist file. We don't use embed_plist! for this
         // because the plist file is dynamically generated.
         if env::var("CARGO_FEATURE_STANDALONE").is_ok() {
@@ -212,17 +158,6 @@ fn generate_channel_config_if_needed(target_family: &str, target_os: &str) {
             panic!("Failed to write config to {}: {err}", config_path.display())
         });
     }
-}
-
-fn get_build_profile_name() -> String {
-    // The profile name is always the 3rd last part of the path (with 1 based indexing).
-    // e.g. /code/core/target/cli/build/my-build-info-9f91ba6f99d7a061/out
-    env::var("OUT_DIR")
-        .expect("OUT_DIR must be set")
-        .split(std::path::MAIN_SEPARATOR)
-        .nth_back(3)
-        .expect("could not get profile name")
-        .to_string()
 }
 
 fn add_features(target_family: &str, target_os: &str) {

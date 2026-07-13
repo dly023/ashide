@@ -1,6 +1,6 @@
 //! Provider connection 编辑器 pane(中央 pane,通过 Environment provider 管理入口打开)。
 //!
-//! 持久化(`LeafContents::ProviderConnection { .. }` 在 `is_persisted()` 返回 false),
+//! 持久化(`PaneNodeSnapshot::into_persistable` 会裁剪 `LeafContents::ProviderConnection { .. }`),
 //! 业务数据走 provider connection store；底层 SSH schema 是兼容边界。
 
 use warpui::{AppContext, ModelHandle, View, ViewContext, ViewHandle};

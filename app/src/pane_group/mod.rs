@@ -1685,6 +1685,7 @@ impl PaneGroup {
         deferred_panes: &mut Vec<(PaneId, LeafSnapshot)>,
         pending_ambient_restorations: &mut Vec<(AmbientAgentTaskId, PaneId)>,
     ) -> anyhow::Result<(PaneData, InitialFocus)> {
+        let container_uuid = leaf.container_uuid.clone();
         let custom_vertical_tabs_title = leaf.custom_vertical_tabs_title.clone();
         let result = match leaf.contents {
             LeafContents::AIDocument(_) => {
@@ -1709,6 +1710,7 @@ impl PaneGroup {
                 Ok((PaneData::new(pane_id), focus))
             }
             LeafContents::Terminal(terminal_snapshot) => {
+                let persisted_terminal_snapshot = terminal_snapshot.clone();
                 let uuid = PaneUuid(terminal_snapshot.uuid.clone());
                 let block_list = block_lists.get(&uuid);
 
@@ -1787,6 +1789,7 @@ impl PaneGroup {
                     model_event_sender,
                     ctx,
                 );
+                pane_data.restore_cli_agent_binding(&persisted_terminal_snapshot);
 
                 let terminal_pane_id = pane_data.terminal_pane_id();
                 let pane_id = terminal_pane_id.into();
@@ -2101,14 +2104,16 @@ impl PaneGroup {
             }
         };
 
-        if let (Ok((pane_data, _)), Some(title)) = (&result, custom_vertical_tabs_title.as_deref())
-        {
+        if let Ok((pane_data, _)) = &result {
             if let PaneNode::Leaf(pane_id) = &pane_data.root {
                 if let Some(pane) = pane_contents.get(pane_id) {
                     pane.as_pane()
                         .pane_configuration()
                         .update(ctx, |configuration, ctx| {
-                            configuration.set_custom_vertical_tabs_title(title, ctx);
+                            configuration.restore_container_uuid(container_uuid.clone());
+                            if let Some(title) = custom_vertical_tabs_title.as_deref() {
+                                configuration.set_custom_vertical_tabs_title(title, ctx);
+                            }
                         });
                 }
             }
@@ -2125,6 +2130,7 @@ impl PaneGroup {
         ctx: &mut ViewContext<Self>,
     ) -> (PaneData, InitialFocus) {
         for (placeholder_id, leaf) in deferred_panes {
+            let container_uuid = leaf.container_uuid.clone();
             let custom_vertical_tabs_title = leaf.custom_vertical_tabs_title.clone();
             match leaf.contents {
                 LeafContents::AIDocument(aidocument_snapshot) => {
@@ -2174,14 +2180,15 @@ impl PaneGroup {
                             if result.1.focused_pane == Some(placeholder_id) {
                                 result.1.focused_pane = Some(real_id);
                             }
-                            if let Some(title) = custom_vertical_tabs_title.as_deref() {
-                                pane.as_pane().pane_configuration().update(
-                                    ctx,
-                                    |configuration, ctx| {
+                            pane.as_pane().pane_configuration().update(
+                                ctx,
+                                |configuration, ctx| {
+                                    configuration.restore_container_uuid(container_uuid.clone());
+                                    if let Some(title) = custom_vertical_tabs_title.as_deref() {
                                         configuration.set_custom_vertical_tabs_title(title, ctx);
-                                    },
-                                );
-                            }
+                                    }
+                                },
+                            );
                             pane_contents.insert(real_id, pane);
                         }
                     }
@@ -2248,20 +2255,36 @@ impl PaneGroup {
                         })
                     }
                 };
-                let custom_vertical_tabs_title = self.pane_contents.get(pane_id).and_then(|pane| {
-                    pane.as_pane()
-                        .pane_configuration()
-                        .as_ref(app)
-                        .custom_vertical_tabs_title()
-                        .map(str::to_owned)
-                });
+                let pane_configuration = self
+                    .pane_contents
+                    .get(pane_id)
+                    .expect("pane tree leaf 必须存在对应内容")
+                    .as_pane()
+                    .pane_configuration();
+                let pane_configuration = pane_configuration.as_ref(app);
+                let custom_vertical_tabs_title = pane_configuration
+                    .custom_vertical_tabs_title()
+                    .map(str::to_owned);
                 PaneNodeSnapshot::Leaf(LeafSnapshot {
+                    container_uuid: pane_configuration.container_uuid().to_vec(),
                     is_focused: *pane_id == self.focused_pane_id(app),
                     custom_vertical_tabs_title,
                     contents,
                 })
             }
         }
+    }
+
+    /// 返回 pane 的稳定容器身份。Session Navigator 等用户状态只能使用该身份，
+    /// 不能使用 pane index、tab index 或运行时 EntityId。
+    pub fn container_uuid_for_pane_id(&self, pane_id: PaneId, app: &AppContext) -> Option<Vec<u8>> {
+        self.pane_contents.get(&pane_id).map(|pane| {
+            pane.as_pane()
+                .pane_configuration()
+                .as_ref(app)
+                .container_uuid()
+                .to_vec()
+        })
     }
 
     /// Find the PaneId for a given TerminalView EntityId if it exists within this PaneGroup.

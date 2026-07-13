@@ -30,14 +30,14 @@ use crate::{
 use warp_core::semantic_selection::SemanticSelection;
 
 use super::{
-    app_icon::AppIconSettings, app_installation_detection::UserAppInstallDetectionSettings,
-    initializer::SettingsInitializer, language::LanguageSettings,
-    native_preference::NativePreferenceSettings, network::NetworkSettings, AISettings,
-    AccessibilitySettings, AliasExpansionSettings, AppEditorSettings, AutoupdateSettings,
-    BlockVisibilitySettings, CodeSettings, DebugSettings, EmacsBindingsSettings, FontSettings,
-    FontSettingsChangedEvent, GPUSettings, InputBoxType, InputModeSettings, InputSettings,
-    LocalDrivePrivacySettings, PaneSettings, SameLinePromptBlockSettings, ScrollSettings,
-    SelectionSettings, SshSettings, ThemeSettings, VimBannerSettings,
+    app_installation_detection::UserAppInstallDetectionSettings, initializer::SettingsInitializer,
+    language::LanguageSettings, native_preference::NativePreferenceSettings,
+    network::NetworkSettings, AISettings, AccessibilitySettings, AliasExpansionSettings,
+    AppEditorSettings, AutoupdateSettings, BlockVisibilitySettings, CodeSettings, DebugSettings,
+    EmacsBindingsSettings, FontSettings, FontSettingsChangedEvent, GPUSettings, InputBoxType,
+    InputModeSettings, InputSettings, LocalDrivePrivacySettings, PaneSettings,
+    SameLinePromptBlockSettings, ScrollSettings, SelectionSettings, SshSettings, ThemeSettings,
+    VimBannerSettings,
 };
 
 pub struct UserDefaultsOnStartup {
@@ -81,7 +81,6 @@ pub fn register_all_settings(ctx: &mut AppContext) {
     AutoupdateSettings::register(ctx);
     LocalDrivePrivacySettings::register(ctx);
     UserAppInstallDetectionSettings::register(ctx);
-    AppIconSettings::register(ctx);
     LanguageSettings::register(ctx);
     AppEditorSettings::register(ctx);
     InputSettings::register(ctx);

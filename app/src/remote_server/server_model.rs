@@ -187,13 +187,19 @@ impl PendingFileOps {
     }
 }
 
-// Linux libc::ioctl 的 request 参数是 c_ulong(u64),macOS 是 c_int(i32)。
-// 统一用 c_ulong 以兼容两者——c_ulong 在 macOS 上也能传给 ioctl。
-#[cfg(unix)]
-const TIOCSCTTY_REQUEST: libc::c_ulong = libc::TIOCSCTTY as libc::c_ulong;
+// `libc::ioctl` 的 request ABI 取决于目标 libc：Linux musl 使用 c_int，
+// Linux glibc 与 macOS 使用 c_ulong。remote helper 固定构建为 musl，不能用
+// 本机 macOS 能编译的类型掩盖交叉编译错误。
+#[cfg(all(target_os = "linux", target_env = "musl"))]
+type IoctlRequest = libc::c_int;
+#[cfg(all(unix, not(all(target_os = "linux", target_env = "musl"))))]
+type IoctlRequest = libc::c_ulong;
 
 #[cfg(unix)]
-const TIOCSWINSZ_REQUEST: libc::c_ulong = libc::TIOCSWINSZ as libc::c_ulong;
+const TIOCSCTTY_REQUEST: IoctlRequest = libc::TIOCSCTTY as IoctlRequest;
+
+#[cfg(unix)]
+const TIOCSWINSZ_REQUEST: IoctlRequest = libc::TIOCSWINSZ as IoctlRequest;
 
 #[cfg(unix)]
 fn duplicate_pty_slave(slave_fd: std::os::fd::RawFd, label: &str) -> Result<std::fs::File, String> {

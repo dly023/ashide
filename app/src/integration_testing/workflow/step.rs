@@ -32,7 +32,7 @@ pub fn create_a_personal_workflow(key: impl Into<String>) -> TestStep {
                         .expect("User UID must be set in tests"),
                     None,
                     client_id,
-                    StoredObjectEventEntrypoint::ManagementUI,
+                    StoredObjectEventEntrypoint::Unknown,
                     true,
                     ctx,
                 );

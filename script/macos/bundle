@@ -357,11 +357,12 @@ fi
 
 ICON_ASSET_CHANNEL="$RELEASE_CHANNEL"
 if [[ ! -d "$WORKSPACE_ROOT_DIR/app/channels/$ICON_ASSET_CHANNEL" ]]; then
+    echo "No app/channels/$ICON_ASSET_CHANNEL icon tree; falling back to canonical Ashide icons at app/channels/oss/icon/"
     ICON_ASSET_CHANNEL="oss"
 fi
+echo "Using icon asset channel: $ICON_ASSET_CHANNEL (canonical brand: app/channels/oss/icon/)"
 
 OUT_DIR="target/$TARGET_PROFILE_DIR/bundle/osx"
-DOCK_TILE_PLUGIN_DIR="target/$TARGET_PROFILE_DIR/AshideDockTilePlugin.docktileplugin"
 
 # Handle specific architecture targeting
 if [[ -n "$TARGET_ARCH" ]]; then
@@ -551,15 +552,6 @@ if [[ "$ARTIFACT" == "app" ]]; then
     echo "Copying .dSYM into $OUT_DIR/$ASHIDE_BIN.dSYM"
     cp -HR "target/$DEFAULT_TARGET/$TARGET_PROFILE_DIR/$ASHIDE_BIN.dSYM" "$OUT_DIR/"
   fi
-
-  # Note that the dock tile plugin is pre-built for both arm64 and x86_64 so we don't need to run lipo on it.
-  echo "Creating PlugIns directory and copying pre-built DockTilePlugin..."
-  mkdir -p "$BUNDLE_DIR/$ASHIDE_APP_NAME.app/Contents/PlugIns"
-  cp -R "$DOCK_TILE_PLUGIN_DIR" "$BUNDLE_DIR/$ASHIDE_APP_NAME.app/Contents/PlugIns/"
-
-  echo "Updating plist with dock tile plugin entries"
-  plutil -insert NSDockTilePlugIn -string "AshideDockTilePlugin.docktileplugin" "$BUNDLE_DIR"/$ASHIDE_APP_NAME.app/Contents/Info.plist
-  plutil -insert MainAppBundleIdentifier -string "$BUNDLE_ID" "$BUNDLE_DIR"/$ASHIDE_APP_NAME.app/Contents/PlugIns/AshideDockTilePlugin.docktileplugin/Contents/Info.plist
 
   BUNDLED_RESOURCES_DIR="$BUNDLE_DIR/$ASHIDE_APP_NAME.app/Contents/Resources"
   echo "Preparing bundled resources..."
@@ -766,7 +758,7 @@ if [[ "$ARTIFACT" = app ]]; then
       --volname Ashide
       # For --no-internet-enable, see https://github.com/create-dmg/create-dmg/issues/179
       --no-internet-enable
-      --background app/assets/resources/mac/warp_install_image.png
+      --background app/assets/resources/mac/ashide_install_image.png
       --icon-size 128
       --window-size 700 500
       --format UDZO
@@ -883,7 +875,6 @@ if [ "${GITHUB_ACTIONS}" == "true" ]; then
     fi
   fi
 
-  echo "dock_tile_plugin_dir=$DOCK_TILE_PLUGIN_DIR" >> "$GITHUB_OUTPUT"
   echo "frameworks_dir=app/frameworks/${FRAMEWORK_OVERRIDE:-default}" >> "$GITHUB_OUTPUT"
   
   # For full bundles, output DMG information

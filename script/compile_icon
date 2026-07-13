@@ -1,11 +1,16 @@
 #!/bin/bash
 #
-# Compile a .icon bundle using actool and update the app's Info.plist
-# to support macOS Sequoia's icon tinting feature.
+# 把 Ashide 规范图标编译进 .app bundle，并同步更新 Info.plist。
+#
+# 唯一品牌资源位于：
+#   app/channels/oss/icon/padded/*.png
+#   app/channels/oss/icon/AppIcon.icon/
+#
+# 没有独立图标树的 channel 必须传入 `oss`；script/macos/bundle 会负责显式回落。
 #
 # Usage: compile_icon <channel> <app_bundle_path>
-#   channel: The release channel (e.g., stable)
-#   app_bundle_path: Path to the .app bundle (e.g., Warp.app)
+#   channel: app/channels/ 下的图标资源 channel（通常是 oss）
+#   app_bundle_path: .app bundle 路径（例如 Ashide.app）
 
 set -e
 
@@ -24,9 +29,23 @@ ICON_BUNDLE_PATH="$REPO_ROOT/app/channels/$CHANNEL/icon/AppIcon.icon"
 PADDED_ICON_PATH="$REPO_ROOT/app/channels/$CHANNEL/icon/padded"
 BUNDLED_RESOURCES_DIR="$APP_BUNDLE_PATH/Contents/Resources"
 PARTIAL_INFO_PLIST="$(dirname "$APP_BUNDLE_PATH")/partial-icon-info.plist"
+PLIST_PATH="$APP_BUNDLE_PATH/Contents/Info.plist"
+
+set_bundle_icon_file() {
+    # cargo-bundle 可能残留另一份默认声明；最终 bundle 只能指向 AppIcon。
+    plutil -replace CFBundleIconFile -string "AppIcon" "$PLIST_PATH"
+    plutil -remove CFBundleIconName "$PLIST_PATH" 2>/dev/null || true
+    plutil -remove NSDockTilePlugIn "$PLIST_PATH" 2>/dev/null || true
+    # 删除 cargo-bundle 的中间产物，避免 Finder/Dock 选择错误资源。
+    rm -f "$BUNDLED_RESOURCES_DIR/Ashide.icns"
+    # 强制构建也必须能清掉旧 bundle 遗留的动态图标覆盖物。
+    rm -rf "$APP_BUNDLE_PATH/Contents/PlugIns/AshideDockTilePlugin.docktileplugin"
+    rmdir "$APP_BUNDLE_PATH/Contents/PlugIns" 2>/dev/null || true
+    rm -f "$APP_BUNDLE_PATH/Icon"$'\r'
+}
 
 if [[ "$CHANNEL" = "oss" && -d "$PADDED_ICON_PATH" ]]; then
-    echo "Compiling classic .icns icon for $CHANNEL channel"
+    echo "Compiling classic .icns icon from app/channels/$CHANNEL/icon/padded"
 
     ICONSET_PATH="$(mktemp -d)/AppIcon.iconset"
     mkdir -p "$ICONSET_PATH"
@@ -53,11 +72,9 @@ if [[ "$CHANNEL" = "oss" && -d "$PADDED_ICON_PATH" ]]; then
 
     iconutil -c icns "$ICONSET_PATH" -o "$BUNDLED_RESOURCES_DIR/AppIcon.icns"
     rm -f "$BUNDLED_RESOURCES_DIR/Assets.car" "$PARTIAL_INFO_PLIST"
+    set_bundle_icon_file
 
-    plutil -replace CFBundleIconFile -string "AppIcon" "$APP_BUNDLE_PATH/Contents/Info.plist"
-    plutil -remove CFBundleIconName "$APP_BUNDLE_PATH/Contents/Info.plist" 2>/dev/null || true
-
-    echo "Classic icon compiled successfully."
+    echo "Classic AppIcon.icns compiled successfully."
     exit 0
 fi
 
@@ -67,7 +84,7 @@ if [[ ! -d "$ICON_BUNDLE_PATH" ]]; then
         echo "Warning: no .icon bundle found for $CHANNEL channel at $ICON_BUNDLE_PATH; skipping adaptive icon compilation." >&2
         exit 0
     fi
-    echo "Error: .icon bundle not found at $ICON_BUNDLE_PATH" >&2
+    echo "Error: .icon bundle not found at $ICON_BUNDLE_PATH (canonical brand is app/channels/oss/icon/)" >&2
     exit 1
 fi
 
@@ -89,12 +106,8 @@ if [[ ! -f "$BUNDLED_RESOURCES_DIR/Assets.car" ]]; then
     echo "(Note that XCode version <26 does not support .icon bundles. Your version: $XCODE_VERSION)." >&2
 fi
 
-# Update Info.plist to reference AppIcon instead of the old .icns
-plutil -replace CFBundleIconFile -string "AppIcon" "$APP_BUNDLE_PATH/Contents/Info.plist"
-plutil -insert CFBundleIconName -string "AppIcon" "$APP_BUNDLE_PATH/Contents/Info.plist" 2>/dev/null || \
-  plutil -replace CFBundleIconName -string "AppIcon" "$APP_BUNDLE_PATH/Contents/Info.plist"
+set_bundle_icon_file
+plutil -insert CFBundleIconName -string "AppIcon" "$PLIST_PATH" 2>/dev/null || \
+  plutil -replace CFBundleIconName -string "AppIcon" "$PLIST_PATH"
 
-# Get the app name from the bundle
-APP_NAME=$(basename "$APP_BUNDLE_PATH" .app)
-
-echo "Icon compiled successfully."
+echo "Icon compiled successfully (CFBundleIconFile=AppIcon)."

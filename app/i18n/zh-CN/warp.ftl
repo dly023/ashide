@@ -1035,7 +1035,6 @@ settings-exec-profile-editor-mcp-denylist-desc = 不允许被 Oz 调用的 MCP �
 # Categories
 settings-appearance-category-themes = 主题
 settings-appearance-category-language = 语言
-settings-appearance-category-icon = 图标
 settings-appearance-category-window = 窗口
 settings-appearance-category-input = 输入
 settings-appearance-category-panes = 窗格
@@ -1054,9 +1053,6 @@ settings-appearance-theme-sync-os-label = 跟随系统
 settings-appearance-theme-sync-os-description = 当系统切换浅色/深色时自动跟随。
 
 # Custom App Icon widget
-settings-appearance-custom-icon-label = 自定义应用图标
-settings-appearance-custom-icon-bundle-warning = 修改应用图标需要应用以 bundle 形式运行。
-settings-appearance-custom-icon-restart-warning = 你可能需要重启 Ashide 才能让 macOS 应用所选图标样式。
 
 # Window widgets
 settings-appearance-window-custom-size-label = 以自定义尺寸打开新窗口

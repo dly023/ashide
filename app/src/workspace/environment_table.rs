@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use warp_core::{HostId, SessionId};
+use warpui::EntityId;
 
 use crate::app_state::{
     EnvironmentKind, EnvironmentLifecycleState, EnvironmentSnapshot, WorkspaceSessionSnapshot,
@@ -26,10 +27,11 @@ use crate::workspace::environment_backend::{
     AgentTabEntry, ForkEntry, PendingEnvironmentRuntimeSessionRestore,
 };
 use crate::workspace::environment_runtime::{
-    EnvironmentCliAgentSessionUserState, EnvironmentRuntimeSpawnPlan, EnvironmentRuntimeStatus,
-    EnvironmentRuntimeTarget, EnvironmentRuntimeTerminalSpawn, TerminalBootstrapSpawn,
-    TerminalBootstrapTarget,
+    environment_navigation_key, EnvironmentCliAgentSessionUserState, EnvironmentRuntimeSpawnPlan,
+    EnvironmentRuntimeStatus, EnvironmentRuntimeTarget, EnvironmentRuntimeTerminalSpawn,
+    TerminalBootstrapSpawn, TerminalBootstrapTarget,
 };
+use crate::workspace::view::session_navigator_reducer::SessionNavigatorState;
 
 /// One row in the environment table. Holds the environment snapshot, runtime
 /// handle (if remote), transport generations, home root, pending user intents,
@@ -139,6 +141,12 @@ pub(crate) struct EnvironmentTable {
     active_authority: Option<String>,
     /// Reverse lookup: synthetic session → authority (remote only).
     session_to_authority: HashMap<SessionId, String>,
+    /// 每个逻辑 Environment 独立记忆最近激活 tab 的稳定实体身份。
+    last_active_tab_by_navigation_key: HashMap<String, EntityId>,
+    /// Session Navigator 是逻辑 Environment 的 UI 模型，而不是某次 authority/
+    /// transport 连接的附属字段。`local:/path` 等 authority alias 必须共享同一份
+    /// 状态，重连或 workspace root 变化也不能制造新的 selection/order 分区。
+    session_navigator_state_by_navigation_key: HashMap<String, SessionNavigatorState>,
     /// Monotonic allocator for runtime synthetic session IDs.
     next_runtime_session_id: u64,
 }
@@ -147,6 +155,11 @@ impl EnvironmentTable {
     // --- Active environment ---
 
     pub(crate) fn set_active_authority(&mut self, authority: Option<String>) {
+        if let Some(authority) = authority.as_deref() {
+            self.session_navigator_state_by_navigation_key
+                .entry(environment_navigation_key(authority).to_owned())
+                .or_default();
+        }
         self.active_authority = authority;
     }
 
@@ -155,6 +168,38 @@ impl EnvironmentTable {
             .as_ref()
             .and_then(|authority| self.entries.get(authority))
             .map(|entry| entry.snapshot.clone())
+    }
+
+    pub(crate) fn active_session_navigator_state(&self) -> Option<&SessionNavigatorState> {
+        let authority = self.active_authority.as_deref()?;
+        self.session_navigator_state_by_navigation_key
+            .get(environment_navigation_key(authority))
+    }
+
+    pub(crate) fn active_session_navigator_state_mut(
+        &mut self,
+    ) -> Option<&mut SessionNavigatorState> {
+        let authority = self.active_authority.as_deref()?;
+        self.session_navigator_state_by_navigation_key
+            .get_mut(environment_navigation_key(authority))
+    }
+
+    pub(crate) fn remember_active_tab(&mut self, navigation_key: String, tab_id: EntityId) {
+        self.last_active_tab_by_navigation_key
+            .insert(navigation_key, tab_id);
+    }
+
+    pub(crate) fn last_active_tab(&self, navigation_key: &str) -> Option<EntityId> {
+        self.last_active_tab_by_navigation_key
+            .get(navigation_key)
+            .copied()
+    }
+
+    pub(crate) fn forget_navigation_context(&mut self, navigation_key: &str) {
+        self.last_active_tab_by_navigation_key
+            .remove(navigation_key);
+        self.session_navigator_state_by_navigation_key
+            .remove(navigation_key);
     }
 
     // --- Entry access ---
@@ -220,6 +265,9 @@ impl EnvironmentTable {
     /// dormant (remote) or connected (local) entry.
     pub(crate) fn upsert(&mut self, environment: EnvironmentSnapshot) {
         let authority = environment.authority_key.clone();
+        self.session_navigator_state_by_navigation_key
+            .entry(environment_navigation_key(&authority).to_owned())
+            .or_default();
         self.entries
             .entry(authority)
             .and_modify(|entry| entry.snapshot = environment.clone())
@@ -882,5 +930,96 @@ mod tests {
         assert_eq!(entry.synthetic_session_id, None);
         assert_eq!(entry.status, EnvironmentRuntimeStatus::Dormant);
         assert_eq!(table.authority_for_session(session), None);
+    }
+
+    #[test]
+    fn remembers_last_active_tab_by_navigation_key() {
+        let mut table = EnvironmentTable::default();
+        let first_tab = EntityId::new();
+        let second_tab = EntityId::new();
+
+        table.remember_active_tab("local".to_owned(), first_tab);
+        assert_eq!(table.last_active_tab("local"), Some(first_tab));
+
+        table.remember_active_tab("local".to_owned(), second_tab);
+        assert_eq!(table.last_active_tab("local"), Some(second_tab));
+
+        table.forget_navigation_context("local");
+        assert_eq!(table.last_active_tab("local"), None);
+    }
+
+    #[test]
+    fn test_session_navigator_state_uses_canonical_environment_key() {
+        let local = EnvironmentSnapshot::local(None);
+        let mut local_with_root = EnvironmentSnapshot::local(Some("/tmp/project".to_owned()));
+        local_with_root.authority_key = "local:/tmp/project".to_owned();
+        let mut table = EnvironmentTable::default();
+        table.upsert(local.clone());
+        table.upsert(local_with_root.clone());
+
+        table.set_active_authority(Some(local.authority_key));
+        table
+            .active_session_navigator_state_mut()
+            .expect("canonical local navigator state")
+            .selected_row_id = Some("local::agent:codex:a".to_owned());
+
+        table.set_active_authority(Some(local_with_root.authority_key));
+        assert_eq!(
+            table
+                .active_session_navigator_state()
+                .expect("local authority alias must reuse navigator state")
+                .selected_row_id
+                .as_deref(),
+            Some("local::agent:codex:a")
+        );
+    }
+
+    #[test]
+    fn test_session_navigator_state_is_partitioned_by_environment() {
+        let local = EnvironmentSnapshot::local(None);
+        let remote = EnvironmentSnapshot::runtime_transport(
+            EnvironmentKind::Ssh,
+            "test".to_string(),
+            "ssh:test".to_string(),
+            Some("test".to_string()),
+            None,
+            EnvironmentLifecycleState::Dormant,
+        );
+        let mut table = EnvironmentTable::default();
+        table.upsert(local.clone());
+        table.upsert(remote.clone());
+
+        table.set_active_authority(Some(local.authority_key.clone()));
+        let local_state = table
+            .active_session_navigator_state_mut()
+            .expect("local navigator state");
+        local_state.selected_row_id = Some("local::agent:codex:a".to_string());
+        local_state
+            .display_order
+            .insert("local::agent:codex:a".to_string(), 7);
+
+        table.set_active_authority(Some(remote.authority_key.clone()));
+        let remote_state = table
+            .active_session_navigator_state_mut()
+            .expect("remote navigator state");
+        assert!(remote_state.selected_row_id.is_none());
+        assert!(remote_state.display_order.is_empty());
+        remote_state.selected_row_id = Some("ssh:test::agent:codex:b".to_string());
+        remote_state
+            .display_order
+            .insert("ssh:test::agent:codex:b".to_string(), 3);
+
+        table.set_active_authority(Some(local.authority_key));
+        let restored_local = table
+            .active_session_navigator_state()
+            .expect("restored local navigator state");
+        assert_eq!(
+            restored_local.selected_row_id.as_deref(),
+            Some("local::agent:codex:a")
+        );
+        assert_eq!(restored_local.display_order["local::agent:codex:a"], 7);
+        assert!(!restored_local
+            .display_order
+            .contains_key("ssh:test::agent:codex:b"));
     }
 }

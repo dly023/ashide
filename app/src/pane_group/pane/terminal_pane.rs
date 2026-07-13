@@ -1,7 +1,7 @@
 //! Implementation of terminal panes.
 #[cfg(feature = "local_fs")]
 use crate::pane_group::CodeSource;
-use std::sync::mpsc::SyncSender;
+use std::{cell::RefCell, sync::mpsc::SyncSender};
 
 use warpui::{
     AppContext, EntityId, ModelHandle, SingletonEntity, ViewContext, ViewHandle, WindowId,
@@ -37,6 +37,30 @@ use super::{
 
 pub type TerminalPaneView = PaneView<TerminalView>;
 
+#[derive(Clone)]
+struct PersistedCliAgentBinding {
+    agent: Option<String>,
+    command: Option<String>,
+    origin: Option<CliAgentSessionOrigin>,
+    session_id: Option<String>,
+}
+
+impl PersistedCliAgentBinding {
+    fn from_snapshot(snapshot: &TerminalPaneSnapshot) -> Option<Self> {
+        let binding = Self {
+            agent: snapshot.cli_agent.clone(),
+            command: snapshot.cli_command.clone(),
+            origin: snapshot.cli_agent_origin.clone(),
+            session_id: snapshot.cli_agent_session_id.clone(),
+        };
+        (binding.agent.is_some()
+            || binding.command.is_some()
+            || binding.origin.is_some()
+            || binding.session_id.is_some())
+        .then_some(binding)
+    }
+}
+
 /// Data kept for terminal panes.
 pub struct TerminalPane {
     model_event_sender: Option<SyncSender<ModelEvent>>,
@@ -45,6 +69,11 @@ pub struct TerminalPane {
     uuid: Vec<u8>,
 
     pane_configuration: ModelHandle<PaneConfiguration>,
+
+    /// 冷启动恢复的 provider binding。它是 pane 的持久身份，而不是 Resume
+    /// 的副作用；一旦观察到新的 CLI agent，旧 binding 立即失效，避免新会话
+    /// 暂时继承旧会话别名。
+    persisted_cli_agent_binding: RefCell<Option<PersistedCliAgentBinding>>,
 
     /// Defining `terminal_manager` before `view` means that `terminal_manager`
     /// gets dropped first (guaranteed by the language), which halts the event
@@ -78,8 +107,14 @@ impl TerminalPane {
             model_event_sender,
             uuid,
             pane_configuration,
+            persisted_cli_agent_binding: RefCell::new(None),
             view,
         }
+    }
+
+    pub(in crate::pane_group) fn restore_cli_agent_binding(&self, snapshot: &TerminalPaneSnapshot) {
+        *self.persisted_cli_agent_binding.borrow_mut() =
+            PersistedCliAgentBinding::from_snapshot(snapshot);
     }
 
     /// The [`PaneView<TerminalView>`] for this pane.
@@ -301,7 +336,7 @@ impl PaneContent for TerminalPane {
         let detected_cli_agent_resume_session_id = detected_cli_agent_session
             .as_ref()
             .and_then(|(agent, _)| view.detected_cli_agent_resume_session_id(app, *agent));
-        let cli_agent = cli_agent_session
+        let current_cli_agent = cli_agent_session
             .as_ref()
             .map(|session| session.agent.to_serialized_name())
             .or_else(|| {
@@ -309,7 +344,7 @@ impl PaneContent for TerminalPane {
                     .as_ref()
                     .map(|(agent, _)| agent.to_serialized_name())
             });
-        let cli_command = cli_agent_session
+        let current_cli_command = cli_agent_session
             .as_ref()
             .map(|session| {
                 session
@@ -326,7 +361,7 @@ impl PaneContent for TerminalPane {
                             .unwrap_or_else(|| agent.command_prefix().to_string())
                     })
             });
-        let cli_agent_origin = cli_agent_session
+        let current_cli_agent_origin = cli_agent_session
             .as_ref()
             .map(|session| {
                 if session.listener.is_some() {
@@ -340,11 +375,37 @@ impl PaneContent for TerminalPane {
                     .as_ref()
                     .map(|_| CliAgentSessionOrigin::CommandDetected)
             });
-        let cli_agent_session_id = cli_agent_session
+        let current_cli_agent_session_id = cli_agent_session
             .as_ref()
             .and_then(|session| session.session_context.session_id.clone())
             .or(cli_agent_session_resume_session_id)
             .or(detected_cli_agent_resume_session_id);
+        let current_binding = PersistedCliAgentBinding {
+            agent: current_cli_agent,
+            command: current_cli_command,
+            origin: current_cli_agent_origin,
+            session_id: current_cli_agent_session_id,
+        };
+        let effective_binding = if current_binding.agent.is_some() {
+            // 新 agent 已进入该 pane：用新 binding 原子替换旧 binding。保留这份
+            // last-known identity，使 agent 结束后的后续保存不会再次抹掉别名关联。
+            *self.persisted_cli_agent_binding.borrow_mut() = Some(current_binding.clone());
+            Some(current_binding)
+        } else {
+            self.persisted_cli_agent_binding.borrow().clone()
+        };
+        let cli_agent = effective_binding
+            .as_ref()
+            .and_then(|binding| binding.agent.clone());
+        let cli_command = effective_binding
+            .as_ref()
+            .and_then(|binding| binding.command.clone());
+        let cli_agent_origin = effective_binding
+            .as_ref()
+            .and_then(|binding| binding.origin.clone());
+        let cli_agent_session_id = effective_binding
+            .as_ref()
+            .and_then(|binding| binding.session_id.clone());
 
         // Capture the current input_config from the AI input model
         let current_input_config = view.input_config(app.as_ref());

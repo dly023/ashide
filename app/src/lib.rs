@@ -5,6 +5,8 @@ mod agent_memory;
 mod ai;
 mod alloc;
 mod antivirus;
+#[cfg(test)]
+mod app_icon_contract_tests;
 mod app_interaction;
 #[cfg(target_os = "macos")]
 mod app_menus;
@@ -890,7 +892,8 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
             || std::env::var("WARPUI_USE_REAL_DISPLAY_IN_INTEGRATION_TESTS").is_ok();
         app_builder.set_activate_on_launch(activate_on_launch);
 
-        let dev_icon = ASSETS.get("bundled/png/local.png")?;
+        let dev_icon =
+            Cow::Borrowed(include_bytes!("../channels/oss/icon/padded/512x512.png").as_slice());
         app_builder.set_dev_icon(dev_icon);
 
         app_builder.set_menu_bar_builder(app_menus::menu_bar);
@@ -1238,11 +1241,6 @@ fn initialize_app(
     ctx.add_singleton_model(|_| SettingsPaneManager::new());
     ctx.add_singleton_model(|_| AIFactManager::new());
     ctx.add_singleton_model(|_| ExecutionProfileEditorManager::default());
-
-    #[cfg(target_os = "macos")]
-    if !launch_mode.is_headless() {
-        AppearanceManager::as_ref(ctx).set_app_icon(ctx);
-    }
 
     #[cfg(feature = "local_tty")]
     terminal::available_shells::register(ctx);

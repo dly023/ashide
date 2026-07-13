@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionUserState {
     #[serde(default)]
     pub aliases: HashMap<String, String>,
@@ -89,9 +89,13 @@ fn read_state_from_path(path: &Path) -> Result<SessionUserState, String> {
     let Ok(contents) = fs::read_to_string(path) else {
         return Ok(SessionUserState::default());
     };
-    serde_json::from_str::<SessionUserState>(&contents)
-        .map(sanitize_state)
-        .map_err(|error| format!("failed to decode {}: {error}", path.display()))
+    let state = serde_json::from_str::<SessionUserState>(&contents)
+        .map_err(|error| format!("failed to decode {}: {error}", path.display()))?;
+    let sanitized = sanitize_state(state.clone());
+    if sanitized != state {
+        write_state_to_path(path, &sanitized)?;
+    }
+    Ok(sanitized)
 }
 
 fn sanitize_state(mut state: SessionUserState) -> SessionUserState {
@@ -101,14 +105,22 @@ fn sanitize_state(mut state: SessionUserState) -> SessionUserState {
         .filter_map(|(key, alias)| {
             let key = key.trim().to_owned();
             let alias = alias.trim().to_owned();
-            (!key.is_empty() && !alias.is_empty()).then_some((key, alias))
+            (!key.is_empty()
+                && !alias.is_empty()
+                && !crate::app_state::WorkspaceSessionSnapshot::is_volatile_layout_identity_key(
+                    &key,
+                ))
+            .then_some((key, alias))
         })
         .collect();
     state.pinned = state
         .pinned
         .into_iter()
         .map(|key| key.trim().to_owned())
-        .filter(|key| !key.is_empty())
+        .filter(|key| {
+            !key.is_empty()
+                && !crate::app_state::WorkspaceSessionSnapshot::is_volatile_layout_identity_key(key)
+        })
         .collect();
     state
 }
@@ -124,4 +136,38 @@ fn write_state_to_path(path: &Path, state: &SessionUserState) -> Result<(), Stri
     fs::write(&tmp, contents)
         .map_err(|error| format!("failed to write {}: {error}", tmp.display()))?;
     fs::rename(&tmp, path).map_err(|error| format!("failed to replace {}: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_remote_session_user_state_drops_volatile_layout_identity_debt() {
+        let sanitized = sanitize_state(SessionUserState {
+            aliases: HashMap::from([
+                (
+                    "ssh:test::source:tab:4:leaf:0".to_owned(),
+                    "旧坐标".to_owned(),
+                ),
+                (
+                    "ssh:test::agent:Codex:provider-id".to_owned(),
+                    "稳定会话".to_owned(),
+                ),
+            ]),
+            pinned: HashSet::from([
+                "tab:4:leaf:0".to_owned(),
+                "ssh:test::agent:Codex:provider-id".to_owned(),
+            ]),
+        });
+
+        assert_eq!(sanitized.aliases.len(), 1);
+        assert_eq!(sanitized.pinned.len(), 1);
+        assert!(sanitized
+            .aliases
+            .contains_key("ssh:test::agent:Codex:provider-id"));
+        assert!(sanitized
+            .pinned
+            .contains("ssh:test::agent:Codex:provider-id"));
+    }
 }

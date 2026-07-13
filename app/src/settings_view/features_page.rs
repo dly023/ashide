@@ -2,8 +2,6 @@ use crate::default_terminal::DefaultTerminal;
 use crate::gpu_state::{GPUState, GPUStateEvent};
 use crate::terminal::input::OPEN_COMPLETIONS_KEYBINDING_NAME;
 
-#[cfg(target_os = "linux")]
-use crate::settings::ForceX11;
 use lazy_static::lazy_static;
 use warpui::platform::GraphicsBackend;
 use warpui::rendering::GPUPowerPreference;

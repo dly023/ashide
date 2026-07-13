@@ -350,6 +350,29 @@ Ashide 是 `warp → zap → ashide` 这条血缘上、由 zap 二开而来的**
 - 发现死代码 / 孤儿 i18n key / 断路径,只记进 matrix 不修。
 - 把"本地能跑、测试能过"当作行为正确的证据,忽略本地/远程行为不对称。
 
+### 5.13 Session Navigator 身份与状态模型锁(高优先级!)
+
+- `WorkspaceSessionSnapshot.id` 的 `tab:X:leaf:Y` **只是当前布局 locator**,只能用于把 action 路由到当前 pane；tab/pane 插入、关闭、重排和冷启动都会改变它。
+- 所有 live pane 的稳定容器身份唯一来自 `PaneConfiguration.container_uuid` → `LeafSnapshot.container_uuid` → SQLite `pane_container_identities` → `WorkspaceSessionSnapshot.container_uuid`。alias、pin、RowId、display order、selection continuity 禁止持久绑定到 tab/leaf 坐标。
+- `TerminalPaneSnapshot.uuid` 只属于 terminal runtime/session，不得再兼任通用 UI 容器身份。Welcome、EnvironmentRuntimePlaceholder 以及未来新增的 Navigator-visible pane 必须自动继承同一 `PaneConfiguration` 身份链。
+- `is_live_container=true` 但缺少 `container_uuid` 是模型破坏，必须立即失败；禁止以“容错”为名 fallback 到 `source:tab:*`、数据库自增 id、EntityId 或 Environment authority。
+- identity key 的生成只能走 `WorkspaceSessionSnapshot::{logical_key,durable_identity_key,observed_identity_keys,stable_user_state_keys}`；禁止在 Workspace、reducer、组件或 remote adapter 中自行拼第二套 `source:/agent:/conversation:` key。
+- `SessionNavigatorState.row_id_by_identity` 只接受 stable container / durable / logical identity。物理 locator 不得进入 registry，否则坐标复用会把两个 pane 的 selection/order/tombstone 错绑到同一 RowId。
+- provider metadata 是 pane binding enrichment，不是 Resume 副作用。`cli_agent/cli_command/cli_agent_origin/cli_agent_session_id` 必须随 terminal pane 保存和冷恢复；`Started/SessionUpdated` 必须触发 app-state save。
+- local/remote user-state sidecar 只能保存 `stable_user_state_keys`；读到历史 `tab:*` 或 `*::source:tab:*` 键必须清理，禁止继续兼容或写回。
+- `WindowSnapshot.tabs` 是 live pane 唯一持久化权威；`restored_workspace_sessions` 只保存 virtual restore target，禁止再次混存 live rows。
+- pane 可恢复性的唯一结构边界是 `PaneNodeSnapshot::into_persistable`：read-only transcript、provider UI、runtime-only pane 必须在写 SQLite 前递归裁剪并折叠 branch。禁止在 SQLite traversal 中静默跳 leaf，否则会制造空 branch/孤儿结构或把只读语义恢复成可写终端。
+- 修改此模型前必须先更新 `docs/SESSION_NAVIGATOR_SPEC.yaml` 的 UX matrix，并至少覆盖：布局坐标变化、坐标复用、source 顺序打乱、container identity SQLite round-trip、runtime placeholder、冷启动 binding、Resume 不改序、Environment round-trip。
+- 新 AI 会话不得先改实现后补文档：固定顺序是 `SPEC → UX Matrix → static CHECK → TEST → GUI verify`；任一环缺失都不算完成。
+
+### 5.14 Remote helper 发布契约(高优先级!)
+
+- DEBUG/source build 的 remote helper 必须从当前 checkout 交叉编译 Linux musl 后上传，禁止失败时回退到旧 release helper；协议版本不匹配必须显式失败。
+- 正式 tag release 必须同时产出并上传 `ashide-linux-x86_64.tar.gz`、`ashide-linux-aarch64.tar.gz` 和 `SHA256SUMS`；只有桌面 app/CLI 而没有 helper 的 Release 视为失败。
+- helper 资产唯一生产入口是 `script/make_release_helper_artifacts`，CI 唯一装配入口是 `.github/workflows/release.yml`。禁止另写第二套命名、打包或上传逻辑。
+- 修改 `app/src/remote_server/`、`crates/remote_server/`、remote proto、PTY/ioctl 或 release features 后，至少验证：本机 `cargo check`、`x86_64-unknown-linux-musl` helper 构建、release workflow contract test；涉及 ARM 专有代码时再验证 aarch64 musl。
+- `libc::ioctl` request 类型必须按目标 libc ABI 选择：Linux musl 为 `c_int`，Linux glibc/macOS 为 `c_ulong`；禁止用本机编译通过代替交叉目标验证。
+
 ---
 
 ## 6. 常用入口速查

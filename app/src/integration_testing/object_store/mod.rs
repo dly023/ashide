@@ -1,7 +1,6 @@
 mod assertion;
 
 pub use assertion::*;
-use futures::{future::join_all, FutureExt};
 use itertools::Itertools;
 use std::future::Future;
 use std::pin::Pin;
@@ -23,16 +22,11 @@ pub fn clear_object_store_model(app: &mut App) -> Pin<Box<dyn Future<Output = ()
                 .collect_vec()
         });
 
-    let mut futures = Vec::new();
-    for object_id in object_ids_to_delete {
-        UpdateManager::handle(app).update(app, |update_manager, ctx| {
+    UpdateManager::handle(app).update(app, |update_manager, ctx| {
+        for object_id in object_ids_to_delete {
             update_manager.delete_object_by_user(object_id, ctx);
-            if let Some(future_id) = update_manager.spawned_futures().last() {
-                let future = ctx.await_spawned_future(*future_id);
-                futures.push(future);
-            }
-        });
-    }
+        }
+    });
 
-    Box::pin(join_all(futures).map(|_| ()))
+    Box::pin(async {})
 }

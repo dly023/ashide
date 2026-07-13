@@ -276,6 +276,13 @@ diesel::table! {
 }
 
 diesel::table! {
+    pane_container_identities (pane_node_id) {
+        pane_node_id -> Integer,
+        uuid -> Binary,
+    }
+}
+
+diesel::table! {
     pane_leaves (pane_node_id, kind) {
         pane_node_id -> Integer,
         kind -> Text,
@@ -410,6 +417,10 @@ diesel::table! {
         active_profile_id -> Nullable<Text>,
         conversation_ids -> Nullable<Text>,
         active_conversation_id -> Nullable<Text>,
+        cli_agent -> Nullable<Text>,
+        cli_command -> Nullable<Text>,
+        cli_agent_origin -> Nullable<Text>,
+        cli_agent_session_id -> Nullable<Text>,
     }
 }
 
@@ -455,7 +466,7 @@ diesel::table! {
         left_panel_open -> Nullable<Bool>,
         vertical_tabs_panel_open -> Nullable<Bool>,
         environment_json -> Nullable<Text>,
-        workspace_sessions_json -> Nullable<Text>,
+        restored_workspace_sessions_json -> Nullable<Text>,
     }
 }
 
@@ -503,6 +514,7 @@ diesel::joinable!(app -> windows (active_window_id));
 diesel::joinable!(code_pane_tabs -> code_panes (code_pane_id));
 diesel::joinable!(object_permissions -> object_metadata (object_metadata_id));
 diesel::joinable!(pane_branches -> pane_nodes (pane_node_id));
+diesel::joinable!(pane_container_identities -> pane_nodes (pane_node_id));
 diesel::joinable!(pane_leaves -> pane_nodes (pane_node_id));
 diesel::joinable!(pane_nodes -> tabs (tab_id));
 diesel::joinable!(panels -> tabs (tab_id));
@@ -515,6 +527,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     ambient_agent_panes,
     app,
     pane_branches,
+    pane_container_identities,
     pane_leaves,
     pane_nodes,
     panels,

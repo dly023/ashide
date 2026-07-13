@@ -409,6 +409,9 @@ pub fn model_requires_reasoning_echo(api_type: AgentProviderApiType, model_id: &
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static REASONING_LATCH_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn anthropic_supported() {
@@ -766,6 +769,7 @@ mod tests {
 
     #[test]
     fn runtime_latch_overrides_static_table() {
+        let _guard = REASONING_LATCH_TEST_LOCK.lock().unwrap();
         // 任意未在 INTERLEAVED_RULES 内的国产/第三方 thinking 模型,
         // 一旦 stream 发过 reasoning chunk → 下一轮起自动 echo。
         // 用一个故意"不存在"的 model id 验证 latch 是真起作用的。
@@ -803,6 +807,7 @@ mod tests {
 
     #[test]
     fn runtime_latch_never_writes_for_strict_api_types() {
+        let _guard = REASONING_LATCH_TEST_LOCK.lock().unwrap();
         // Anthropic / Gemini / Ollama 各自走原生 reasoning 通道,即使有人误调
         // note_reasoning_seen 也不能污染 latch(否则跨 api_type 共用 model_id
         // 可能在 OpenAi 路径误命中 —— 我们用 (api_type, id) 复合 key,本来就隔离,

@@ -10,6 +10,10 @@ use super::*;
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn clear_proxy_env() {
+    set_global_proxy_config(ProxyConfig {
+        mode: ProxyMode::System,
+        ..ProxyConfig::default()
+    });
     for var in [
         "HTTPS_PROXY",
         "https_proxy",

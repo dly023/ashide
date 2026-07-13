@@ -12,10 +12,10 @@ use super::schema::{
     blocks, code_pane_tabs, code_panes, code_review_panes, commands, current_user_information,
     env_var_collection_panes, folders, generic_string_objects, ignored_suggestions,
     mcp_server_installations, notebook_panes, notebooks, object_actions, object_metadata,
-    object_permissions, pane_branches, pane_leaves, pane_nodes, panels, project_rules, projects,
-    server_experiments, settings_panes, ssh_nodes, ssh_servers, stored_objects_refreshes,
-    sync_meta, tabs, team_members, team_settings, teams, terminal_panes, user_profiles,
-    welcome_panes, windows, workflow_panes, workflows, workspace_teams, workspaces,
+    object_permissions, pane_branches, pane_container_identities, pane_leaves, pane_nodes, panels,
+    project_rules, projects, server_experiments, settings_panes, ssh_nodes, ssh_servers,
+    stored_objects_refreshes, sync_meta, tabs, team_members, team_settings, teams, terminal_panes,
+    user_profiles, welcome_panes, windows, workflow_panes, workflows, workspace_teams, workspaces,
 };
 
 #[derive(Insertable)]
@@ -42,7 +42,7 @@ pub struct Window {
     pub left_panel_open: Option<bool>,
     pub vertical_tabs_panel_open: Option<bool>,
     pub environment_json: Option<String>,
-    pub workspace_sessions_json: Option<String>,
+    pub restored_workspace_sessions_json: Option<String>,
 }
 
 #[derive(Identifiable, Insertable, Queryable)]
@@ -305,7 +305,7 @@ pub struct NewWindow {
     pub left_panel_open: Option<bool>,
     pub vertical_tabs_panel_open: Option<bool>,
     pub environment_json: Option<String>,
-    pub workspace_sessions_json: Option<String>,
+    pub restored_workspace_sessions_json: Option<String>,
 }
 
 #[derive(Identifiable, Queryable, Associations)]
@@ -334,6 +334,21 @@ pub struct NewTab {
 /// The pane_leaves table keeps info about a given pane (i.e. what kind of pane it is).
 /// The pane_branches table keeps info about a branch in the tree (e.g. whether
 /// the branch splits horizontally or vertically).
+#[derive(Identifiable, Queryable)]
+#[diesel(table_name = pane_container_identities)]
+#[diesel(primary_key(pane_node_id))]
+pub struct PaneContainerIdentity {
+    pub pane_node_id: i32,
+    pub uuid: Vec<u8>,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = pane_container_identities)]
+pub struct NewPaneContainerIdentity {
+    pub pane_node_id: i32,
+    pub uuid: Vec<u8>,
+}
+
 #[derive(Identifiable, Queryable)]
 #[diesel(table_name = pane_leaves)]
 #[diesel(primary_key(pane_node_id, kind))]
@@ -365,6 +380,12 @@ pub struct TerminalPane {
     pub conversation_ids: Option<String>,
     /// The active conversation ID if the agent view was open in fullscreen mode.
     pub active_conversation_id: Option<String>,
+    /// Stable serialized CLI-agent binding. This belongs to the pane lifecycle,
+    /// not to Resume: Session Navigator needs it immediately after cold restore.
+    pub cli_agent: Option<String>,
+    pub cli_command: Option<String>,
+    pub cli_agent_origin: Option<String>,
+    pub cli_agent_session_id: Option<String>,
 }
 
 #[derive(Identifiable, Queryable, Selectable)]
@@ -551,6 +572,10 @@ pub struct NewTerminalPane {
     pub conversation_ids: Option<String>,
     /// The active conversation ID if the agent view was open in fullscreen mode.
     pub active_conversation_id: Option<String>,
+    pub cli_agent: Option<String>,
+    pub cli_command: Option<String>,
+    pub cli_agent_origin: Option<String>,
+    pub cli_agent_session_id: Option<String>,
 }
 
 #[derive(Insertable)]

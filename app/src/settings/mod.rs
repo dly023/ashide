@@ -1,7 +1,6 @@
 mod accessibility;
 pub mod ai;
 mod alias_expansion;
-pub mod app_icon;
 pub mod app_installation_detection;
 mod autoupdate;
 mod block_visibility;

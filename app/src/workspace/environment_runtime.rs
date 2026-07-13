@@ -421,16 +421,20 @@ pub(crate) fn should_sync_environment_terminal_options(environment: &Environment
 }
 
 pub(crate) fn environment_strip_dedupe_key(environment: &EnvironmentSnapshot) -> String {
-    if uses_terminal_bootstrap(environment) {
-        TERMINAL_BOOTSTRAP_AUTHORITY.to_owned()
-    } else {
-        environment.authority_key.clone()
-    }
+    environment_navigation_key(&environment.authority_key).to_owned()
 }
 
 pub(crate) fn authority_uses_terminal_bootstrap(authority: &str) -> bool {
     authority == TERMINAL_BOOTSTRAP_AUTHORITY
         || authority.starts_with(TERMINAL_BOOTSTRAP_AUTHORITY_PREFIX)
+}
+
+pub(crate) fn environment_navigation_key(authority: &str) -> &str {
+    if authority_uses_terminal_bootstrap(authority) {
+        TERMINAL_BOOTSTRAP_AUTHORITY
+    } else {
+        authority
+    }
 }
 
 pub(crate) fn workspace_root_candidate_for_authority(
@@ -1627,10 +1631,8 @@ pub(crate) async fn scan_environment_cli_agent_sessions(
     client: Arc<EnvironmentRuntimeClient>,
     _session_id: SessionId,
 ) -> Result<Vec<EnvironmentCliAgentSessionRecord>, String> {
-    const SCAN_LIMIT: u32 = 40;
-
     let response = client
-        .scan_cli_agent_sessions(SCAN_LIMIT)
+        .scan_cli_agent_sessions(crate::app_state::WORKSPACE_SESSION_NAVIGATOR_LOGICAL_LIMIT as u32)
         .await
         .map_err(|error| format!("{error:#}"))?;
 
@@ -2552,6 +2554,16 @@ mod tests {
             display.chip_label.as_deref(),
             Some(environment_kind_label(&EnvironmentKind::Local)),
             "local/current-app must have the same visible Environment identity shape as runtime-backed environments"
+        );
+    }
+
+    #[test]
+    fn environment_navigation_key_collapses_current_app_authority_aliases() {
+        assert_eq!(environment_navigation_key("local"), "local");
+        assert_eq!(environment_navigation_key("local:/tmp/project"), "local");
+        assert_eq!(
+            environment_navigation_key("ssh:ssh-config:dnyx216"),
+            "ssh:ssh-config:dnyx216"
         );
     }
 

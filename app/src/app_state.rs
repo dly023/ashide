@@ -164,7 +164,14 @@ pub enum CliAgentSessionOrigin {
 /// conversations can be resumed by higher-level CLI-agent integrations later.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceSessionSnapshot {
+    /// 当前窗口布局中的物理定位符，例如 `tab:0:leaf:1`。
+    ///
+    /// 该字段只用于把 UI action 路由到当前 pane，绝不能用作跨重排、跨重启或
+    /// user-state 持久化身份；所有 live pane 的稳定身份由 `container_uuid` 承担。
     pub id: String,
+    /// Live pane 跨重启稳定 UUID。所有 live container 必须提供；virtual provider row 保持 `None`。
+    #[serde(default)]
+    pub container_uuid: Option<Vec<u8>>,
     pub kind: WorkspaceSessionKind,
     pub label: Option<String>,
     pub environment_authority_key: Option<String>,
@@ -194,27 +201,17 @@ pub struct WorkspaceSessionSnapshot {
     /// True only for sessions produced by [`WorkspaceSessionSnapshot::from_tabs`]
     /// — i.e. backed by a real pane in the current window. Restore targets,
     /// indexed scans, and historical Ashide conversations are virtual containers
-    /// and keep this `false`. This drives the container model: live containers
-    /// keep a stable `source:tab:...` identity, virtual containers keep an
-    /// `agent:...:session-N` identity, and a virtual container whose binding
-    /// matches a live container is consumed (hidden) by it.
+    /// and keep this `false`. This drives the container model: live pane
+    /// containers use `container_uuid`, virtual containers use durable agent/
+    /// conversation identity, and a virtual container whose binding matches a
+    /// live container is consumed (hidden) by it. `id=tab:...` 仅是 locator。
     #[serde(default, skip)]
     pub is_live_container: bool,
 }
 
-/// display_order 的键策略。让排序逻辑 match 枚举,而非靠字符串 key 的隐式相等。
-///
-/// - `Physical`: live container,用 `source:tab:...` 物理身份作为 order key。
-/// - `Durable`: virtual row(有 agent session id 或 conversation id),用 durable
-///   key 作为 order key;被 live consume 后,其 durable order 可被 live container
-///   继承以保持原位。
-/// - `Bridged`: virtual row 无 agent/conversation 绑定,fallback 到 logical key。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SessionDisplayOrderStrategy {
-    Physical,
-    Durable,
-    Bridged,
-}
+/// Session Navigator 每个 agent / Environment 初次发现与 Refresh 共用的逻辑
+/// 会话上限。配额只计算合并后的逻辑会话，不计算同一会话的 backing sources。
+pub const WORKSPACE_SESSION_NAVIGATOR_LOGICAL_LIMIT: usize = 80;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum WorkspaceSessionLabelQuality {
@@ -281,6 +278,11 @@ impl WorkspaceSessionTitleCandidate {
 }
 
 impl WorkspaceSessionSnapshot {
+    pub fn is_volatile_layout_identity_key(key: &str) -> bool {
+        let key = key.trim();
+        key.starts_with("tab:") || key.contains("::source:tab:")
+    }
+
     fn clean_label_text(label: Option<&str>) -> Option<String> {
         label
             .map(str::trim)
@@ -366,17 +368,16 @@ impl WorkspaceSessionSnapshot {
         }
     }
 
-    pub fn stable_pin_keys(&self) -> Vec<String> {
+    pub fn durable_identity_key(&self) -> Option<String> {
         let environment_key =
             Self::logical_environment_key(self.environment_authority_key.as_deref());
-        let mut keys = Vec::new();
 
         if let Some(cli_agent_session_id) = self
             .cli_agent_session_id
             .as_deref()
             .filter(|id| !id.trim().is_empty())
         {
-            keys.push(format!(
+            return Some(format!(
                 "{environment_key}::agent:{}:{}",
                 self.cli_agent
                     .as_deref()
@@ -386,23 +387,64 @@ impl WorkspaceSessionSnapshot {
             ));
         }
 
-        for conversation_id in self
-            .active_conversation_id
+        self.active_conversation_id
             .iter()
             .chain(self.conversation_ids.iter())
-            .filter(|id| !id.trim().is_empty())
-        {
-            keys.push(format!("{environment_key}::conversation:{conversation_id}"));
-        }
+            .find(|id| !id.trim().is_empty())
+            .map(|conversation_id| format!("{environment_key}::conversation:{conversation_id}"))
+    }
 
+    fn stable_live_container_key(&self) -> Option<String> {
+        let container_uuid = self
+            .container_uuid
+            .as_deref()
+            .filter(|uuid| !uuid.is_empty())?;
+        let environment_key =
+            Self::logical_environment_key(self.environment_authority_key.as_deref());
+        Some(format!(
+            "{environment_key}::pane:{}",
+            hex::encode(container_uuid)
+        ))
+    }
+
+    /// 当前一次观察可用于收敛 RowId 的全部身份。
+    ///
+    /// `id` 作为瞬时 locator 只参与同一次运行内的 action 路由和 identity 收敛；
+    /// `logical_key`/`durable_identity_key` 才能拥有跨布局或跨重启状态。
+    pub fn observed_identity_keys(&self) -> Vec<String> {
+        let logical_key = self.logical_key();
+        let mut keys = vec![logical_key];
         if Self::is_stable_source_id(&self.id) {
             keys.push(self.id.clone());
-            keys.push(self.logical_key());
         }
-
+        if let Some(key) = self.durable_identity_key() {
+            keys.push(key);
+        }
         keys.sort();
         keys.dedup();
         keys
+    }
+
+    /// 可写入 alias/pin sidecar 的稳定键。布局坐标永远不能进入 user state。
+    pub fn stable_user_state_keys(&self) -> Vec<String> {
+        let mut keys = Vec::new();
+        let logical_key = self.logical_key();
+        if !Self::is_volatile_layout_identity_key(&logical_key) {
+            keys.push(logical_key);
+        }
+        if let Some(key) = self.durable_identity_key() {
+            keys.push(key);
+        }
+        if Self::is_stable_source_id(&self.id) {
+            keys.push(self.id.clone());
+        }
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    pub fn stable_pin_keys(&self) -> Vec<String> {
+        self.stable_user_state_keys()
     }
 
     pub fn is_pinned_by(&self, pinned_session_ids: &HashSet<String>) -> bool {
@@ -417,12 +459,9 @@ impl WorkspaceSessionSnapshot {
 
     /// Stable identity used by the Session Navigator to merge rows.
     ///
-    /// Container model: a live tab is a *container* with a stable identity
-    /// (`source:tab:X:leaf:Y`) that never changes when the agent inside it
-    /// starts, exits, or switches — the agent is metadata of the container,
-    /// not its identity. This is what keeps "type `codex` in a plain terminal"
-    /// from spawning a duplicate navigator row, and what keeps a failed resume
-    /// from leaving a stale row behind.
+    /// Container model: every live pane is a *container* with a stable container UUID
+    /// (`pane:<uuid>`). `tab:X:leaf:Y` 只是当前布局 locator，会随着 tab/pane
+    /// 插入、关闭、重排和冷启动恢复顺序变化，绝不能承担稳定身份。
     ///
     /// A *virtual container* (restore target / indexed / historical session
     /// that has no live tab) keeps its own stable identity keyed by the agent
@@ -432,10 +471,13 @@ impl WorkspaceSessionSnapshot {
         let environment_key =
             Self::logical_environment_key(self.environment_authority_key.as_deref());
 
-        // Live containers always use their physical source id. The agent
-        // session id is binding metadata, not identity.
+        // Live pane containers always use their container UUID. Agent/session metadata
+        // 只是 binding，tab/leaf 坐标只负责 action 路由。缺失 UUID 是模型破坏，
+        // 必须立即失败，禁止静默退回 locator 并污染 RowId / order / selection。
         if self.is_live_container() {
-            return format!("{environment_key}::source:{}", self.id);
+            return self
+                .stable_live_container_key()
+                .expect("Navigator 可见 live pane 必须拥有稳定 container UUID");
         }
 
         // Virtual containers (restore targets, indexed sessions, historical
@@ -468,33 +510,6 @@ impl WorkspaceSessionSnapshot {
     /// restored session recording which pane it would materialize into).
     pub fn is_live_container(&self) -> bool {
         self.is_live_container
-    }
-
-    /// 返回该 snapshot 在 display_order 体系中的键策略。
-    ///
-    /// - live container → `Physical`(用 logical_key)
-    /// - virtual row 有 cli_agent_session_id 或 conversation_id → `Durable`
-    /// - 其余 virtual row → `Bridged`(fallback 到 logical_key)
-    ///
-    /// 排序逻辑 match 此枚举决定 primary/durable key 取法,不靠字符串隐式相等。
-    pub fn display_order_strategy(&self) -> SessionDisplayOrderStrategy {
-        if self.is_live_container() {
-            return SessionDisplayOrderStrategy::Physical;
-        }
-        let has_agent_session = self
-            .cli_agent_session_id
-            .as_deref()
-            .is_some_and(|id| !id.trim().is_empty());
-        let has_conversation = self
-            .active_conversation_id
-            .iter()
-            .chain(self.conversation_ids.iter())
-            .any(|id| !id.trim().is_empty());
-        if has_agent_session || has_conversation {
-            SessionDisplayOrderStrategy::Durable
-        } else {
-            SessionDisplayOrderStrategy::Bridged
-        }
     }
 
     pub fn merge_for_session_navigator(
@@ -648,6 +663,8 @@ impl WorkspaceSessionSnapshot {
                 }
                 if source_is_live && !existing.is_live_container() {
                     existing.id = source.id;
+                    existing.container_uuid = source.container_uuid;
+                    existing.is_live_container = true;
                 }
                 continue;
             }
@@ -705,11 +722,16 @@ fn collect_workspace_sessions_from_node(
                 );
             }
         }
-        PaneNodeSnapshot::Leaf(LeafSnapshot { contents, .. }) => {
+        PaneNodeSnapshot::Leaf(LeafSnapshot {
+            container_uuid,
+            contents,
+            ..
+        }) => {
             let id = format!("tab:{tab_index}:leaf:{leaf_index}");
             *leaf_index += 1;
 
-            if let Some(session) = workspace_session_from_leaf(id, contents, tab_title, environment)
+            if let Some(session) =
+                workspace_session_from_leaf(id, container_uuid, contents, tab_title, environment)
             {
                 sessions.push(session);
             }
@@ -719,6 +741,7 @@ fn collect_workspace_sessions_from_node(
 
 fn workspace_session_from_leaf(
     id: String,
+    container_uuid: &[u8],
     contents: &LeafContents,
     tab_title: Option<&str>,
     environment: Option<&EnvironmentSnapshot>,
@@ -739,6 +762,7 @@ fn workspace_session_from_leaf(
                 || terminal.cli_command.is_some();
             Some(WorkspaceSessionSnapshot {
                 id,
+                container_uuid: Some(container_uuid.to_vec()),
                 kind: if has_conversation {
                     WorkspaceSessionKind::AgentTerminal
                 } else {
@@ -765,6 +789,7 @@ fn workspace_session_from_leaf(
         }
         LeafContents::Welcome { startup_directory } => Some(WorkspaceSessionSnapshot {
             id,
+            container_uuid: Some(container_uuid.to_vec()),
             kind: WorkspaceSessionKind::Welcome,
             label: tab_title.map(str::to_string),
             environment_authority_key,
@@ -815,7 +840,9 @@ fn infer_root_from_leaf(contents: &LeafContents) -> Option<String> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowSnapshot {
     pub environment: Option<EnvironmentSnapshot>,
-    pub workspace_sessions: Vec<WorkspaceSessionSnapshot>,
+    /// 只有无法从 `tabs` 推导的 virtual restore targets。live pane rows
+    /// 始终在运行时由 pane tree 生成，禁止双写到这里。
+    pub restored_workspace_sessions: Vec<WorkspaceSessionSnapshot>,
     pub tabs: Vec<TabSnapshot>,
     pub active_tab_index: usize,
     pub bounds: Option<RectF>,
@@ -875,6 +902,59 @@ impl PaneNodeSnapshot {
             }
         }
     }
+
+    /// 把运行时 pane tree 收敛成可跨重启恢复的 app-state tree。
+    ///
+    /// “是否可恢复”属于整棵树的结构契约，不能推迟到 SQLite 遍历时逐 leaf
+    /// 跳过：后者会留下空 branch、孤儿结构，或让只读 transcript 在冷启动后被
+    /// 错误恢复成可写 terminal。这里统一裁剪并折叠单子节点 branch，使下游
+    /// persistence 只接收结构完整、语义可恢复的快照。
+    pub(crate) fn into_persistable(self) -> Option<Self> {
+        match self {
+            PaneNodeSnapshot::Leaf(leaf) => {
+                let is_persistable = match &leaf.contents {
+                    LeafContents::Terminal(terminal) => !terminal.is_read_only,
+                    LeafContents::Code(CodePaneSnapShot::Local { source, .. }) => source
+                        .as_ref()
+                        .map(|source| source.is_restorable())
+                        .unwrap_or(true),
+                    LeafContents::ProviderConnection { .. }
+                    | LeafContents::ProviderFileBrowser { .. } => false,
+                    LeafContents::Notebook(_)
+                    | LeafContents::AIDocument(_)
+                    | LeafContents::EnvVarCollection(_)
+                    | LeafContents::Workflow(_)
+                    | LeafContents::Settings(_)
+                    | LeafContents::AIFact(_)
+                    | LeafContents::ExecutionProfileEditor
+                    | LeafContents::CodeReview(_)
+                    | LeafContents::AmbientAgent(_)
+                    | LeafContents::Welcome { .. }
+                    | LeafContents::GetStarted
+                    | LeafContents::EnvironmentRuntimePlaceholder => true,
+                };
+                is_persistable.then_some(PaneNodeSnapshot::Leaf(leaf))
+            }
+            PaneNodeSnapshot::Branch(BranchSnapshot {
+                direction,
+                children,
+            }) => {
+                let mut children = children
+                    .into_iter()
+                    .filter_map(|(flex, child)| child.into_persistable().map(|child| (flex, child)))
+                    .collect::<Vec<_>>();
+
+                match children.len() {
+                    0 => None,
+                    1 => children.pop().map(|(_, child)| child),
+                    _ => Some(PaneNodeSnapshot::Branch(BranchSnapshot {
+                        direction,
+                        children,
+                    })),
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -885,6 +965,8 @@ pub struct BranchSnapshot {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LeafSnapshot {
+    /// 跨重排、跨重启稳定的 pane 容器身份。布局坐标与数据库 row id 仅是 locator。
+    pub container_uuid: Vec<u8>,
     pub is_focused: bool,
     pub custom_vertical_tabs_title: Option<String>,
     pub contents: LeafContents,
@@ -925,48 +1007,6 @@ pub enum LeafContents {
     },
 }
 
-#[cfg(feature = "local_fs")]
-impl LeafContents {
-    /// Whether this pane content should be written to (and later restored
-    /// from) the SQLite app-state database.
-    ///
-    /// Non-persisted pane types are skipped entirely during the pane tree
-    /// traversal in `save_app_state`, so no `pane_nodes` row is inserted for
-    /// them. This is important: inserting a `pane_nodes` row with
-    /// `is_leaf = true` but no matching `pane_leaves` row leaves an orphan
-    /// that `read_node` cannot resolve, which causes the surrounding tab's
-    /// restoration to fail and the whole tab to disappear on restart.
-    pub(crate) fn is_persisted(&self) -> bool {
-        match self {
-            // Provider connection editor:连接数据持久化在 provider store 里,
-            // pane 本身只是 view,关掉再打开没差别。
-            LeafContents::ProviderConnection { .. } => false,
-            // Provider file browser:环境文件系统依赖活跃 provider 连接,pane 不可恢复。
-            LeafContents::ProviderFileBrowser { .. } => false,
-            // 环境文件代码 pane:environment buffer 依赖活跃 Environment Runtime,`EnvironmentFileTree`
-            // source 不可恢复(`is_restorable() == false`)。若写入持久化会留下
-            // 一条 restore 阶段被跳过的孤儿 `Code` 行,导致整个 tab 丢失 ——
-            // 因此带 Environment Runtime source 的代码 pane 整体不持久化。
-            LeafContents::Code(CodePaneSnapShot::Local { source, .. }) => {
-                source.as_ref().map(|s| s.is_restorable()).unwrap_or(true)
-            }
-            LeafContents::Terminal(_)
-            | LeafContents::Notebook(_)
-            | LeafContents::AIDocument(_)
-            | LeafContents::EnvVarCollection(_)
-            | LeafContents::Workflow(_)
-            | LeafContents::Settings(_)
-            | LeafContents::AIFact(_)
-            | LeafContents::ExecutionProfileEditor
-            | LeafContents::CodeReview(_)
-            | LeafContents::AmbientAgent(_)
-            | LeafContents::Welcome { .. }
-            | LeafContents::GetStarted
-            | LeafContents::EnvironmentRuntimePlaceholder => true,
-        }
-    }
-}
-
 /// Snapshot of an ambient agent pane.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AmbientAgentPaneSnapshot {
@@ -983,6 +1023,8 @@ pub struct TerminalPaneSnapshot {
     pub cwd: Option<String>,
     pub shell_launch_data: Option<ShellLaunchData>,
     pub is_active: bool,
+    /// 仅供 `PaneNodeSnapshot::into_persistable` 判断运行时 pane 是否可跨重启恢复。
+    /// 该语义不写入 SQLite；`true` 的 transcript/viewer pane 必须在结构边界被裁剪。
     pub is_read_only: bool,
     pub input_config: Option<InputConfig>,
     pub llm_model_override: Option<String>,

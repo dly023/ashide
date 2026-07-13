@@ -18,7 +18,7 @@ use crate::app_state::{CliAgentSessionOrigin, WorkspaceSessionKind, WorkspaceSes
 use crate::session_bridge::adapter_registry::session_bridge_adapters;
 use crate::terminal::CLIAgent;
 
-#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 struct SessionUserState {
     #[serde(default)]
     aliases: HashMap<String, String>,
@@ -102,42 +102,44 @@ fn scan_current_app_cli_agent_sessions_with_dirs(
     let pinned_session_ids = pinned_session_ids_with_config(config_dir);
     sessions
         .into_iter()
-        .map(|session| {
-            let id = session
-                .snapshot_id
-                .unwrap_or_else(|| external_session_snapshot_id(session.agent, &session.path));
-            let mut snapshot = WorkspaceSessionSnapshot {
-                id: id.clone(),
-                kind: WorkspaceSessionKind::AgentTerminal,
-                label: session.label,
-                environment_authority_key: Some("local".to_owned()),
-                cwd: session.cwd,
-                startup_directory: None,
-                cli_agent: Some(session.agent.to_serialized_name()),
-                cli_command: Some(session.command),
-                cli_agent_origin: Some(CliAgentSessionOrigin::PluginObserved),
-                conversation_ids: Vec::new(),
-                active_conversation_id: None,
-                cli_agent_session_id: Some(session.id),
-                is_active: false,
-                is_pinned: false,
-                updated_at_unix_ms: system_time_to_unix_ms(session.modified),
-                is_live_container: false,
-            };
-            snapshot.is_pinned = snapshot.is_pinned_by(&pinned_session_ids);
-            snapshot
-        })
+        .map(|session| indexed_session_to_snapshot(session, &pinned_session_ids))
         .collect()
+}
+
+fn indexed_session_to_snapshot(
+    session: IndexedSession,
+    pinned_session_ids: &HashSet<String>,
+) -> WorkspaceSessionSnapshot {
+    let id = session
+        .snapshot_id
+        .unwrap_or_else(|| external_session_snapshot_id(session.agent, &session.path));
+    let mut snapshot = WorkspaceSessionSnapshot {
+        id,
+        container_uuid: None,
+        kind: WorkspaceSessionKind::AgentTerminal,
+        label: session.label,
+        environment_authority_key: Some("local".to_owned()),
+        cwd: session.cwd,
+        startup_directory: None,
+        cli_agent: Some(session.agent.to_serialized_name()),
+        cli_command: Some(session.command),
+        cli_agent_origin: Some(CliAgentSessionOrigin::PluginObserved),
+        conversation_ids: Vec::new(),
+        active_conversation_id: None,
+        cli_agent_session_id: Some(session.id),
+        is_active: false,
+        is_pinned: false,
+        updated_at_unix_ms: system_time_to_unix_ms(session.modified),
+        is_live_container: false,
+    };
+    snapshot.is_pinned = snapshot.is_pinned_by(pinned_session_ids);
+    snapshot
 }
 
 pub(crate) fn delete_current_app_cli_agent_session(snapshot_id: &str) -> Result<(), String> {
     let home_dir = dirs::home_dir().ok_or_else(|| "home directory is unavailable".to_owned())?;
     let config_dir = warp_core::paths::warp_home_config_dir();
-    delete_current_app_cli_agent_session_with_dirs(
-        snapshot_id,
-        &home_dir,
-        config_dir.as_deref(),
-    )
+    delete_current_app_cli_agent_session_with_dirs(snapshot_id, &home_dir, config_dir.as_deref())
 }
 
 fn delete_current_app_cli_agent_session_with_dirs(
@@ -300,9 +302,14 @@ fn read_session_user_state(config_dir: Option<&Path>) -> SessionUserState {
     let Ok(contents) = fs::read_to_string(path) else {
         return SessionUserState::default();
     };
-    serde_json::from_str::<SessionUserState>(&contents)
-        .map(sanitize_session_user_state)
-        .unwrap_or_default()
+    let Ok(state) = serde_json::from_str::<SessionUserState>(&contents) else {
+        return SessionUserState::default();
+    };
+    let sanitized = sanitize_session_user_state(state.clone());
+    if sanitized != state {
+        let _ = write_session_user_state(&sanitized, config_dir);
+    }
+    sanitized
 }
 
 fn sanitize_session_user_state(mut state: SessionUserState) -> SessionUserState {
@@ -312,14 +319,19 @@ fn sanitize_session_user_state(mut state: SessionUserState) -> SessionUserState 
         .filter_map(|(key, alias)| {
             let key = key.trim().to_owned();
             let alias = alias.trim().to_owned();
-            (!key.is_empty() && !alias.is_empty()).then_some((key, alias))
+            (!key.is_empty()
+                && !alias.is_empty()
+                && !WorkspaceSessionSnapshot::is_volatile_layout_identity_key(&key))
+            .then_some((key, alias))
         })
         .collect();
     state.pinned = state
         .pinned
         .into_iter()
         .map(|key| key.trim().to_owned())
-        .filter(|key| !key.is_empty())
+        .filter(|key| {
+            !key.is_empty() && !WorkspaceSessionSnapshot::is_volatile_layout_identity_key(key)
+        })
         .collect();
     state
 }
@@ -355,16 +367,49 @@ pub(crate) fn scan_codex_sessions(home_dir: &Path, limit: usize) -> Vec<IndexedS
         .into_iter()
         .filter_map(|file| parse_codex_session(&file.path, file.modified))
         .collect::<Vec<_>>();
-    // Keep both physical rollout JSONL files and session_index rows. The UI
-    // deduplicates them into one logical session, while archive/delete needs
-    // every backing source so the same session does not reappear after refresh.
+    // `session_index.jsonl` 是 Codex 会话的外置元数据源，thread_name 不依赖
+    // Resume/materialize。它必须先按 session id 与 rollout 聚合，再对逻辑会话
+    // 限流；否则两种 source 竞争同一个配额，旧 alias 会直到 Resume 更新
+    // `updated_at` 后才偶然进入列表。
+    //
+    // 保留入选逻辑会话的全部 backing source：UI merge 用它补齐标题，删除流程
+    // 也需要同时看到 rollout 与 index，避免只删一侧后会话在 Refresh 中复活。
     sessions.extend(parse_codex_session_index(
         &home_dir.join(".codex/session_index.jsonl"),
-        limit,
     ));
-    sessions.sort_by(|left, right| right.modified.cmp(&left.modified));
-    sessions.truncate(limit);
-    sessions
+    limit_codex_session_sources(sessions, limit)
+}
+
+fn limit_codex_session_sources(sessions: Vec<IndexedSession>, limit: usize) -> Vec<IndexedSession> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let mut sources_by_session_id = HashMap::<String, Vec<IndexedSession>>::new();
+    for session in sessions {
+        sources_by_session_id
+            .entry(session.id.clone())
+            .or_default()
+            .push(session);
+    }
+
+    let mut groups = sources_by_session_id.into_values().collect::<Vec<_>>();
+    for sources in &mut groups {
+        sources.sort_by(|left, right| {
+            right
+                .modified
+                .cmp(&left.modified)
+                .then_with(|| left.path.cmp(&right.path))
+        });
+    }
+    groups.sort_by(|left, right| {
+        right[0]
+            .modified
+            .cmp(&left[0].modified)
+            .then_with(|| left[0].id.cmp(&right[0].id))
+    });
+    groups.truncate(limit);
+    groups.into_iter().flatten().collect()
 }
 
 fn recent_jsonl_files(root: &Path, limit: usize) -> Vec<CandidateFile> {
@@ -474,7 +519,7 @@ fn parse_codex_session(path: &Path, modified: SystemTime) -> Option<IndexedSessi
     })
 }
 
-fn parse_codex_session_index(path: &Path, limit: usize) -> Vec<IndexedSession> {
+fn parse_codex_session_index(path: &Path) -> Vec<IndexedSession> {
     let Ok(file) = File::open(path) else {
         return Vec::new();
     };
@@ -488,7 +533,6 @@ fn parse_codex_session_index(path: &Path, limit: usize) -> Vec<IndexedSession> {
         .filter_map(|line| parse_codex_session_index_line(path, &line, fallback_modified))
         .collect::<Vec<_>>();
     sessions.sort_by(|left, right| right.modified.cmp(&left.modified));
-    sessions.truncate(limit);
     sessions
 }
 
@@ -591,10 +635,7 @@ fn delete_codex_session_index_entry_with_dirs(
     Ok(())
 }
 
-fn remove_codex_session_index_entry(
-    snapshot_id: &str,
-    home_dir: &Path,
-) -> Result<String, String> {
+fn remove_codex_session_index_entry(snapshot_id: &str, home_dir: &Path) -> Result<String, String> {
     let (agent, session_id) = session_id_from_external_index_session_snapshot_id(snapshot_id)
         .ok_or_else(|| format!("not an indexed CLI agent session id: {snapshot_id}"))?;
     if !matches!(agent, CLIAgent::Codex) {
@@ -739,6 +780,7 @@ fn hex_value(byte: u8) -> Option<u8> {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     /// 构造一个隔离的 tempdir,模拟 home 目录结构(.claude/projects, .codex/sessions)。
@@ -749,6 +791,106 @@ mod tests {
         fs::create_dir_all(dir.path().join(".claude/projects")).expect("create claude projects");
         fs::create_dir_all(dir.path().join(".codex/sessions")).expect("create codex sessions");
         dir
+    }
+
+    fn codex_source(
+        session_id: &str,
+        path: &str,
+        label: Option<&str>,
+        modified_seconds: u64,
+        is_index_source: bool,
+    ) -> IndexedSession {
+        IndexedSession {
+            agent: CLIAgent::Codex,
+            id: session_id.to_owned(),
+            path: PathBuf::from(path),
+            snapshot_id: is_index_source
+                .then(|| external_index_session_snapshot_id(CLIAgent::Codex, session_id)),
+            cwd: None,
+            label: label.map(str::to_owned),
+            command: CLIAgent::Codex.command_prefix().to_owned(),
+            modified: SystemTime::UNIX_EPOCH + Duration::from_secs(modified_seconds),
+        }
+    }
+
+    #[test]
+    fn test_session_navigator_codex_alias_enrichment_is_visible_before_resume() {
+        let sources = vec![
+            codex_source("session-a", "rollout-a.jsonl", None, 300, false),
+            codex_source("session-b", "rollout-b.jsonl", None, 200, false),
+            // 这个 index-only 会话比 A/B 的旧别名记录更新。旧实现按 source
+            // truncate(2)，只留下两个 rollout，导致别名必须等 Resume 更新
+            // index.updated_at 后才显示。
+            codex_source("session-c", "session_index.jsonl", Some("C"), 150, true),
+            codex_source(
+                "session-a",
+                "session_index.jsonl",
+                Some("外置别名 A"),
+                10,
+                true,
+            ),
+            codex_source(
+                "session-b",
+                "session_index.jsonl",
+                Some("外置别名 B"),
+                20,
+                true,
+            ),
+        ];
+
+        let limited = limit_codex_session_sources(sources, 2);
+        let snapshots = limited
+            .into_iter()
+            .map(|source| indexed_session_to_snapshot(source, &HashSet::new()))
+            .collect::<Vec<_>>();
+        let merged =
+            WorkspaceSessionSnapshot::merge_for_session_navigator(snapshots, &HashSet::new());
+        let labels = merged
+            .into_iter()
+            .map(|session| (session.cli_agent_session_id.unwrap(), session.label))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(labels.len(), 2, "配额必须按逻辑会话计算");
+        assert_eq!(labels["session-a"].as_deref(), Some("外置别名 A"));
+        assert_eq!(labels["session-b"].as_deref(), Some("外置别名 B"));
+        assert!(!labels.contains_key("session-c"));
+    }
+
+    #[test]
+    fn test_codex_cold_scan_preloads_real_session_index_thread_name_without_resume() {
+        let home = test_home();
+        let provider_session_id = "019f5629-5daf-7381-b33e-00d8efba617f";
+        let rollout_dir = home.path().join(".codex/sessions/2026/07/12");
+        fs::create_dir_all(&rollout_dir).expect("create rollout date directory");
+        let rollout_path = rollout_dir.join(format!(
+            "rollout-2026-07-12T19-49-39-{provider_session_id}.jsonl"
+        ));
+        fs::write(
+            &rollout_path,
+            format!(
+                "{{\"timestamp\":\"2026-07-12T11:49:40.238Z\",\"type\":\"session_meta\",\"payload\":{{\"session_id\":\"{provider_session_id}\",\"id\":\"{provider_session_id}\",\"cwd\":\"/Users/admin/manga_data\"}}}}\n"
+            ),
+        )
+        .expect("write real-shape Codex rollout");
+        fs::write(
+            home.path().join(".codex/session_index.jsonl"),
+            format!(
+                "{{\"id\":\"{provider_session_id}\",\"thread_name\":\"打招呼\",\"updated_at\":\"2026-07-12T11:49:43.413457Z\"}}\n"
+            ),
+        )
+        .expect("write real-shape Codex session index");
+
+        let snapshots = scan_current_app_cli_agent_sessions_with_dirs(80, home.path(), None);
+        let merged =
+            WorkspaceSessionSnapshot::merge_for_session_navigator(snapshots, &HashSet::new());
+        let session = merged
+            .iter()
+            .find(|session| session.cli_agent_session_id.as_deref() == Some(provider_session_id))
+            .expect("cold scan should discover the Codex session");
+
+        assert_eq!(session.label.as_deref(), Some("打招呼"));
+        assert_eq!(session.cwd.as_deref(), Some("/Users/admin/manga_data"));
+        assert!(!session.is_live_container);
     }
 
     #[test]
@@ -824,5 +966,39 @@ mod tests {
         let snapshot_id = external_session_snapshot_id_for_path(CLIAgent::Claude, &session_path);
 
         assert!(!external_jsonl_session_source_exists(&snapshot_id));
+    }
+}
+
+#[cfg(test)]
+mod session_user_state_identity_tests {
+    use super::*;
+
+    #[test]
+    fn test_session_user_state_drops_volatile_layout_identity_debt() {
+        let state = SessionUserState {
+            aliases: HashMap::from([
+                ("tab:1:leaf:0".to_owned(), "旧坐标".to_owned()),
+                (
+                    "local::source:tab:1:leaf:0".to_owned(),
+                    "旧逻辑坐标".to_owned(),
+                ),
+                ("local::pane:deadbeef".to_owned(), "稳定 pane".to_owned()),
+                (
+                    "local::agent:Codex:provider-id".to_owned(),
+                    "稳定 agent".to_owned(),
+                ),
+            ]),
+            pinned: HashSet::from(["tab:1:leaf:0".to_owned(), "local::pane:deadbeef".to_owned()]),
+        };
+
+        let sanitized = sanitize_session_user_state(state);
+        assert_eq!(sanitized.aliases.len(), 2);
+        assert!(!sanitized.aliases.contains_key("tab:1:leaf:0"));
+        assert!(!sanitized.aliases.contains_key("local::source:tab:1:leaf:0"));
+        assert_eq!(sanitized.aliases["local::pane:deadbeef"], "稳定 pane");
+        assert_eq!(
+            sanitized.pinned,
+            HashSet::from(["local::pane:deadbeef".to_owned()])
+        );
     }
 }

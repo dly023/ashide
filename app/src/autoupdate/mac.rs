@@ -23,7 +23,6 @@ use warp_core::macos::get_bundle_path;
 use warpui::{AppContext, ModelContext, SingletonEntity};
 
 use crate::{
-    appearance::AppearanceManager,
     autoupdate::{AutoupdateStage, AutoupdateState},
     channel::{Channel, ChannelState},
     safe_info,
@@ -120,10 +119,6 @@ where
                         result
                     },
                     move |autoupdate_state, result, ctx| {
-                        if result.is_ok() {
-                            // Reset app icon to previously selected app icon
-                            AppearanceManager::as_ref(ctx).set_app_icon(ctx);
-                        }
                         autoupdate_state.clear_downloaded_update(&update_id_clone, ctx);
                         callback(autoupdate_state, result, ctx);
                     },

@@ -112,11 +112,12 @@ fn test_deduplicate_no_snapshots() {
 fn test_terminal_window_snapshot(vertical_tabs_panel_open: bool) -> WindowSnapshot {
     WindowSnapshot {
         environment: None,
-        workspace_sessions: vec![],
+        restored_workspace_sessions: vec![],
         tabs: vec![TabSnapshot {
             environment: None,
             custom_title: None,
             root: PaneNodeSnapshot::Leaf(LeafSnapshot {
+                container_uuid: vec![120; 16],
                 is_focused: true,
                 custom_vertical_tabs_title: None,
                 contents: LeafContents::Terminal(TerminalPaneSnapshot {
@@ -168,8 +169,6 @@ fn test_sqlite_round_trips_environment_snapshot() {
 
     let mut window = test_terminal_window_snapshot(false);
     window.environment = Some(EnvironmentSnapshot::local(Some("/tmp".to_string())));
-    window.workspace_sessions =
-        WorkspaceSessionSnapshot::from_tabs(&window.tabs, window.environment.as_ref());
 
     let app_state = AppState {
         windows: vec![window],
@@ -196,7 +195,11 @@ fn test_sqlite_round_trips_environment_snapshot() {
         environment.lifecycle_state,
         EnvironmentLifecycleState::Connected
     );
-    let sessions = &restored.windows[0].workspace_sessions;
+    assert!(restored.windows[0].restored_workspace_sessions.is_empty());
+    let sessions = WorkspaceSessionSnapshot::from_tabs(
+        &restored.windows[0].tabs,
+        restored.windows[0].environment.as_ref(),
+    );
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].kind, WorkspaceSessionKind::Terminal);
     assert_eq!(
@@ -239,8 +242,6 @@ fn test_sqlite_round_trips_tab_scoped_environments() {
         terminal.cwd = Some("/root/repo".to_string());
     }
     window.tabs.push(remote_tab);
-    window.workspace_sessions =
-        WorkspaceSessionSnapshot::from_tabs(&window.tabs, window.environment.as_ref());
 
     let app_state = AppState {
         windows: vec![window],
@@ -278,7 +279,11 @@ fn test_sqlite_round_trips_tab_scoped_environments() {
         Some("ssh-config:dev-150")
     );
 
-    let sessions = &restored.windows[0].workspace_sessions;
+    assert!(restored.windows[0].restored_workspace_sessions.is_empty());
+    let sessions = WorkspaceSessionSnapshot::from_tabs(
+        &restored.windows[0].tabs,
+        restored.windows[0].environment.as_ref(),
+    );
     assert_eq!(sessions.len(), 2);
     assert_eq!(
         sessions[0].environment_authority_key.as_deref(),
@@ -298,8 +303,9 @@ fn test_sqlite_round_trips_cli_agent_workspace_session_metadata() {
 
     let mut window = test_terminal_window_snapshot(false);
     window.environment = Some(EnvironmentSnapshot::local(Some("/repo".to_string())));
-    window.workspace_sessions = vec![WorkspaceSessionSnapshot {
-        id: "tab:0:leaf:0".to_string(),
+    window.restored_workspace_sessions = vec![WorkspaceSessionSnapshot {
+        id: "historical:ashide:conv-2".to_string(),
+        container_uuid: None,
         kind: WorkspaceSessionKind::AgentTerminal,
         label: Some("Codex refactor".to_string()),
         environment_authority_key: Some("local:/repo".to_string()),
@@ -329,7 +335,7 @@ fn test_sqlite_round_trips_cli_agent_workspace_session_metadata() {
         .expect("app state should load")
         .app_state;
 
-    let sessions = &restored.windows[0].workspace_sessions;
+    let sessions = &restored.windows[0].restored_workspace_sessions;
     assert_eq!(sessions.len(), 1);
     let session = &sessions[0];
     assert_eq!(session.kind, WorkspaceSessionKind::AgentTerminal);
@@ -348,6 +354,103 @@ fn test_sqlite_round_trips_cli_agent_workspace_session_metadata() {
     assert_eq!(session.conversation_ids, vec!["conv-1", "conv-2"]);
     assert_eq!(session.active_conversation_id.as_deref(), Some("conv-2"));
     assert!(session.is_active);
+}
+
+#[test]
+fn test_sqlite_round_trips_terminal_cli_agent_binding_for_cold_restore() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let database_path = tempdir.path().join("ashide.sqlite");
+    let mut conn = setup_database(&database_path).expect("database should initialize");
+
+    let mut window = test_terminal_window_snapshot(false);
+    let PaneNodeSnapshot::Leaf(leaf) = &mut window.tabs[0].root else {
+        panic!("expected terminal leaf");
+    };
+    leaf.container_uuid = vec![0xca, 0xfe, 0xba, 0xbe];
+    let LeafContents::Terminal(terminal) = &mut leaf.contents else {
+        panic!("expected terminal pane");
+    };
+    terminal.cli_agent = Some("Codex".to_string());
+    terminal.cli_command = Some("codex".to_string());
+    terminal.cli_agent_origin = Some(CliAgentSessionOrigin::PluginObserved);
+    terminal.cli_agent_session_id = Some("codex-cold-restore-session".to_string());
+    terminal.uuid = vec![0xde, 0xad, 0xbe, 0xef];
+
+    let app_state = AppState {
+        windows: vec![window],
+        active_window_index: Some(0),
+        block_lists: Default::default(),
+    };
+    save_app_state(&mut conn, &app_state).expect("app state should save");
+
+    let restored = read_sqlite_data(&mut conn, None)
+        .expect("app state should load")
+        .app_state;
+    let PaneNodeSnapshot::Leaf(leaf) = &restored.windows[0].tabs[0].root else {
+        panic!("expected restored terminal leaf");
+    };
+    let LeafContents::Terminal(terminal) = &leaf.contents else {
+        panic!("expected restored terminal pane");
+    };
+
+    assert_eq!(terminal.cli_agent.as_deref(), Some("Codex"));
+    assert_eq!(terminal.cli_command.as_deref(), Some("codex"));
+    assert_eq!(
+        terminal.cli_agent_origin,
+        Some(CliAgentSessionOrigin::PluginObserved)
+    );
+    assert_eq!(
+        terminal.cli_agent_session_id.as_deref(),
+        Some("codex-cold-restore-session")
+    );
+    assert_eq!(terminal.uuid, vec![0xde, 0xad, 0xbe, 0xef]);
+    assert_eq!(leaf.container_uuid, vec![0xca, 0xfe, 0xba, 0xbe]);
+    let sessions = WorkspaceSessionSnapshot::from_tabs(&restored.windows[0].tabs, None);
+    assert_eq!(sessions[0].logical_key(), "local::pane:cafebabe");
+}
+
+#[test]
+fn test_sqlite_round_trips_pane_container_identity() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let database_path = tempdir.path().join("ashide.sqlite");
+    let mut conn = setup_database(&database_path).expect("database should initialize");
+
+    let mut window = test_terminal_window_snapshot(false);
+    let PaneNodeSnapshot::Leaf(leaf) = &mut window.tabs[0].root else {
+        panic!("expected terminal leaf");
+    };
+    leaf.container_uuid = vec![0x11, 0x22, 0x33, 0x44];
+    let LeafContents::Terminal(terminal) = &mut leaf.contents else {
+        panic!("expected terminal pane");
+    };
+    terminal.uuid = vec![0xaa, 0xbb, 0xcc, 0xdd];
+
+    save_app_state(
+        &mut conn,
+        &AppState {
+            windows: vec![window],
+            active_window_index: Some(0),
+            block_lists: Default::default(),
+        },
+    )
+    .expect("app state should save");
+
+    let restored = read_sqlite_data(&mut conn, None)
+        .expect("app state should load")
+        .app_state;
+    let PaneNodeSnapshot::Leaf(leaf) = &restored.windows[0].tabs[0].root else {
+        panic!("expected restored terminal leaf");
+    };
+    let LeafContents::Terminal(terminal) = &leaf.contents else {
+        panic!("expected restored terminal pane");
+    };
+
+    assert_eq!(leaf.container_uuid, vec![0x11, 0x22, 0x33, 0x44]);
+    assert_eq!(terminal.uuid, vec![0xaa, 0xbb, 0xcc, 0xdd]);
+    let session = WorkspaceSessionSnapshot::from_tabs(&restored.windows[0].tabs, None)
+        .pop()
+        .expect("restored live session");
+    assert_eq!(session.logical_key(), "local::pane:11223344");
 }
 
 #[test]
@@ -459,11 +562,12 @@ fn test_sqlite_round_trips_custom_vertical_tabs_title() {
     let app_state = AppState {
         windows: vec![WindowSnapshot {
             environment: None,
-            workspace_sessions: vec![],
+            restored_workspace_sessions: vec![],
             tabs: vec![TabSnapshot {
                 environment: None,
                 custom_title: None,
                 root: PaneNodeSnapshot::Leaf(LeafSnapshot {
+                    container_uuid: vec![21; 16],
                     is_focused: true,
                     custom_vertical_tabs_title: Some("Production API".to_string()),
                     contents: LeafContents::Terminal(TerminalPaneSnapshot {
@@ -537,11 +641,12 @@ fn test_sqlite_round_trips_code_pane_with_multiple_tabs() {
     let app_state = AppState {
         windows: vec![WindowSnapshot {
             environment: None,
-            workspace_sessions: vec![],
+            restored_workspace_sessions: vec![],
             tabs: vec![TabSnapshot {
                 environment: None,
                 custom_title: None,
                 root: PaneNodeSnapshot::Leaf(LeafSnapshot {
+                    container_uuid: vec![99; 16],
                     is_focused: true,
                     custom_vertical_tabs_title: None,
                     contents: LeafContents::Code(CodePaneSnapShot::Local {
@@ -698,4 +803,46 @@ fn test_local_permissions_reject_legacy_team_owner() {
         super::to_stored_object_permissions(&db_permissions, None),
         None
     );
+}
+
+#[test]
+fn test_cold_restore_keeps_live_tabs_out_of_virtual_session_store() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let database_path = tempdir.path().join("ashide.sqlite");
+    let mut conn = setup_database(&database_path).expect("database should initialize");
+
+    let mut window = test_terminal_window_snapshot(false);
+    let PaneNodeSnapshot::Leaf(LeafSnapshot {
+        container_uuid,
+        contents: LeafContents::Terminal(terminal),
+        ..
+    }) = &mut window.tabs[0].root
+    else {
+        panic!("expected terminal leaf");
+    };
+    *container_uuid = vec![0x44, 0x55];
+    terminal.uuid = vec![0xaa, 0xbb];
+    window.restored_workspace_sessions.clear();
+
+    save_app_state(
+        &mut conn,
+        &AppState {
+            windows: vec![window],
+            active_window_index: Some(0),
+            block_lists: Default::default(),
+        },
+    )
+    .expect("app state should save");
+
+    let restored = read_sqlite_data(&mut conn, None)
+        .expect("app state should load")
+        .app_state;
+    let window = &restored.windows[0];
+    assert!(window.restored_workspace_sessions.is_empty());
+
+    let live_sessions =
+        WorkspaceSessionSnapshot::from_tabs(&window.tabs, window.environment.as_ref());
+    assert_eq!(live_sessions.len(), 1);
+    assert!(live_sessions[0].is_live_container());
+    assert_eq!(live_sessions[0].logical_key(), "local::pane:4455");
 }

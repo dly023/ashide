@@ -56,6 +56,7 @@ use crate::{
 use environment_runtime_placeholder_pane::EnvironmentRuntimePlaceholderView;
 use serde::{Deserialize, Serialize};
 use url::Url;
+use uuid::Uuid;
 use warp_core::HostId;
 use warpui::{
     elements::{DispatchEventResult, EventHandler, MouseInBehavior},
@@ -737,6 +738,8 @@ where
 /// views ([`PaneView`] and [`PaneHeader`]) can communicate changes
 /// to one another.
 pub struct PaneConfiguration {
+    /// Pane 的跨重排、跨重启稳定容器身份；布局坐标和 EntityId 仅用于当前运行时定位。
+    container_uuid: Vec<u8>,
     title: String,
     title_secondary: String,
     custom_vertical_tabs_title: Option<String>,
@@ -764,6 +767,7 @@ impl Entity for PaneConfiguration {
 impl PaneConfiguration {
     pub fn new(title: impl Into<String>) -> Self {
         Self {
+            container_uuid: Uuid::new_v4().as_bytes().to_vec(),
             title: title.into(),
             title_secondary: String::from(""),
             custom_vertical_tabs_title: None,
@@ -773,6 +777,18 @@ impl PaneConfiguration {
             dim_even_if_focused: false,
             header_left_inset: 0.,
         }
+    }
+
+    pub fn container_uuid(&self) -> &[u8] {
+        &self.container_uuid
+    }
+
+    pub fn restore_container_uuid(&mut self, container_uuid: Vec<u8>) {
+        assert!(
+            !container_uuid.is_empty(),
+            "持久化 pane 必须提供非空 container UUID"
+        );
+        self.container_uuid = container_uuid;
     }
 
     pub fn title(&self) -> &str {
@@ -1159,20 +1175,8 @@ pub enum PaneEvent {
 }
 
 #[cfg(test)]
-mod provider_pane_variant_compat_tests {
+mod provider_pane_variant_tests {
     use super::IPaneType;
-
-    #[test]
-    fn legacy_provider_pane_type_names_deserialize_to_provider_neutral_variants() {
-        assert_eq!(
-            serde_json::from_str::<IPaneType>("\"SshServer\"").unwrap(),
-            IPaneType::ProviderConnection
-        );
-        assert_eq!(
-            serde_json::from_str::<IPaneType>("\"Sftp\"").unwrap(),
-            IPaneType::ProviderFileBrowser
-        );
-    }
 
     #[test]
     fn provider_pane_type_names_serialize_with_provider_neutral_variants() {

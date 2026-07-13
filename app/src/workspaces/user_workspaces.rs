@@ -285,7 +285,7 @@ impl UserWorkspaces {
         !self.workspaces.is_empty()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "integration_tests"))]
     pub fn update_workspaces(&mut self, workspaces: Vec<Workspace>, ctx: &mut ModelContext<Self>) {
         *self.workspaces = workspaces;
         self.notify_and_emit_teams_changed(ctx);

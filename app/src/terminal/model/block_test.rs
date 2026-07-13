@@ -1373,9 +1373,14 @@ fn test_restored_block_used_current_app_environment() {
 }
 
 #[test]
-fn test_deserialize_legacy_agent_view_visibility_agent_variant() {
+fn test_round_trip_current_agent_view_visibility_schema() {
     let origin_conversation_id = AIConversationId::new();
-    let json = format!("{{\"Agent\":{{\"conversation_id\":\"{origin_conversation_id}\"}}}}");
+    let visibility = SerializedAgentViewVisibility::Agent {
+        origin_conversation_id,
+        pending_other_conversation_ids: HashSet::new(),
+        other_conversation_ids: HashSet::new(),
+    };
+    let json = serde_json::to_string(&visibility).unwrap();
 
     let visibility: SerializedAgentViewVisibility = serde_json::from_str(&json).unwrap();
     match visibility {

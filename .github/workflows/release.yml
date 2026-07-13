@@ -137,9 +137,9 @@ jobs:
             target/release-artifacts/Ashide-macos.zip.sha256
 
   build-linux-cli:
-    name: Linux CLI
+    name: Linux CLI and remote helpers
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -156,16 +156,26 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/cargo-about
+            ~/.cargo/bin/cargo-zigbuild
           key: linux-cargo-tools-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             linux-cargo-tools-
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
 
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
           ./script/linux/install_build_deps
+          rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
           if ! command -v cargo-about >/dev/null 2>&1; then
             cargo install --locked cargo-about@0.8.4
+          fi
+          if ! command -v cargo-zigbuild >/dev/null 2>&1; then
+            cargo install --locked cargo-zigbuild@0.22.3
           fi
 
       - name: Build Linux CLI bundle
@@ -193,7 +203,13 @@ jobs:
           cd target/release-artifacts
           sha256sum ashide-linux-x64.tar.gz > ashide-linux-x64.tar.gz.sha256
 
-      - name: Upload Linux artifact
+      - name: Build versioned remote helper artifacts
+        run: |
+          ./script/make_release_helper_artifacts \
+            --channel "$RELEASE_CHANNEL" \
+            --release-tag "$RELEASE_TAG"
+
+      - name: Upload Linux and remote helper artifacts
         uses: actions/upload-artifact@v4
         with:
           name: release-linux-cli
@@ -201,6 +217,9 @@ jobs:
           path: |
             target/release-artifacts/ashide-linux-x64.tar.gz
             target/release-artifacts/ashide-linux-x64.tar.gz.sha256
+            target/release-artifacts/ashide-linux-x86_64.tar.gz
+            target/release-artifacts/ashide-linux-aarch64.tar.gz
+            target/release-artifacts/SHA256SUMS
 
   build-windows:
     name: Windows installer

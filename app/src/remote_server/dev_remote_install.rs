@@ -1664,6 +1664,25 @@ mod tests {
     }
 
     #[test]
+    fn release_workflow_publishes_versioned_remote_helper_assets() {
+        let workflow = include_str!("../../../.github/workflows/release.yml");
+        let artifact_script = include_str!("../../../script/make_release_helper_artifacts");
+
+        assert!(workflow.contains("script/make_release_helper_artifacts"));
+        assert!(workflow.contains("ashide-linux-x86_64.tar.gz"));
+        assert!(workflow.contains("ashide-linux-aarch64.tar.gz"));
+        assert!(
+            workflow.contains("target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl")
+        );
+        assert!(workflow.contains("cargo-zigbuild@0.22.3"));
+        assert!(artifact_script.contains(
+            "build_linux_helper x86_64-unknown-linux-musl x86_64\n\
+             build_linux_helper aarch64-unknown-linux-musl aarch64"
+        ));
+        assert!(!artifact_script.contains("Skipping x86_64 Linux helper build"));
+    }
+
+    #[test]
     fn write_dev_remote_build_stamp_replaces_existing_stamp() {
         let tempdir = tempfile::tempdir().unwrap();
         let stamp = tempdir

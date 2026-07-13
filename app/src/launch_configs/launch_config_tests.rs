@@ -15,7 +15,7 @@ fn single_tab_snapshot(root: PaneNodeSnapshot) -> AppState {
     AppState {
         windows: vec![WindowSnapshot {
             environment: None,
-            workspace_sessions: vec![],
+            restored_workspace_sessions: vec![],
             tabs: vec![TabSnapshot {
                 environment: None,
                 custom_title: None,
@@ -48,7 +48,7 @@ fn multi_tab_snapshot(active_tab_index: usize, tabs: Vec<TabSnapshot>) -> AppSta
     AppState {
         windows: vec![WindowSnapshot {
             environment: None,
-            workspace_sessions: vec![],
+            restored_workspace_sessions: vec![],
             tabs,
             active_tab_index,
             bounds: None,
@@ -80,6 +80,7 @@ fn test_config_from_snapshot_flattens_single_pane() {
             (
                 PaneFlex(1.),
                 PaneNodeSnapshot::Leaf(LeafSnapshot {
+                    container_uuid: vec![83; 16],
                     is_focused: true,
                     custom_vertical_tabs_title: None,
                     contents: LeafContents::Notebook(NotebookPaneSnapshot::NotebookObject {
@@ -91,6 +92,7 @@ fn test_config_from_snapshot_flattens_single_pane() {
             (
                 PaneFlex(1.),
                 PaneNodeSnapshot::Leaf(LeafSnapshot {
+                    container_uuid: vec![94; 16],
                     is_focused: true,
                     custom_vertical_tabs_title: None,
                     contents: LeafContents::Terminal(TerminalPaneSnapshot {
@@ -157,6 +159,7 @@ fn test_config_from_snapshot_filters_panes() {
             (
                 PaneFlex(1.),
                 PaneNodeSnapshot::Leaf(LeafSnapshot {
+                    container_uuid: vec![160; 16],
                     is_focused: true,
                     custom_vertical_tabs_title: None,
                     contents: LeafContents::Terminal(TerminalPaneSnapshot {
@@ -180,6 +183,7 @@ fn test_config_from_snapshot_filters_panes() {
             (
                 PaneFlex(1.),
                 PaneNodeSnapshot::Leaf(LeafSnapshot {
+                    container_uuid: vec![183; 16],
                     is_focused: false,
                     custom_vertical_tabs_title: None,
                     contents: LeafContents::Notebook(NotebookPaneSnapshot::NotebookObject {
@@ -191,6 +195,7 @@ fn test_config_from_snapshot_filters_panes() {
             (
                 PaneFlex(1.),
                 PaneNodeSnapshot::Leaf(LeafSnapshot {
+                    container_uuid: vec![194; 16],
                     is_focused: false,
                     custom_vertical_tabs_title: None,
                     contents: LeafContents::Terminal(TerminalPaneSnapshot {
@@ -248,6 +253,7 @@ fn test_config_from_snapshot_filters_tabs() {
         children: vec![(
             PaneFlex(1.),
             PaneNodeSnapshot::Leaf(LeafSnapshot {
+                container_uuid: vec![251; 16],
                 is_focused: true,
                 custom_vertical_tabs_title: None,
                 contents: LeafContents::Notebook(NotebookPaneSnapshot::NotebookObject {
@@ -277,6 +283,7 @@ fn test_config_with_active_tab_index() {
                     children: vec![(
                         PaneFlex(1.),
                         PaneNodeSnapshot::Leaf(LeafSnapshot {
+                            container_uuid: vec![29; 16],
                             is_focused: true,
                             custom_vertical_tabs_title: None,
                             contents: LeafContents::Terminal(TerminalPaneSnapshot {
@@ -325,6 +332,7 @@ fn test_config_with_active_tab_index_and_filtered_tabs() {
                     children: vec![(
                         PaneFlex(1.),
                         PaneNodeSnapshot::Leaf(LeafSnapshot {
+                            container_uuid: vec![77; 16],
                             is_focused: true,
                             custom_vertical_tabs_title: None,
                             contents: LeafContents::Notebook(
@@ -349,6 +357,7 @@ fn test_config_with_active_tab_index_and_filtered_tabs() {
                     children: vec![(
                         PaneFlex(1.),
                         PaneNodeSnapshot::Leaf(LeafSnapshot {
+                            container_uuid: vec![101; 16],
                             is_focused: true,
                             custom_vertical_tabs_title: None,
                             contents: LeafContents::Terminal(TerminalPaneSnapshot {
@@ -396,6 +405,7 @@ fn test_config_with_active_tab_being_filtered() {
                     children: vec![(
                         PaneFlex(1.),
                         PaneNodeSnapshot::Leaf(LeafSnapshot {
+                            container_uuid: vec![148; 16],
                             is_focused: true,
                             custom_vertical_tabs_title: None,
                             contents: LeafContents::Terminal(TerminalPaneSnapshot {
@@ -431,6 +441,7 @@ fn test_config_with_active_tab_being_filtered() {
                     children: vec![(
                         PaneFlex(1.),
                         PaneNodeSnapshot::Leaf(LeafSnapshot {
+                            container_uuid: vec![183; 16],
                             is_focused: true,
                             custom_vertical_tabs_title: None,
                             contents: LeafContents::Notebook(

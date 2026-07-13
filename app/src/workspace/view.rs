@@ -8,7 +8,7 @@ pub(crate) mod onboarding;
 pub(crate) mod right_panel;
 pub(crate) mod server_file_browser;
 mod session_navigator;
-mod session_navigator_reducer;
+pub(super) mod session_navigator_reducer;
 mod startup_directory;
 #[cfg(test)]
 #[path = "view_test.rs"]
@@ -117,6 +117,7 @@ use crate::workspace::{ForkFromExchange, ForkedConversationDestination, SessionB
 use crate::BlocklistAIHistoryModel;
 
 use serde_json;
+use uuid::Uuid;
 use warpui::notification::NotificationSendError;
 
 use super::hoa_onboarding::{
@@ -1240,6 +1241,14 @@ enum DefaultSessionModeBehavior {
     Ignore,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionNavigatorSelectionIntent {
+    /// 用户明确创建新会话；deliver 完成后由新 live row 接管当前环境的 selection。
+    ExplicitCreation,
+    /// 既有历史行正在 materialize；保留 Activate 已选择的 canonical RowId。
+    ExistingRowMaterialization,
+}
+
 #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
 struct CodeReviewPaneContext {
     repo_path: Option<PathBuf>,
@@ -1478,28 +1487,7 @@ pub struct Workspace {
     /// (Claude Code, Codex, etc.). These are not live panes, but can be opened
     /// in a terminal with the 会话来源对应的恢复命令.
     indexed_cli_agent_sessions: Vec<WorkspaceSessionSnapshot>,
-    /// Stable per-window display order for Session Navigator rows. Provider
-    /// history timestamps can change during resume; once a row has appeared in
-    /// the UI, refresh/resume must not make it jump.
-    session_navigator_display_order: HashMap<String, u64>,
-    next_session_navigator_display_order: u64,
     workspace_sessions_refresh_state: WorkspaceSessionsRefreshState,
-    /// Logical Session Navigator rows that have already accepted a restore click
-    /// in this window. This gives the left rail immediate click feedback and
-    /// prevents duplicate resume commands while the live tab is being created.
-    restoring_workspace_session_keys: HashSet<String>,
-    /// Session Navigator identities that are being permanently deleted. The
-    /// navigator is assembled from live panes, local indexes, remote indexes,
-    /// restored metadata, and historical conversations; while provider deletes
-    /// are in flight, stale sources may still be present. Keep one tombstone set
-    /// at the display boundary so deleted rows disappear immediately without
-    /// making every source cache responsible for UI correctness.
-    deleting_workspace_session_keys: HashSet<String>,
-    /// Logical row that should receive the transient Session Navigator active
-    /// highlight while a restore is being materialized. This is deliberately
-    /// single-value: keepalive/live-state belongs to panes/runtimes, not to the
-    /// visual selection model.
-    active_restored_workspace_session_key: Option<String>,
     /// When true, `on_window_closed` skips detaching panes, so pane groups
     /// transferred to another window aren't torn down when this window closes
     /// via `TerminationMode::ContentTransferred`.
@@ -1624,7 +1612,8 @@ impl<'a, 'b> EnvironmentSessionTabPlanHandler
         environment: EnvironmentSnapshot,
         spawn: EnvironmentTerminalBootstrap,
     ) {
-        self.0.open_terminal_bootstrap_tab(spawn, None, self.1);
+        self.0
+            .open_terminal_bootstrap_tab_in_environment(spawn, None, environment.clone(), self.1);
         self.0
             .apply_environment_to_new_terminal_tab(environment, self.1);
     }
@@ -3681,13 +3670,8 @@ impl Workspace {
             pending_pane_group_transfer: false,
             environments: crate::workspace::environment_table::EnvironmentTable::default(),
             restored_workspace_sessions: Vec::new(),
-            indexed_cli_agent_sessions: Self::scan_terminal_cli_agent_sessions(40),
-            session_navigator_display_order: HashMap::new(),
-            next_session_navigator_display_order: 0,
+            indexed_cli_agent_sessions: Self::scan_terminal_cli_agent_sessions(),
             workspace_sessions_refresh_state: WorkspaceSessionsRefreshState::default(),
-            restoring_workspace_session_keys: HashSet::new(),
-            deleting_workspace_session_keys: HashSet::new(),
-            active_restored_workspace_session_key: None,
             suppress_detach_panes_on_window_close: false,
             is_tab_drag_preview: false,
             new_session_sidecar_menu,
@@ -4086,6 +4070,7 @@ impl Workspace {
 
                 WorkspaceSessionSnapshot {
                     id: Self::ashide_conversation_session_id(conversation_id),
+                    container_uuid: None,
                     kind: WorkspaceSessionKind::AgentTerminal,
                     // UIREQ-014: 真标题优先;无标题用首句截取兜底(取第一行非空、裁 80
                     // 字符);再没有(label None)由展示层 restored_session_label 显示 agent 名。
@@ -4335,7 +4320,8 @@ impl Workspace {
                         .clone()
                         .map(Self::normalize_restored_environment_snapshot),
                 );
-                self.restored_workspace_sessions = window_snapshot.workspace_sessions.clone();
+                self.restored_workspace_sessions =
+                    window_snapshot.restored_workspace_sessions.clone();
                 self.current_workspace_state
                     .is_workspace_session_restore_popover_open = false;
                 let active_tab_index = window_snapshot.active_tab_index;
@@ -4366,15 +4352,15 @@ impl Workspace {
                                 ctx,
                             );
                         } else {
-                            self.add_tab_with_pane_layout(
+                            let environment = tab_environment
+                                .unwrap_or_else(|| self.current_environment_for_strip(ctx));
+                            self.add_tab_with_pane_layout_in_environment(
                                 PanesLayout::Snapshot(Box::new(saved_tab.root.clone())),
                                 block_lists.clone(),
                                 custom_title,
+                                environment,
                                 ctx,
                             );
-                            if let Some(tab) = self.tabs.get_mut(tab_index) {
-                                Self::set_tab_environment_snapshot_opt(tab, tab_environment);
-                            }
                         }
                         if let Some(tab) = self.tabs.get_mut(tab_index) {
                             tab.default_directory_color = saved_tab.default_directory_color;
@@ -4455,7 +4441,7 @@ impl Workspace {
                     *options,
                     false,
                 );
-                self.open_terminal_bootstrap_tab(spawn, None, ctx);
+                self.open_explicit_terminal_bootstrap_tab(spawn, None, ctx);
                 self.check_and_trigger_onboarding(ctx);
             }
             NewWorkspaceSource::FromCloudConversationId { conversation_id } => {
@@ -5676,18 +5662,12 @@ impl Workspace {
         tab.environment = Some(environment);
     }
 
-    fn set_tab_environment_snapshot_opt(
-        tab: &mut TabData,
-        environment: Option<EnvironmentSnapshot>,
-    ) {
-        tab.environment = environment;
-    }
-
     fn set_active_tab_environment_snapshot(&mut self, environment: EnvironmentSnapshot) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab_index) {
             Self::set_tab_environment_snapshot(tab, environment.clone());
         }
         self.set_current_environment_snapshot(environment);
+        self.remember_active_tab_for_current_environment();
     }
 
     #[cfg(test)]
@@ -5915,6 +5895,23 @@ impl Workspace {
 
     fn environment_strip_dedupe_key(environment: &EnvironmentSnapshot) -> String {
         crate::workspace::environment_runtime::environment_strip_dedupe_key(environment)
+    }
+
+    fn environment_navigation_key_for_authority(authority: &str) -> &str {
+        crate::workspace::environment_runtime::environment_navigation_key(authority)
+    }
+
+    fn remember_active_tab_for_current_environment(&mut self) {
+        let Some(tab) = self.tabs.get(self.active_tab_index) else {
+            return;
+        };
+        let Some(environment) = tab.environment.as_ref() else {
+            return;
+        };
+        let navigation_key =
+            Self::environment_navigation_key_for_authority(&environment.authority_key).to_owned();
+        self.environments
+            .remember_active_tab(navigation_key, tab.pane_group.id());
     }
 
     fn should_show_runtime_project_explorer(environment: &EnvironmentSnapshot) -> bool {
@@ -6583,17 +6580,19 @@ impl Workspace {
         hide_homepage: bool,
         ctx: &mut ViewContext<Self>,
     ) {
-        if self.open_ready_environment_runtime_terminal_tab(environment.clone(), hide_homepage, ctx)
-        {
-            return;
-        }
-
-        self.open_environment_runtime_entry(
-            environment,
-            EnvironmentRuntimeEntryIntent::Terminal,
+        if !self.open_ready_environment_runtime_terminal_tab(
+            environment.clone(),
             hide_homepage,
             ctx,
-        );
+        ) {
+            self.open_environment_runtime_entry(
+                environment,
+                EnvironmentRuntimeEntryIntent::Terminal,
+                hide_homepage,
+                ctx,
+            );
+        }
+        self.select_explicitly_created_session_in_navigator(ctx);
     }
 
     fn add_environment_terminal_tab(
@@ -6610,6 +6609,7 @@ impl Workspace {
             None,
             hide_homepage,
             DefaultSessionModeBehavior::Apply,
+            SessionNavigatorSelectionIntent::ExplicitCreation,
             ctx,
         );
         self.update_left_panel_available_views(ctx);
@@ -6660,7 +6660,7 @@ impl Workspace {
             hide_homepage,
             false,
         );
-        self.open_terminal_bootstrap_tab(spawn, None, ctx);
+        self.open_explicit_terminal_bootstrap_tab(spawn, None, ctx);
     }
 
     fn open_environment_runtime_agent_entry(
@@ -6758,10 +6758,11 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         debug_assert!(Self::supports_environment_runtime_entry(&environment));
-        self.add_tab_with_pane_layout(
+        self.add_tab_with_pane_layout_in_environment(
             PanesLayout::EnvironmentRuntimePlaceholder,
             Arc::new(HashMap::new()),
             None,
+            environment.clone(),
             ctx,
         );
         let _ = hide_homepage;
@@ -6799,7 +6800,12 @@ impl Workspace {
             crate::workspace::environment_runtime::terminal_session_tab_bootstrap_from_options(
                 options, false,
             );
-        self.open_terminal_bootstrap_tab(terminal_spawn, None, ctx);
+        self.open_terminal_bootstrap_tab_in_environment(
+            terminal_spawn,
+            None,
+            environment.clone(),
+            ctx,
+        );
         self.apply_active_tab_environment(environment, ctx);
         self.move_active_tab_to_environment_group_end(&authority, ctx);
         self.update_left_panel_available_views(ctx);
@@ -6819,10 +6825,11 @@ impl Workspace {
     ) {
         let environment = Self::normalize_restored_environment_snapshot(environment);
         debug_assert!(Self::supports_environment_runtime_entry(&environment));
-        self.add_tab_with_pane_layout(
+        self.add_tab_with_pane_layout_in_environment(
             PanesLayout::EnvironmentRuntimePlaceholder,
             Arc::new(HashMap::new()),
             custom_tab_title,
+            environment.clone(),
             ctx,
         );
         self.remember_environment_runtime_snapshot(environment.clone());
@@ -6838,6 +6845,7 @@ impl Workspace {
         conversation_restoration: Option<ConversationRestorationInNewPaneType>,
         hide_homepage: bool,
         default_session_mode_behavior: DefaultSessionModeBehavior,
+        selection_intent: SessionNavigatorSelectionIntent,
         ctx: &mut ViewContext<Self>,
     ) {
         let requires_current_app_terminal_capabilities =
@@ -6857,7 +6865,7 @@ impl Workspace {
             current_app_spawn,
             hide_homepage,
         );
-        self.open_environment_session_tab_plan(plan, ctx);
+        self.open_environment_session_tab_plan(plan, selection_intent, ctx);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6880,6 +6888,7 @@ impl Workspace {
             conversation_restoration,
             hide_homepage,
             default_session_mode_behavior,
+            SessionNavigatorSelectionIntent::ExplicitCreation,
             ctx,
         );
         environment
@@ -6954,6 +6963,7 @@ impl Workspace {
         self.active_tab_index = index;
         self.sync_current_environment_from_active_tab(ctx);
         self.sync_active_pane_group_environment_terminal_options(ctx);
+        self.remember_active_tab_for_current_environment();
 
         if self.vertical_tabs_panel_open
             && FeatureFlag::VerticalTabs.is_enabled()
@@ -8018,11 +8028,8 @@ impl Workspace {
     ) {
         if let Some(entry) = self.environments.entry_for_authority_mut(authority) {
             if let Some(pending_restore) = entry.pending_restore.take() {
-                self.clear_workspace_session_restoring(&pending_restore.session);
-                self.clear_active_restored_workspace_session_if_matches(
-                    &pending_restore.session,
-                    ctx,
-                );
+                self.clear_workspace_session_restoring(&pending_restore.session, ctx);
+                self.clear_session_navigator_selection_if_matches(&pending_restore.session, ctx);
             }
         }
     }
@@ -8217,7 +8224,7 @@ impl Workspace {
     ) {
         let Some(authority) = session.environment_authority_key.as_deref() else {
             log::warn!("open_restored_environment_runtime_session: missing environment authority");
-            self.clear_workspace_session_restoring(session);
+            self.clear_workspace_session_restoring(session, ctx);
             self.sync_session_navigator_sessions(ctx);
             ctx.notify();
             return;
@@ -8228,7 +8235,7 @@ impl Workspace {
             log::warn!(
                 "open_restored_environment_runtime_session: non-runtime environment authority: {authority}"
             );
-            self.clear_workspace_session_restoring(session);
+            self.clear_workspace_session_restoring(session, ctx);
             self.sync_session_navigator_sessions(ctx);
             ctx.notify();
             return;
@@ -8248,7 +8255,6 @@ impl Workspace {
             },
             ctx,
         );
-        self.set_active_restored_workspace_session_key_for_session(session, ctx);
 
         if let Some(target) = self.environment_runtime_target_for_authority(&authority) {
             let root = session
@@ -8297,7 +8303,7 @@ impl Workspace {
                 ctx,
             );
             self.mark_environment_runtime_error_for_authority(authority, error);
-            self.clear_workspace_session_restoring(session);
+            self.clear_workspace_session_restoring(session, ctx);
             self.sync_session_navigator_sessions(ctx);
             ctx.notify();
             return;
@@ -8361,8 +8367,8 @@ impl Workspace {
                 "open_terminal_bootstrap_restored_session_terminal: refusing environment runtime session {}",
                 Self::workspace_session_logical_key(session)
             );
-            self.clear_workspace_session_restoring(session);
-            self.clear_active_restored_workspace_session_if_matches(session, ctx);
+            self.clear_workspace_session_restoring(session, ctx);
+            self.clear_session_navigator_selection_if_matches(session, ctx);
             self.sync_session_navigator_sessions(ctx);
             ctx.notify();
             return;
@@ -8375,7 +8381,13 @@ impl Workspace {
             false,
             false,
         );
-        self.open_terminal_bootstrap_tab(spawn, session.label.clone(), ctx);
+        let environment = self.current_environment_for_strip(ctx);
+        self.open_terminal_bootstrap_tab_in_environment(
+            spawn,
+            session.label.clone(),
+            environment,
+            ctx,
+        );
 
         let mut restored_terminal_view = None;
         self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
@@ -8395,15 +8407,9 @@ impl Workspace {
         if let Some(terminal_view) = restored_terminal_view {
             self.register_restored_cli_agent_session(&terminal_view, session, ctx);
         }
-        // The terminal-bootstrap restore path (used by both ordinary local
-        // restores AND session-bridge fork-resume) inserts into
-        // `restoring_workspace_session_keys` before opening the tab. The
-        // environment-runtime path clears that key when the terminal is
-        // created (see open_environment_runtime_terminal), but this bootstrap
-        // path did not — so the navigator row kept rendering the resuming
-        // spinner forever after a fork/restore succeeded. Clear it now that
-        // the terminal exists and the CLI-agent session is registered.
-        self.clear_workspace_session_restoring(session);
+        // 注册 live identity 后立刻 Refresh：reducer 在同一事务中完成
+        // virtual → live RowId alias、selection 投影和 restoring 清理。
+        // 禁止先发 RestoreFinished；那会在 live row 尚未进入 snapshot 时制造 stale selection。
         self.sync_session_navigator_sessions(ctx);
         ctx.notify();
     }
@@ -8509,7 +8515,7 @@ impl Workspace {
             .is_workspace_session_restore_popover_open = false;
 
         let should_connect = if let Some(index) =
-            self.tab_index_for_environment_authority(&environment.authority_key)
+            self.preferred_tab_index_for_environment_authority(&environment.authority_key)
         {
             log::info!(
                 "ASHIDE_ENV_RUNTIME open_or_switch existing_tab index={} authority={}",
@@ -8525,10 +8531,11 @@ impl Workspace {
                 environment.authority_key,
                 transport.connection_ref()
             );
-            self.add_tab_with_pane_layout(
+            self.add_tab_with_pane_layout_in_environment(
                 PanesLayout::EnvironmentRuntimePlaceholder,
                 Arc::new(HashMap::new()),
                 Some(environment.label.clone()),
+                environment.clone(),
                 ctx,
             );
             true
@@ -9031,11 +9038,22 @@ impl Workspace {
                         session_id,
                     )
                     .await?;
-                let user_state =
-                    crate::workspace::environment_runtime::read_environment_cli_agent_session_user_state(
-                        client,
-                    )
-                    .await?;
+                let user_state = match crate::workspace::environment_runtime::read_environment_cli_agent_session_user_state(
+                    client,
+                )
+                .await
+                {
+                    Ok(user_state) => Some(user_state),
+                    Err(error) => {
+                        // alias/pin 是 enrichment，不是远程会话实体扫描的成功条件。
+                        // 保留当前 Environment 已缓存的 user-state，并继续提交 records；
+                        // 否则一次 sidecar 读取失败会让整个 Session Navigator 变空。
+                        log::warn!(
+                            "Environment Session Navigator user-state enrichment failed: {error}"
+                        );
+                        None
+                    }
+                };
                 Ok::<_, String>((authority, session_id, records, user_state))
             },
             move |workspace, result, ctx| {
@@ -9071,17 +9089,25 @@ impl Workspace {
                     "Environment Session Navigator scan found {} sessions for {authority}",
                     records.len()
                 );
+                let effective_user_state =
+                    Self::environment_cli_agent_session_user_state_for_scan(
+                        workspace.workspace_session_user_state_for_authority(&authority),
+                        user_state.clone(),
+                    );
                 let sessions = Self::environment_cli_agent_session_records_to_snapshots(
                     &authority,
                     records,
-                    &user_state,
+                    &effective_user_state,
                 );
                 workspace.remember_indexed_environment_cli_agent_sessions(
                     authority.clone(),
                     sessions,
                 );
-                workspace
-                    .remember_indexed_environment_cli_agent_session_user_state(authority, user_state);
+                if let Some(user_state) = user_state {
+                    workspace.remember_indexed_environment_cli_agent_session_user_state(
+                        authority, user_state,
+                    );
+                }
                 workspace.sync_session_navigator_sessions(ctx);
                 if let Some(refresh_generation) = refresh_generation {
                     let session_count = workspace.session_navigator_sessions(ctx).len();
@@ -9124,6 +9150,7 @@ impl Workspace {
                     );
                 let mut snapshot = WorkspaceSessionSnapshot {
                     id: id.clone(),
+                    container_uuid: None,
                     kind: WorkspaceSessionKind::AgentTerminal,
                     label: record.label.filter(|label| !label.trim().is_empty()),
                     environment_authority_key: Some(authority.to_owned()),
@@ -9144,6 +9171,16 @@ impl Workspace {
                 Some(snapshot)
             })
             .collect()
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn environment_cli_agent_session_user_state_for_scan(
+        cached: crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserState,
+        refreshed: Option<
+            crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserState,
+        >,
+    ) -> crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserState {
+        refreshed.unwrap_or(cached)
     }
     fn resolve_environment_runtime_root(
         &mut self,
@@ -9225,7 +9262,13 @@ impl Workspace {
             true,
             ctx,
         );
-        self.open_left_panel(ctx);
+        let authority_is_active = self
+            .current_environment()
+            .as_ref()
+            .is_some_and(|environment| environment.authority_key == authority);
+        if authority_is_active {
+            self.open_left_panel(ctx);
+        }
         if startup_command.is_none()
             && !self.has_pending_environment_runtime_entry_for_authority(&authority)
             && self.active_environment_runtime_placeholder_matches_authority(&authority, ctx)
@@ -9770,11 +9813,7 @@ impl Workspace {
                     &pending_restore.session,
                     ctx,
                 );
-                self.set_active_restored_workspace_session_key_for_session(
-                    &pending_restore.session,
-                    ctx,
-                );
-                self.clear_workspace_session_restoring(&pending_restore.session);
+                // 调用方紧接着 Refresh，由 reducer 原子完成 materialize 与 lifecycle 清理。
                 true
             }
             (Some(pending_restore), None) => {
@@ -9782,17 +9821,18 @@ impl Workspace {
                     "open_environment_runtime_terminal: failed to restore environment runtime session {}",
                     Self::workspace_session_logical_key(&pending_restore.session)
                 );
-                self.clear_workspace_session_restoring(&pending_restore.session);
-                self.clear_active_restored_workspace_session_if_matches(
-                    &pending_restore.session,
-                    ctx,
-                );
+                self.clear_workspace_session_restoring(&pending_restore.session, ctx);
+                self.clear_session_navigator_selection_if_matches(&pending_restore.session, ctx);
                 self.sync_session_navigator_sessions(ctx);
                 ctx.notify();
                 false
             }
             (None, _) => {
-                if self.active_restored_workspace_session_key.is_some() {
+                if self
+                    .snapshot_session_navigator_state()
+                    .selected_row_id
+                    .is_some()
+                {
                     self.sync_session_navigator_sessions(ctx);
                 }
                 false
@@ -9905,7 +9945,7 @@ impl Workspace {
         authority: &str,
         ctx: &mut ViewContext<Self>,
     ) -> bool {
-        if let Some(tab_index) = self.tab_index_for_environment_authority(authority) {
+        if let Some(tab_index) = self.preferred_tab_index_for_environment_authority(authority) {
             self.activate_tab_internal(tab_index, ctx);
             return true;
         }
@@ -9917,10 +9957,11 @@ impl Workspace {
         log::info!(
             "ASHIDE_ENV_RUNTIME recreating missing environment tab for authority={authority}"
         );
-        self.add_tab_with_pane_layout(
+        self.add_tab_with_pane_layout_in_environment(
             PanesLayout::EnvironmentRuntimePlaceholder,
             Arc::new(HashMap::new()),
             Some(environment.label.clone()),
+            environment.clone(),
             ctx,
         );
         self.apply_active_tab_environment(environment, ctx);
@@ -9949,12 +9990,16 @@ impl Workspace {
             .as_ref()
             .is_none_or(|environment| environment.authority_key != authority)
         {
-            if !self.ensure_environment_tab_for_authority(&authority, ctx) {
-                log::warn!(
-                    "open_environment_runtime_terminal_for_authority_context: no tab for environment {authority}"
-                );
-                return;
-            }
+            log::info!(
+                "open_environment_runtime_terminal_for_authority_context: {authority} completed in background; preserving pending entry until explicit activation"
+            );
+            return;
+        }
+        if !self.ensure_environment_tab_for_authority(&authority, ctx) {
+            log::warn!(
+                "open_environment_runtime_terminal_for_authority_context: no tab for environment {authority}"
+            );
+            return;
         }
 
         self.set_active_environment_workspace_root_for_authority(&authority, root.to_owned(), ctx);
@@ -11343,10 +11388,11 @@ impl Workspace {
             &mut environment,
             Self::template_entry_root(&primary_entry),
         );
-        self.add_tab_with_pane_layout(
+        self.add_tab_with_pane_layout_in_environment(
             PanesLayout::EnvironmentRuntimeTemplate(template),
             Arc::new(HashMap::new()),
             None,
+            environment.clone(),
             ctx,
         );
         self.remember_environment_runtime_snapshot(environment.clone());
@@ -12234,6 +12280,7 @@ impl Workspace {
         });
 
         let panes_layout = PanesLayout::Snapshot(Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
+            container_uuid: Uuid::new_v4().as_bytes().to_vec(),
             is_focused: true,
             custom_vertical_tabs_title: None,
             contents: LeafContents::Settings(SettingsPaneSnapshot::Local {
@@ -14349,8 +14396,8 @@ impl Workspace {
         pane_id: PaneId,
         ctx: &mut ViewContext<Self>,
     ) {
-        let active_restored_key =
-            self.active_restored_workspace_session_key_for_pane(pane_group_id, pane_id, ctx);
+        let session_navigator_selection_key =
+            self.session_navigator_selection_key_for_pane(pane_group_id, pane_id, ctx);
         let Some(pane_group_view) = self.get_pane_group_view_with_id(pane_group_id) else {
             log::error!("Could not close pane because pane group doesn't exist");
             return;
@@ -14358,7 +14405,7 @@ impl Workspace {
         pane_group_view.update(ctx, |pane_group, ctx| {
             pane_group.close_pane(pane_id, ctx);
         });
-        self.clear_active_restored_workspace_session_key_if_present(active_restored_key, ctx);
+        self.clear_session_navigator_selection_key_if_present(session_navigator_selection_key, ctx);
     }
 
     fn handle_close_session_confirmation_dialog_event(
@@ -14589,7 +14636,7 @@ impl Workspace {
             .tab_views()
             .enumerate()
             .filter(|(tab_index, _)| Some(*tab_index) != transferred_tab_index)
-            .map(|(tab_index, pane_group_view)| {
+            .filter_map(|(tab_index, pane_group_view)| {
                 let resizable_data = ResizableData::handle(app);
                 let modal_sizes = resizable_data.as_ref(app).get_all_handles(window_id);
 
@@ -14608,7 +14655,7 @@ impl Workspace {
                 });
 
                 let pane_group = pane_group_view.as_ref(app);
-                let root = pane_group.snapshot(app);
+                let root = pane_group.snapshot(app).into_persistable()?;
                 let environment = Some(Self::tab_environment_or_terminal_bootstrap_environment(
                     self.tabs.get(tab_index),
                     &root,
@@ -14617,7 +14664,7 @@ impl Workspace {
                     self.compute_left_panel_snapshot(pane_group_view, left_panel_width, app);
                 let right_panel =
                     self.compute_right_panel_snapshot(pane_group_view, right_panel_width, app);
-                TabSnapshot {
+                Some(TabSnapshot {
                     environment,
                     root,
                     custom_title: pane_group.custom_title(app),
@@ -14632,20 +14679,7 @@ impl Workspace {
                         .unwrap_or_default(),
                     left_panel,
                     right_panel,
-                }
-            })
-            .filter(|tab| {
-                // Filter out any tab that contains a single, read-only session.
-                !matches!(
-                    tab.root,
-                    PaneNodeSnapshot::Leaf(LeafSnapshot {
-                        contents: LeafContents::Terminal(TerminalPaneSnapshot {
-                            is_read_only: true,
-                            ..
-                        }),
-                        ..
-                    })
-                )
+                })
             })
             .collect::<Vec<_>>();
 
@@ -14707,20 +14741,13 @@ impl Workspace {
                     ),
                 )
             });
-        let mut workspace_sessions =
-            WorkspaceSessionSnapshot::from_tabs(&tabs, active_environment.as_ref());
-        for restored_session in &self.restored_workspace_sessions {
-            if !workspace_sessions
-                .iter()
-                .any(|session| session.id == restored_session.id)
-            {
-                workspace_sessions.push(restored_session.clone());
-            }
-        }
+        // tabs 是 live pane 的唯一持久化权威；这里只保存无法由 pane tree
+        // 重建的 virtual targets，避免冷启动把同一 live row 反序列化成 virtual duplicate。
+        let restored_workspace_sessions = self.restored_workspace_sessions.clone();
 
         WindowSnapshot {
             environment: active_environment,
-            workspace_sessions,
+            restored_workspace_sessions,
             tabs,
             active_tab_index,
             bounds: window_bounds,
@@ -14920,7 +14947,8 @@ impl Workspace {
             return false;
         };
         let removed_tab_had_terminal_panes = tab_data.pane_group.as_ref(ctx).has_terminal_panes();
-        let active_restored_key = self.active_restored_workspace_session_key_for_tab(index, ctx);
+        let session_navigator_selection_key =
+            self.session_navigator_selection_key_for_tab(index, ctx);
 
         // If the vertical-tabs detail sidecar is anchored to this tab's pane group, clear it.
         // Otherwise it will try to position itself against a pane row that is about to disappear
@@ -14961,9 +14989,11 @@ impl Workspace {
         }
 
         let tab_data = self.tabs.remove(index);
-        // Capture the closed tab's environment before `tab_data` is moved into the
-        // undo stack — used below to keep focus within the same environment.
-        let closed_env = tab_data.environment.clone();
+        // 在 tab_data 移入撤销栈前记录它的逻辑 Environment；同一 Environment 内
+        // 不同 tab 的 lifecycle/root/label 快照可能不同，不能拿展示元数据当分区身份。
+        let closed_environment_navigation_key = tab_data.environment.as_ref().map(|environment| {
+            Self::environment_navigation_key_for_authority(&environment.authority_key).to_owned()
+        });
 
         if add_to_undo_stack {
             let handle = ctx.handle();
@@ -14985,9 +15015,29 @@ impl Workspace {
                 // same-environment tab remains.
                 let target = (0..index)
                     .rev()
-                    .find(|&i| self.tabs[i].environment == closed_env)
+                    .find(|&i| {
+                        self.tabs[i]
+                            .environment
+                            .as_ref()
+                            .is_some_and(|environment| {
+                                closed_environment_navigation_key.as_deref()
+                                    == Some(Self::environment_navigation_key_for_authority(
+                                        &environment.authority_key,
+                                    ))
+                            })
+                    })
                     .or_else(|| {
-                        (index..self.tabs.len()).find(|&i| self.tabs[i].environment == closed_env)
+                        (index..self.tabs.len()).find(|&i| {
+                            self.tabs[i]
+                                .environment
+                                .as_ref()
+                                .is_some_and(|environment| {
+                                    closed_environment_navigation_key.as_deref()
+                                        == Some(Self::environment_navigation_key_for_authority(
+                                            &environment.authority_key,
+                                        ))
+                                })
+                        })
                     })
                     .unwrap_or_else(|| index.saturating_sub(1));
                 self.activate_tab_internal(target, ctx);
@@ -15011,7 +15061,7 @@ impl Workspace {
             }
         }
 
-        self.clear_active_restored_workspace_session_key_if_present(active_restored_key, ctx);
+        self.clear_session_navigator_selection_key_if_present(session_navigator_selection_key, ctx);
         ctx.dispatch_global_action("workspace:save_app", ());
         ctx.notify();
         removed_tab_had_terminal_panes
@@ -15346,14 +15396,16 @@ impl Workspace {
             None,
             ctx,
         );
-        self.add_tab_with_pane_layout(
+        self.add_tab_with_pane_layout_in_environment(
             PanesLayout::Snapshot(Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
+                container_uuid: Uuid::new_v4().as_bytes().to_vec(),
                 is_focused: true,
                 custom_vertical_tabs_title: None,
                 contents: LeafContents::Welcome { startup_directory },
             }))),
             Arc::new(HashMap::new()),
             None,
+            environment.clone(),
             ctx,
         );
         self.apply_active_tab_environment(environment, ctx);
@@ -15362,14 +15414,16 @@ impl Workspace {
 
     fn add_get_started_tab(&mut self, ctx: &mut ViewContext<Self>) {
         let environment = self.current_environment_for_strip(ctx);
-        self.add_tab_with_pane_layout(
+        self.add_tab_with_pane_layout_in_environment(
             PanesLayout::Snapshot(Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
+                container_uuid: Uuid::new_v4().as_bytes().to_vec(),
                 is_focused: true,
                 custom_vertical_tabs_title: None,
                 contents: LeafContents::GetStarted,
             }))),
             Arc::new(HashMap::new()),
             None,
+            environment.clone(),
             ctx,
         );
         self.apply_active_tab_environment(environment, ctx);
@@ -15410,6 +15464,7 @@ impl Workspace {
                     None,
                     true, /* hide_homepage */
                     DefaultSessionModeBehavior::Ignore,
+                    SessionNavigatorSelectionIntent::ExplicitCreation,
                     ctx,
                 );
                 ctx.notify();
@@ -15494,9 +15549,16 @@ impl Workspace {
     fn open_environment_session_tab_plan(
         &mut self,
         plan: EnvironmentSessionTabPlan,
+        selection_intent: SessionNavigatorSelectionIntent,
         ctx: &mut ViewContext<Self>,
     ) {
-        plan.open_with(&mut (self, ctx));
+        plan.open_with(&mut (&mut *self, &mut *ctx));
+        if matches!(
+            selection_intent,
+            SessionNavigatorSelectionIntent::ExplicitCreation
+        ) {
+            self.select_explicitly_created_session_in_navigator(ctx);
+        }
     }
 
     /// Enters agent view with a new conversation on the active tab's terminal.
@@ -15516,19 +15578,32 @@ impl Workspace {
         });
     }
 
-    fn open_terminal_bootstrap_tab(
+    fn open_explicit_terminal_bootstrap_tab(
         &mut self,
         spawn: EnvironmentTerminalBootstrap,
         custom_tab_title: Option<String>,
         ctx: &mut ViewContext<Self>,
     ) {
+        let environment = self.current_environment_for_strip(ctx);
+        self.open_terminal_bootstrap_tab_in_environment(spawn, custom_tab_title, environment, ctx);
+        self.select_explicitly_created_session_in_navigator(ctx);
+    }
+
+    fn open_terminal_bootstrap_tab_in_environment(
+        &mut self,
+        spawn: EnvironmentTerminalBootstrap,
+        custom_tab_title: Option<String>,
+        environment: EnvironmentSnapshot,
+        ctx: &mut ViewContext<Self>,
+    ) {
         let enter_agent_view = spawn.enter_agent_view;
-        self.add_tab_with_pane_layout(
+        self.add_tab_with_pane_layout_in_environment(
             crate::workspace::environment_runtime::terminal_bootstrap_panes_layout(Box::new(
                 spawn.options,
             )),
             Arc::new(HashMap::new()),
             custom_tab_title,
+            environment,
             ctx,
         );
         if enter_agent_view {
@@ -15544,7 +15619,13 @@ impl Workspace {
         let spawn = crate::workspace::environment_runtime::terminal_session_tab_bootstrap(
             None, None, None, false, false,
         );
-        self.open_terminal_bootstrap_tab(spawn, custom_tab_title, ctx);
+        self.open_terminal_bootstrap_tab_in_environment(
+            spawn,
+            custom_tab_title,
+            crate::workspace::environment_runtime::terminal_bootstrap_environment(None),
+            ctx,
+        );
+        self.select_explicitly_created_session_in_navigator(ctx);
     }
 
     fn add_environment_scoped_tab_with_pane_layout(
@@ -15555,7 +15636,13 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         let environment = self.current_environment_for_strip(ctx);
-        self.add_tab_with_pane_layout(panes_layout, block_lists, custom_tab_title, ctx);
+        self.add_tab_with_pane_layout_in_environment(
+            panes_layout,
+            block_lists,
+            custom_tab_title,
+            environment.clone(),
+            ctx,
+        );
         self.apply_active_tab_environment(environment, ctx);
     }
 
@@ -15564,6 +15651,24 @@ impl Workspace {
         panes_layout: PanesLayout,
         block_lists: Arc<HashMap<PaneUuid, Vec<SerializedBlockListItem>>>,
         custom_tab_title: Option<String>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let environment = self.current_environment_for_strip(ctx);
+        self.add_tab_with_pane_layout_in_environment(
+            panes_layout,
+            block_lists,
+            custom_tab_title,
+            environment,
+            ctx,
+        );
+    }
+
+    fn add_tab_with_pane_layout_in_environment(
+        &mut self,
+        panes_layout: PanesLayout,
+        block_lists: Arc<HashMap<PaneUuid, Vec<SerializedBlockListItem>>>,
+        custom_tab_title: Option<String>,
+        environment: EnvironmentSnapshot,
         ctx: &mut ViewContext<Self>,
     ) {
         // Remember whether the left panel was open on the current active pane group
@@ -15605,17 +15710,22 @@ impl Workspace {
 
         match new_tab_placement_setting {
             NewTabPlacement::AfterAllTabs => {
-                self.tabs.push(TabData::new(new_pane_group));
+                let mut tab = TabData::new(new_pane_group);
+                Self::set_tab_environment_snapshot(&mut tab, environment.clone());
+                self.tabs.push(tab);
                 self.activate_tab_internal(self.tab_count() - 1, ctx);
             }
             // Add tab after current tab
             _ => {
                 if self.tab_count() == 0 {
-                    self.tabs.push(TabData::new(new_pane_group));
+                    let mut tab = TabData::new(new_pane_group);
+                    Self::set_tab_environment_snapshot(&mut tab, environment.clone());
+                    self.tabs.push(tab);
                     self.activate_tab_internal(self.tab_count() - 1, ctx);
                 } else {
-                    self.tabs
-                        .insert(self.active_tab_index + 1, TabData::new(new_pane_group));
+                    let mut tab = TabData::new(new_pane_group);
+                    Self::set_tab_environment_snapshot(&mut tab, environment);
+                    self.tabs.insert(self.active_tab_index + 1, tab);
                     self.activate_tab_internal(self.active_tab_index + 1, ctx);
                 }
             }
@@ -15720,6 +15830,7 @@ impl Workspace {
     ) {
         // TODO: We should validate that this notebook exists and fallback if it doesn't
         let panes_layout = PanesLayout::Snapshot(Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
+            container_uuid: Uuid::new_v4().as_bytes().to_vec(),
             is_focused: true,
             custom_vertical_tabs_title: None,
             contents: LeafContents::Notebook(NotebookPaneSnapshot::NotebookObject {
@@ -15742,6 +15853,7 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         let panes_layout = PanesLayout::Snapshot(Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
+            container_uuid: Uuid::new_v4().as_bytes().to_vec(),
             is_focused: true,
             custom_vertical_tabs_title: None,
             contents: LeafContents::Workflow(WorkflowPaneSnapshot::WorkflowObject {
@@ -15764,6 +15876,7 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         let panes_layout = PanesLayout::Snapshot(Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
+            container_uuid: Uuid::new_v4().as_bytes().to_vec(),
             is_focused: true,
             custom_vertical_tabs_title: None,
             contents: LeafContents::Notebook(NotebookPaneSnapshot::CurrentAppFileNotebook {
@@ -16064,8 +16177,12 @@ impl Workspace {
         let authority = environment.authority_key.clone();
         if crate::workspace::environment_runtime::authority_uses_terminal_bootstrap(&authority) {
             let current_authority = self.current_environment_for_strip(ctx).authority_key;
-            if current_authority != authority {
-                if let Some(tab_index) = self.tab_index_for_environment_authority(&authority) {
+            if Self::environment_navigation_key_for_authority(&current_authority)
+                != Self::environment_navigation_key_for_authority(&authority)
+            {
+                if let Some(tab_index) =
+                    self.preferred_tab_index_for_environment_authority(&authority)
+                {
                     self.activate_tab_internal(tab_index, ctx);
                 } else {
                     self.add_new_session_tab_in_environment(
@@ -16076,6 +16193,7 @@ impl Workspace {
                         None,
                         false,
                         DefaultSessionModeBehavior::Ignore,
+                        SessionNavigatorSelectionIntent::ExistingRowMaterialization,
                         ctx,
                     );
                 }
@@ -16134,6 +16252,7 @@ impl Workspace {
                         None,
                         false,
                         DefaultSessionModeBehavior::Ignore,
+                        SessionNavigatorSelectionIntent::ExistingRowMaterialization,
                         ctx,
                     );
                     if let Some(terminal_view) = self
@@ -16788,6 +16907,7 @@ impl Workspace {
                 agent,
                 &receipt.session_file,
             ),
+            container_uuid: None,
             kind: WorkspaceSessionKind::AgentTerminal,
             label: Some(receipt.title.clone()).filter(|title| !title.trim().is_empty()),
             environment_authority_key: Some("local".to_owned()),
@@ -16828,9 +16948,13 @@ impl Workspace {
         });
         let startup_command =
             Self::restored_terminal_bootstrap_startup_command(&session, pending_command);
-        self.restoring_workspace_session_keys
-            .insert(session.id.clone());
-        self.restoring_workspace_session_keys.insert(logical_key);
+        self.dispatch_session_navigator_state_action(
+            session_navigator_reducer::SessionNavigatorAction::RestoreStarted {
+                session_keys: vec![session.id.clone(), logical_key.clone()],
+                selected_logical_key: Some(logical_key),
+            },
+            ctx,
+        );
         let initial_directory = session
             .cwd
             .as_deref()
@@ -16842,11 +16966,7 @@ impl Workspace {
             startup_command,
             ctx,
         );
-        // Mark the freshly forked session as the active restored session — the
-        // normal restore/activate paths do this, but the fork-resume path did
-        // not, so the navigator row rendered without its active highlight.
-        // (Also refreshes the navigator.)
-        self.set_active_restored_workspace_session_key_for_session(&session, ctx);
+        self.sync_session_navigator_sessions(ctx);
         Some(session)
     }
 
@@ -16865,6 +16985,7 @@ impl Workspace {
                 &agent,
                 &receipt.session_file,
             ),
+            container_uuid: None,
             kind: WorkspaceSessionKind::AgentTerminal,
             label: Some(receipt.title.clone()).filter(|title| !title.trim().is_empty()),
             environment_authority_key: Some(authority.to_owned()),
@@ -16904,15 +17025,15 @@ impl Workspace {
                 session.cwd.as_deref(),
             )
         });
-        self.restoring_workspace_session_keys
-            .insert(session.id.clone());
-        self.restoring_workspace_session_keys.insert(logical_key);
+        self.dispatch_session_navigator_state_action(
+            session_navigator_reducer::SessionNavigatorAction::RestoreStarted {
+                session_keys: vec![session.id.clone(), logical_key.clone()],
+                selected_logical_key: Some(logical_key),
+            },
+            ctx,
+        );
         self.open_restored_environment_runtime_session(&session, pending_command, ctx);
-        // Mark the freshly forked session as the active restored session — the
-        // normal restore/activate paths do this, but the fork-resume path did
-        // not, so the navigator row rendered without its active highlight.
-        // (Also refreshes the navigator.)
-        self.set_active_restored_workspace_session_key_for_session(&session, ctx);
+        self.sync_session_navigator_sessions(ctx);
         Some(session)
     }
 
@@ -22705,11 +22826,29 @@ impl Workspace {
     }
 
     fn tab_index_for_environment_authority(&self, authority_key: &str) -> Option<usize> {
+        let navigation_key = Self::environment_navigation_key_for_authority(authority_key);
         self.tabs.iter().position(|tab| {
-            tab.environment
-                .as_ref()
-                .is_some_and(|environment| environment.authority_key == authority_key)
+            tab.environment.as_ref().is_some_and(|environment| {
+                Self::environment_navigation_key_for_authority(&environment.authority_key)
+                    == navigation_key
+            })
         })
+    }
+
+    fn preferred_tab_index_for_environment_authority(&self, authority_key: &str) -> Option<usize> {
+        let navigation_key = Self::environment_navigation_key_for_authority(authority_key);
+        if let Some(tab_id) = self.environments.last_active_tab(navigation_key) {
+            if let Some(index) = self.tabs.iter().position(|tab| {
+                tab.pane_group.id() == tab_id
+                    && tab.environment.as_ref().is_some_and(|environment| {
+                        Self::environment_navigation_key_for_authority(&environment.authority_key)
+                            == navigation_key
+                    })
+            }) {
+                return Some(index);
+            }
+        }
+        self.tab_index_for_environment_authority(authority_key)
     }
 
     fn open_environment_snapshots(&self, ctx: &AppContext) -> Vec<EnvironmentSnapshot> {
@@ -22771,7 +22910,7 @@ impl Workspace {
         self.current_workspace_state
             .is_environment_provider_picker_open = false;
 
-        if let Some(index) = self.tab_index_for_environment_authority(authority_key) {
+        if let Some(index) = self.preferred_tab_index_for_environment_authority(authority_key) {
             self.activate_tab_internal(index, ctx);
             self.queue_active_environment_runtime_placeholder_terminal_if_needed(ctx);
             self.ensure_current_environment_runtime_transport_if_needed(ctx);
@@ -22799,10 +22938,11 @@ impl Workspace {
         };
 
         if !self.ensure_environment_tab_for_authority(authority_key, ctx) {
-            self.add_tab_with_pane_layout(
+            self.add_tab_with_pane_layout_in_environment(
                 PanesLayout::EnvironmentRuntimePlaceholder,
                 Arc::new(HashMap::new()),
                 Some(environment.label.clone()),
+                environment.clone(),
                 ctx,
             );
             self.apply_active_tab_environment(environment, ctx);
@@ -22826,9 +22966,7 @@ impl Workspace {
             self.remove_environment_runtime_authority(authority_key);
             self.clear_environment_runtime_home_root_for_authority(authority_key);
             self.clear_indexed_environment_cli_agent_sessions_for_authority(authority_key);
-            self.clear_workspace_session_restoring_for_authority(authority_key, ctx);
             self.clear_pending_environment_runtime_intents_for_authority(authority_key, ctx);
-            self.clear_active_restored_workspace_session_for_authority(authority_key, ctx);
         } else {
             // Reconnect path: clear transport handle in place so pending intents survive.
             self.environments.clear_runtime_handle(authority_key);
@@ -22844,18 +22982,49 @@ impl Workspace {
         authority_key: &str,
         ctx: &mut ViewContext<Self>,
     ) {
+        let navigation_key =
+            Self::environment_navigation_key_for_authority(authority_key).to_owned();
+        let disconnected_environment_was_active = self
+            .tabs
+            .get(self.active_tab_index)
+            .and_then(|tab| tab.environment.as_ref())
+            .is_some_and(|environment| {
+                Self::environment_navigation_key_for_authority(&environment.authority_key)
+                    == navigation_key
+            });
+        let tab_indices = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, tab)| {
+                tab.environment
+                    .as_ref()
+                    .is_some_and(|environment| environment.authority_key == authority_key)
+                    .then_some(index)
+            })
+            .collect_vec();
+
         self.disconnect_environment_runtime_state(authority_key, true, ctx);
 
-        if let Some(tab_index) = self.tab_index_for_environment_authority(authority_key) {
-            if self.tabs.len() > 1 {
-                self.close_tab(tab_index, true, false, ctx);
-            } else {
+        if !tab_indices.is_empty() {
+            if tab_indices.len() == self.tabs.len() {
                 self.add_environment_terminal_tab(
                     crate::workspace::environment_runtime::terminal_bootstrap_environment(None),
                     true,
                     ctx,
                 );
-                self.close_tab(tab_index, true, false, ctx);
+            }
+            let first_tab_index = tab_indices[0];
+            if self.close_tabs(
+                tab_indices.into_iter(),
+                OpenDialogSource::CloseTab {
+                    tab_index: first_tab_index,
+                },
+                true,
+                false,
+                ctx,
+            ) {
+                ctx.dispatch_global_action("workspace:save_app", ());
             }
         } else if self
             .current_environment()
@@ -22863,6 +23032,11 @@ impl Workspace {
             .is_some_and(|environment| environment.authority_key == authority_key)
         {
             self.reset_active_tab_to_terminal_bootstrap_environment(ctx);
+        }
+
+        self.environments.forget_navigation_context(&navigation_key);
+        if disconnected_environment_was_active {
+            self.switch_to_environment_authority("local", ctx);
         }
 
         self.update_left_panel_available_views(ctx);
@@ -23138,7 +23312,10 @@ impl Workspace {
         let is_current = self
             .current_environment()
             .as_ref()
-            .is_some_and(|environment| environment.authority_key == authority_key);
+            .is_some_and(|environment| {
+                Self::environment_navigation_key_for_authority(&environment.authority_key)
+                    == Self::environment_navigation_key_for_authority(&authority_key)
+            });
         let is_open = self
             .tab_index_for_environment_authority(&authority_key)
             .is_some();
@@ -23574,8 +23751,12 @@ impl Workspace {
         }
 
         let active_environment = self.current_environment_for_strip(ctx);
+        let active_environment_navigation_key =
+            Self::environment_navigation_key_for_authority(&active_environment.authority_key);
         for environment in self.open_environment_snapshots(ctx) {
-            let is_active = environment.authority_key == active_environment.authority_key;
+            let is_active =
+                Self::environment_navigation_key_for_authority(&environment.authority_key)
+                    == active_environment_navigation_key;
             tab_bar.add_child(
                 Container::new(self.render_environment_strip_chip(
                     environment,

@@ -990,7 +990,6 @@ settings-exec-profile-editor-mcp-denylist-desc = Oz による呼び出しが許�
 # Categories
 settings-appearance-category-themes = テーマ
 settings-appearance-category-language = 言語
-settings-appearance-category-icon = アイコン
 settings-appearance-category-window = ウィンドウ
 settings-appearance-category-input = 入力
 settings-appearance-category-panes = ペイン
@@ -1009,9 +1008,6 @@ settings-appearance-theme-sync-os-label = OS と同期
 settings-appearance-theme-sync-os-description = システムに合わせてライトテーマとダークテーマを自動的に切り替えます。
 
 # Custom App Icon widget
-settings-appearance-custom-icon-label = アプリアイコンをカスタマイズ
-settings-appearance-custom-icon-bundle-warning = アプリアイコンの変更にはアプリがバンドルされている必要があります。
-settings-appearance-custom-icon-restart-warning = MacOS で希望のアイコンスタイルを適用するには Ashide の再起動が必要な場合があります。
 
 # Window widgets
 settings-appearance-window-custom-size-label = カスタムサイズで新規ウィンドウを開く

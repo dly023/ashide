@@ -395,6 +395,7 @@ use crate::tab_configs::tab_config::TabConfigPaneType;
 
 fn make_terminal_leaf(cwd: Option<&str>, is_focused: bool) -> PaneNodeSnapshot {
     PaneNodeSnapshot::Leaf(LeafSnapshot {
+        container_uuid: vec![147; 16],
         is_focused,
         custom_vertical_tabs_title: None,
         contents: LeafContents::Terminal(TerminalPaneSnapshot {
@@ -525,6 +526,7 @@ fn snapshot_non_terminal_leaf_replaced_with_terminal() {
     use crate::drive::LocalDriveObjectSettings;
 
     let notebook_leaf = PaneNodeSnapshot::Leaf(LeafSnapshot {
+        container_uuid: vec![26; 16],
         is_focused: false,
         custom_vertical_tabs_title: None,
         contents: LeafContents::Notebook(NotebookPaneSnapshot::NotebookObject {
@@ -602,6 +604,7 @@ use crate::app_state::AmbientAgentPaneSnapshot;
 
 fn make_agent_leaf(cwd: Option<&str>, is_focused: bool) -> PaneNodeSnapshot {
     PaneNodeSnapshot::Leaf(LeafSnapshot {
+        container_uuid: vec![103; 16],
         is_focused,
         custom_vertical_tabs_title: None,
         contents: LeafContents::Terminal(TerminalPaneSnapshot {
@@ -626,6 +629,7 @@ fn make_agent_leaf(cwd: Option<&str>, is_focused: bool) -> PaneNodeSnapshot {
 
 fn make_cloud_leaf(is_focused: bool) -> PaneNodeSnapshot {
     PaneNodeSnapshot::Leaf(LeafSnapshot {
+        container_uuid: vec![127; 16],
         is_focused,
         custom_vertical_tabs_title: None,
         contents: LeafContents::AmbientAgent(AmbientAgentPaneSnapshot {
