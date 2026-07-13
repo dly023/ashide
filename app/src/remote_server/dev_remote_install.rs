@@ -1676,6 +1676,7 @@ mod tests {
             workflow.contains("target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl")
         );
         assert!(workflow.contains("cargo-zigbuild@0.22.3"));
+        assert_eq!(workflow.matches("--repo \"$GITHUB_REPOSITORY\"").count(), 3);
         assert!(artifact_script.contains(
             "build_linux_helper x86_64-unknown-linux-musl x86_64\n\
              build_linux_helper aarch64-unknown-linux-musl aarch64"
