@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Verify the postconditions required for a public macOS distribution.
+# A complete ad-hoc bundle seal is intentionally insufficient here.
+
+set -euo pipefail
+
+if [[ "$#" -ne 3 ]]; then
+  echo "usage: $0 <Ashide.app> <Ashide.dmg> <expected-team-id>" >&2
+  exit 2
+fi
+
+APP_BUNDLE="$1"
+DMG_PATH="$2"
+EXPECTED_TEAM_ID="$3"
+
+if [[ ! -d "$APP_BUNDLE" ]]; then
+  echo "error: public distribution App is missing: $APP_BUNDLE" >&2
+  exit 1
+fi
+if [[ ! -f "$DMG_PATH" ]]; then
+  echo "error: public distribution DMG is missing: $DMG_PATH" >&2
+  exit 1
+fi
+if [[ ! "$EXPECTED_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]; then
+  echo "error: expected Apple Team ID must be exactly 10 uppercase alphanumeric characters" >&2
+  exit 1
+fi
+
+codesign --verify --deep --strict --verbose=4 "$APP_BUNDLE"
+APP_SIGNATURE_METADATA="$(codesign --display --verbose=4 "$APP_BUNDLE" 2>&1)"
+
+if ! grep -Fq "Authority=Developer ID Application:" <<<"$APP_SIGNATURE_METADATA"; then
+  echo "error: App is not signed by a Developer ID Application identity" >&2
+  exit 1
+fi
+if ! grep -Fq "TeamIdentifier=$EXPECTED_TEAM_ID" <<<"$APP_SIGNATURE_METADATA"; then
+  echo "error: App TeamIdentifier does not match the target-owned notarization Team ID" >&2
+  exit 1
+fi
+if ! grep -Eq 'flags=.*runtime' <<<"$APP_SIGNATURE_METADATA"; then
+  echo "error: App signature does not enable hardened runtime" >&2
+  exit 1
+fi
+
+codesign --verify --strict --verbose=4 "$DMG_PATH"
+xcrun stapler validate "$DMG_PATH"
+spctl --assess --type execute --verbose=4 "$APP_BUNDLE"
+spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG_PATH"
+
+echo "Verified public macOS distribution identity, notarization ticket, and Gatekeeper acceptance."

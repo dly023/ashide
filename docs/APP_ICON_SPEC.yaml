@@ -1,0 +1,32 @@
+# Ashide macOS 应用图标契约
+#
+# 目标：一个品牌资源、一条 bundle 管线、零运行时图标状态。
+# 修改图标链路时必须按 SPEC → CHECK → TEST → BUNDLE_VERIFY 更新。
+
+spec_version: 1
+last_updated: "2026-07-12"
+
+canonical_assets:
+  classic_source: "app/channels/oss/icon/padded"
+  adaptive_source: "app/channels/oss/icon/AppIcon.icon"
+  development_runtime_source: "app/channels/oss/icon/padded/512x512.png"
+  dmg_background: "app/assets/resources/mac/ashide_install_image.png"
+
+bundle_contract:
+  compiler: "script/compile_icon"
+  channel_fallback: "缺少独立 channel 图标树时显式使用 oss"
+  plist_icon_file: "AppIcon"
+  classic_output: "Contents/Resources/AppIcon.icns"
+  stale_bundle_icon_policy: "删除其他 icns 中间产物、动态图标插件、NSDockTilePlugIn 声明和 Finder 自定义 Icon 文件"
+
+hard_cut:
+  forbidden_mechanisms:
+    - "运行时图标选择设置"
+    - "Dock tile plugin"
+    - "按 local/dev/preview 分叉的图标变体"
+    - "NSUserDefaults AppIcon 状态"
+  invariant: "应用图标只由 bundle 静态资源决定，运行时状态和用户操作无权覆盖"
+
+change_contract:
+  protocol: ["SPEC", "CHECK", "TEST", "BUNDLE_VERIFY"]
+  check_test: "test_app_icon_contract_is_complete_and_hard_cut"

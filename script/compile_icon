@@ -1,0 +1,113 @@
+#!/bin/bash
+#
+# 把 Ashide 规范图标编译进 .app bundle，并同步更新 Info.plist。
+#
+# 唯一品牌资源位于：
+#   app/channels/oss/icon/padded/*.png
+#   app/channels/oss/icon/AppIcon.icon/
+#
+# 没有独立图标树的 channel 必须传入 `oss`；script/macos/bundle 会负责显式回落。
+#
+# Usage: compile_icon <channel> <app_bundle_path>
+#   channel: app/channels/ 下的图标资源 channel（通常是 oss）
+#   app_bundle_path: .app bundle 路径（例如 Ashide.app）
+
+set -e
+
+if [ "$#" -ne 2 ]; then
+    echo "Usage: compile_icon <channel> <app_bundle_path>"
+    exit 1
+fi
+
+CHANNEL="$1"
+APP_BUNDLE_PATH="$2"
+
+# Determine the repository root directory
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+ICON_BUNDLE_PATH="$REPO_ROOT/app/channels/$CHANNEL/icon/AppIcon.icon"
+PADDED_ICON_PATH="$REPO_ROOT/app/channels/$CHANNEL/icon/padded"
+BUNDLED_RESOURCES_DIR="$APP_BUNDLE_PATH/Contents/Resources"
+PARTIAL_INFO_PLIST="$(dirname "$APP_BUNDLE_PATH")/partial-icon-info.plist"
+PLIST_PATH="$APP_BUNDLE_PATH/Contents/Info.plist"
+
+set_bundle_icon_file() {
+    # cargo-bundle 可能残留另一份默认声明；最终 bundle 只能指向 AppIcon。
+    plutil -replace CFBundleIconFile -string "AppIcon" "$PLIST_PATH"
+    plutil -remove CFBundleIconName "$PLIST_PATH" 2>/dev/null || true
+    plutil -remove NSDockTilePlugIn "$PLIST_PATH" 2>/dev/null || true
+    # 删除 cargo-bundle 的中间产物，避免 Finder/Dock 选择错误资源。
+    rm -f "$BUNDLED_RESOURCES_DIR/Ashide.icns"
+    # 强制构建也必须能清掉旧 bundle 遗留的动态图标覆盖物。
+    rm -rf "$APP_BUNDLE_PATH/Contents/PlugIns/AshideDockTilePlugin.docktileplugin"
+    rmdir "$APP_BUNDLE_PATH/Contents/PlugIns" 2>/dev/null || true
+    rm -f "$APP_BUNDLE_PATH/Icon"$'\r'
+}
+
+if [[ "$CHANNEL" = "oss" && -d "$PADDED_ICON_PATH" ]]; then
+    echo "Compiling classic .icns icon from app/channels/$CHANNEL/icon/padded"
+
+    ICONSET_PATH="$(mktemp -d)/AppIcon.iconset"
+    mkdir -p "$ICONSET_PATH"
+    copy_icon() {
+        local src="$1"
+        local dst="$2"
+        local fallback="$3"
+        if [[ -f "$PADDED_ICON_PATH/$src" ]]; then
+            cp "$PADDED_ICON_PATH/$src" "$ICONSET_PATH/$dst"
+        else
+            cp "$PADDED_ICON_PATH/$fallback" "$ICONSET_PATH/$dst"
+        fi
+    }
+    copy_icon "16x16.png" "icon_16x16.png" "16x16.png"
+    copy_icon "32x32.png" "icon_16x16@2x.png" "32x32.png"
+    copy_icon "32x32.png" "icon_32x32.png" "32x32.png"
+    copy_icon "64x64.png" "icon_32x32@2x.png" "64x64.png"
+    copy_icon "128x128.png" "icon_128x128.png" "128x128.png"
+    copy_icon "256x256.png" "icon_128x128@2x.png" "256x256.png"
+    copy_icon "256x256.png" "icon_256x256.png" "256x256.png"
+    copy_icon "512x512.png" "icon_256x256@2x.png" "512x512.png"
+    copy_icon "512x512.png" "icon_512x512.png" "512x512.png"
+    copy_icon "1024x1024.png" "icon_512x512@2x.png" "512x512.png"
+
+    iconutil -c icns "$ICONSET_PATH" -o "$BUNDLED_RESOURCES_DIR/AppIcon.icns"
+    rm -f "$BUNDLED_RESOURCES_DIR/Assets.car" "$PARTIAL_INFO_PLIST"
+    set_bundle_icon_file
+
+    echo "Classic AppIcon.icns compiled successfully."
+    exit 0
+fi
+
+# Only compile if the .icon bundle exists for this channel.
+if [[ ! -d "$ICON_BUNDLE_PATH" ]]; then
+    if [[ "$CHANNEL" = "oss" ]]; then
+        echo "Warning: no .icon bundle found for $CHANNEL channel at $ICON_BUNDLE_PATH; skipping adaptive icon compilation." >&2
+        exit 0
+    fi
+    echo "Error: .icon bundle not found at $ICON_BUNDLE_PATH (canonical brand is app/channels/oss/icon/)" >&2
+    exit 1
+fi
+
+echo "Compiling .icon bundle for $CHANNEL channel"
+
+# Compile the .icon bundle using actool
+xcrun actool \
+  --compile "$BUNDLED_RESOURCES_DIR" \
+  --platform macosx \
+  --minimum-deployment-target 10.14 \
+  --app-icon AppIcon \
+  --output-partial-info-plist "$PARTIAL_INFO_PLIST" \
+  "$ICON_BUNDLE_PATH"
+
+# Earlier XCode versions won't build the correct asset format for adaptive icons
+if [[ ! -f "$BUNDLED_RESOURCES_DIR/Assets.car" ]]; then
+    XCODE_VERSION=$(xcodebuild -version 2>/dev/null | head -1 || echo "unknown")
+    echo "Warning: actool did not produce Assets.car which is required for the latest App icon format." >&2
+    echo "(Note that XCode version <26 does not support .icon bundles. Your version: $XCODE_VERSION)." >&2
+fi
+
+set_bundle_icon_file
+plutil -insert CFBundleIconName -string "AppIcon" "$PLIST_PATH" 2>/dev/null || \
+  plutil -replace CFBundleIconName -string "AppIcon" "$PLIST_PATH"
+
+echo "Icon compiled successfully (CFBundleIconFile=AppIcon)."

@@ -1,0 +1,68 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+fail=0
+require_file() {
+    if [[ ! -f "$1" ]]; then
+        echo "[agent-harness] missing required file: $1" >&2
+        fail=1
+    fi
+}
+
+require_file AGENTS.md
+require_file .agents/skills/README.md
+require_file .agents/skills/ashide-architecture-change/SKILL.md
+require_file .agents/skills/ashide-product-entry-review/SKILL.md
+require_file .agents/skills/ashide-rust-check/SKILL.md
+require_file .agents/skills/ashide-run-verify/SKILL.md
+
+for forbidden in \
+    .agents/skills/ashide-session-bridge \
+    .agents/skills/ashide-shared-memory
+do
+    if [[ -e "$forbidden" ]]; then
+        echo "[agent-harness] feature-memory skill must not exist: $forbidden" >&2
+        fail=1
+    fi
+done
+
+for marker in \
+    "Agent harness 分层与上下文路由" \
+    "不得创建 feature-memory skill" \
+    "script/check_agent_harness"
+do
+    if ! grep -Fq "$marker" AGENTS.md; then
+        echo "[agent-harness] AGENTS.md missing architecture marker: $marker" >&2
+        fail=1
+    fi
+done
+
+for skill_file in .agents/skills/*/SKILL.md; do
+    skill_dir=$(basename "$(dirname "$skill_file")")
+    declared_name=$(sed -n 's/^name: //p' "$skill_file" | head -1)
+    if [[ "$declared_name" != "$skill_dir" ]]; then
+        echo "[agent-harness] $skill_file name '$declared_name' must match directory '$skill_dir'" >&2
+        fail=1
+    fi
+    if ! sed -n '/^description: /p' "$skill_file" | grep -Fq 'Use when'; then
+        echo "[agent-harness] $skill_file description must declare trigger class with 'Use when'" >&2
+        fail=1
+    fi
+done
+
+stale_feature_memory=$(rg -n \
+    '当前设计口径|本 skill 记住|历史会话状态|feature module current design' \
+    .agents/skills/*/SKILL.md || true)
+if [[ -n "$stale_feature_memory" ]]; then
+    echo "[agent-harness] project skills must contain procedures, not mutable feature design" >&2
+    echo "$stale_feature_memory" >&2
+    fail=1
+fi
+
+if [[ $fail -ne 0 ]]; then
+    echo "agent harness checks failed" >&2
+    exit 1
+fi
+
+echo "agent harness checks passed"

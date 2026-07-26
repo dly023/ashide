@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - "**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  local-remote-parity:
+    name: Local/remote parity contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select stable Rust
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - name: Cache Cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ci-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ci-cargo-${{ runner.os }}-
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          ./script/linux/install_build_deps
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check release privacy
+        run: ./script/check_release_privacy
+
+      - name: Check agent harness architecture
+        run: ./script/check_agent_harness
+
+      - name: Check local/remote parity contracts
+        run: ./script/check_local_remote_parity
+
+      - name: Check locked workspace
+        run: cargo check --locked

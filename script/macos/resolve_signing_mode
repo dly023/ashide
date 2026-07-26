@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Resolve whether a macOS build has a complete target-owned signing setup.
+# Prints exactly one mode: signed or adhoc. Zero configured secrets are valid
+# for an ad-hoc DMG; partial signing configuration fails closed.
+
+set -euo pipefail
+
+if [[ "$#" -ne 0 ]]; then
+  echo "usage: $0" >&2
+  exit 2
+fi
+
+REQUIRED_SIGNING_CONFIGURATION=(
+  ASHIDE_DEVELOPER_ID_CERT
+  ASHIDE_DEVELOPER_ID_CERT_PASSWORD
+  ASHIDE_CODESIGN_KEYCHAIN_PASSWORD
+  ASHIDE_NOTARIZATION_APPLE_ID
+  ASHIDE_NOTARIZATION_PASSWORD
+  ASHIDE_NOTARIZATION_TEAM_ID
+)
+
+configured_count=0
+for variable_name in "${REQUIRED_SIGNING_CONFIGURATION[@]}"; do
+  if [[ -n "${!variable_name:-}" ]]; then
+    configured_count=$((configured_count + 1))
+  fi
+done
+
+if [[ "$configured_count" -ne 0 && "$configured_count" -ne 6 ]]; then
+  echo "macOS signing secrets are partially configured; found $configured_count of 6." >&2
+  exit 1
+fi
+
+if [[ "$configured_count" -eq 6 ]]; then
+  if [[ ! "$ASHIDE_NOTARIZATION_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]; then
+    echo "ASHIDE_NOTARIZATION_TEAM_ID must be exactly 10 uppercase alphanumeric characters." >&2
+    exit 1
+  fi
+  echo signed
+else
+  echo adhoc
+fi

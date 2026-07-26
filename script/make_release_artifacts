@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+#
+# RR-G2: Produce the canonical distributable + SHA256SUMS for a built Ashide
+# artifact, landing them in target/release-artifacts.
+#
+# This is a thin post-bundle step: it does NOT build anything. Run
+# `script/bundle` first (which produces the .app/.dmg or CLI binary under
+# target/.../bundle/osx), then invoke this script to publish the macOS DMG or
+# wrap a CLI binary in zip form and emit a checksum file consumable by the
+# GitHub Release step (and by users who want to verify integrity).
+#
+# Usage:
+#   script/make_release_artifacts [--source <dir>] [--name <base>]
+#                                 [--artifact app|cli]
+#                                 [--channel <channel>]
+#                                 [--distribution public|development]
+#                                 --release-tag <vMAJOR.MINOR.PATCH>
+#
+# Defaults:
+#   --source    target/<profile>/bundle/osx   (auto-detected from --channel)
+#   --name      AshideDev | Ashide | ashide-<channel>  (derived from --channel)
+#   --artifact  app
+#   --channel   dev
+#
+# Outputs (in target/release-artifacts/):
+#   app: <name>.dmg      — the canonical macOS installer image
+#   cli: <name>.zip      — the distributable CLI bundle
+#   SHA256SUMS           — checksum line for the emitted artifact
+#   SHA256SUMS.sig       — (left to the release signer; not produced here)
+#
+set -euo pipefail
+
+WORKSPACE_ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARTIFACTS_DIR="$WORKSPACE_ROOT_DIR/target/release-artifacts"
+
+ARTIFACT="app"
+CHANNEL="dev"
+SOURCE_DIR=""
+NAME_OVERRIDE=""
+RELEASE_TAG=""
+DISTRIBUTION=""
+
+while (( "$#" )); do
+  case "$1" in
+    --source)   SOURCE_DIR="$2"; shift 2 ;;
+    --name)     NAME_OVERRIDE="$2"; shift 2 ;;
+    --artifact) ARTIFACT="$2"; shift 2 ;;
+    --channel)  CHANNEL="$2"; shift 2 ;;
+    --distribution) DISTRIBUTION="$2"; shift 2 ;;
+    --release-tag) RELEASE_TAG="$2"; shift 2 ;;
+    *) echo "unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+if [[ "$ARTIFACT" == "app" && "$DISTRIBUTION" != "public" && "$DISTRIBUTION" != "development" ]]; then
+  echo "error: app artifacts require --distribution public or --distribution development" >&2
+  exit 1
+fi
+
+# ── derive defaults from channel/artifact ──────────────────────────────
+case "$CHANNEL" in
+  local)   APP_NAME="AshideLocal" ;;
+  dev)     APP_NAME="AshideDev" ;;
+  preview) APP_NAME="AshidePreview" ;;
+  stable|oss) APP_NAME="Ashide" ;;
+  *) APP_NAME="Ashide" ;;
+esac
+
+if [[ -z "$SOURCE_DIR" ]]; then
+  # Mirror the profile-dir logic in script/macos/bundle.
+  if [[ "$CHANNEL" == "local" || "$CHANNEL" == "dev" ]]; then
+    PROFILE_DIR="release-lto-debug_assertions"
+  else
+    PROFILE_DIR="release-lto"
+  fi
+  SOURCE_DIR="$WORKSPACE_ROOT_DIR/target/$PROFILE_DIR/bundle/osx"
+fi
+
+if [[ -z "$NAME_OVERRIDE" ]]; then
+  if [[ "$ARTIFACT" == "cli" ]]; then
+    NAME="ashide-$CHANNEL"
+  else
+    NAME="$APP_NAME"
+  fi
+else
+  NAME="$NAME_OVERRIDE"
+fi
+
+mkdir -p "$ARTIFACTS_DIR"
+if [[ "$ARTIFACT" == "app" ]]; then
+  OUTPUT_PATH="$ARTIFACTS_DIR/$NAME.dmg"
+  OBSOLETE_OUTPUT_PATH="$ARTIFACTS_DIR/$NAME.zip"
+else
+  OUTPUT_PATH="$ARTIFACTS_DIR/$NAME.zip"
+  OBSOLETE_OUTPUT_PATH="$ARTIFACTS_DIR/$NAME.dmg"
+fi
+
+if [[ ! -d "$SOURCE_DIR" && ! -f "$SOURCE_DIR" ]]; then
+  echo "error: source '$SOURCE_DIR' does not exist. Run script/bundle first." >&2
+  exit 1
+fi
+
+# ── publish the canonical artifact ────────────────────────────────────
+# App releases must expose the DMG directly. A zip-wrapped DMG or bare .app
+# is not an acceptable user-facing installer and must fail closed.
+echo "Packaging $(basename "$OUTPUT_PATH") from $SOURCE_DIR into $ARTIFACTS_DIR"
+rm -f "$OUTPUT_PATH"
+rm -f "$OBSOLETE_OUTPUT_PATH" "$OBSOLETE_OUTPUT_PATH.sha256"
+
+if [[ "$ARTIFACT" == "app" ]]; then
+  APP_BUNDLE="$SOURCE_DIR/$APP_NAME.app"
+  DMG_FILE="$SOURCE_DIR/$APP_NAME.dmg"
+  APP_PLIST="$APP_BUNDLE/Contents/Info.plist"
+  APP_EXECUTABLE="$APP_BUNDLE/Contents/MacOS/ashide"
+
+  if [[ ! "$RELEASE_TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    echo "error: --release-tag must be semantic version vMAJOR.MINOR.PATCH" >&2
+    exit 1
+  fi
+  EXPECTED_PRODUCT_VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+
+  if [[ ! -f "$APP_PLIST" || ! -x "$APP_EXECUTABLE" ]]; then
+    echo "error: release app identity files are missing under '$APP_BUNDLE'" >&2
+    exit 1
+  fi
+
+  echo "Verifying complete release app bundle seal: $APP_BUNDLE"
+  codesign --verify --deep --strict --verbose=4 "$APP_BUNDLE"
+
+  ACTUAL_RELEASE_TAG="$(/usr/libexec/PlistBuddy -c 'Print :AshideVersion' "$APP_PLIST")"
+  ACTUAL_SHORT_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PLIST")"
+  ACTUAL_BUILD_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PLIST")"
+  ACTUAL_BINARY_VERSION="$("$APP_EXECUTABLE" --version)"
+
+  if [[ "$ACTUAL_RELEASE_TAG" != "$RELEASE_TAG" ||
+      "$ACTUAL_SHORT_VERSION" != "$EXPECTED_PRODUCT_VERSION" ||
+      "$ACTUAL_BUILD_VERSION" != "$EXPECTED_PRODUCT_VERSION" ||
+      "$ACTUAL_BINARY_VERSION" != "Ashide $RELEASE_TAG" ]]; then
+    echo "error: release identity mismatch" >&2
+    printf '  tag: expected=%s actual=%s\n' "$RELEASE_TAG" "$ACTUAL_RELEASE_TAG" >&2
+    printf '  short version: expected=%s actual=%s\n' "$EXPECTED_PRODUCT_VERSION" "$ACTUAL_SHORT_VERSION" >&2
+    printf '  build version: expected=%s actual=%s\n' "$EXPECTED_PRODUCT_VERSION" "$ACTUAL_BUILD_VERSION" >&2
+    printf '  binary: expected=%s actual=%s\n' "Ashide $RELEASE_TAG" "$ACTUAL_BINARY_VERSION" >&2
+    exit 1
+  fi
+
+  echo "Verified release identity: $ACTUAL_BINARY_VERSION ($EXPECTED_PRODUCT_VERSION)"
+
+  if [[ ! -f "$DMG_FILE" ]]; then
+    echo "error: canonical macOS release DMG is missing: '$DMG_FILE'" >&2
+    exit 1
+  fi
+
+  echo "Verifying canonical macOS release image: $DMG_FILE"
+  hdiutil verify "$DMG_FILE"
+
+  if [[ "$DISTRIBUTION" == "public" ]]; then
+    if [[ -z "${ASHIDE_NOTARIZATION_TEAM_ID:-}" ]]; then
+      echo "error: public macOS artifacts require target-owned ASHIDE_NOTARIZATION_TEAM_ID" >&2
+      exit 1
+    fi
+    "$WORKSPACE_ROOT_DIR/script/macos/verify_public_distribution" \
+      "$APP_BUNDLE" \
+      "$DMG_FILE" \
+      "$ASHIDE_NOTARIZATION_TEAM_ID"
+  fi
+
+  ditto "$DMG_FILE" "$OUTPUT_PATH"
+elif [[ "$ARTIFACT" == "cli" ]]; then
+  BIN_PATH="$SOURCE_DIR/${NAME#ashide-}"
+  # CLI bundle layout: OUT_DIR/<bin> + OUT_DIR/resources
+  if [[ ! -f "$BIN_PATH" ]]; then
+    # Fall back to the plain `ashide` binary name.
+    BIN_PATH="$SOURCE_DIR/ashide"
+  fi
+  if [[ ! -f "$BIN_PATH" ]]; then
+    echo "error: CLI binary not found under $SOURCE_DIR" >&2
+    exit 1
+  fi
+  (cd "$SOURCE_DIR" && ditto -c -k --keepParent "$BIN_PATH" "$OUTPUT_PATH")
+else
+  echo "error: --artifact must be app or cli" >&2
+  exit 1
+fi
+
+# ── SHA256SUMS ─────────────────────────────────────────────────────────
+# Append a line so multiple platform/channel artifacts accumulate in one file.
+# Remove both historical extensions for the same logical artifact name so a
+# format migration (for example macOS ZIP -> DMG) cannot leave a dead checksum.
+SUMS_PATH="$ARTIFACTS_DIR/SHA256SUMS"
+ARTIFACT_BASENAME="$(basename "$OUTPUT_PATH")"
+OBSOLETE_ARTIFACT_BASENAME="$(basename "$OBSOLETE_OUTPUT_PATH")"
+(
+  cd "$ARTIFACTS_DIR"
+  if [[ -f "$SUMS_PATH" ]]; then
+    awk \
+      -v current="$ARTIFACT_BASENAME" \
+      -v obsolete="$OBSOLETE_ARTIFACT_BASENAME" \
+      '$2 != current && $2 != obsolete' \
+      "$SUMS_PATH" > "$SUMS_PATH.tmp"
+    mv "$SUMS_PATH.tmp" "$SUMS_PATH"
+  fi
+  shasum -a 256 "$ARTIFACT_BASENAME" >> "$SUMS_PATH"
+)
+
+echo "Wrote $OUTPUT_PATH"
+echo "Updated $SUMS_PATH"

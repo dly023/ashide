@@ -1,0 +1,882 @@
+schema_version: 2
+release: init-v0.4.0
+updated_at: "2026-07-21"
+policy:
+  required_order: [SPEC, UX_MATRIX, STATIC_CHECK, FOCUSED_TEST, CARGO_CHECK, GUI_OR_RUNTIME_VERIFY]
+  zero_failure_required: true
+  retry_or_timeout_masking_forbidden: true
+
+final_static_gates:
+  cargo_fmt:
+    command: "cargo fmt --all -- --check"
+    result: passed_final_2026_07_21
+  local_remote_parity:
+    command: "./script/check_local_remote_parity"
+    result: passed_all_trackers_verified_and_zero_active_capabilities_after_remote_run_29851524177_2026_07_21
+  diff_check:
+    command: "git diff --check"
+    result: passed_final_2026_07_21
+  cargo_check:
+    command: "cargo check --locked"
+    result: passed_after_LR_162_independent_matrix_workflow_contract_28s_2026_07_21
+
+workspace_nextest:
+  command: "cargo nextest run --no-fail-fast --workspace --exclude command-signatures-v2"
+  passed_full_suite: true
+  unit_model_protocol_failures: 0
+  final_round:
+    run_id: 69d83d2e-6c89-47ca-978b-8294a9cc0560
+    total: 6329
+    passed: 6329
+    failed: 0
+    skipped: 87
+    duration_seconds: 121.311
+    result: passed_zero_failures
+  pre_final_observations:
+    - run_id: 8439fed7-3130-445c-8d04-740b4471b872
+      failures:
+        - test: environment_runtime_transport::dev_remote_install::tests::release_workflow_publishes_versioned_remote_helper_assets
+          disposition: "真实 contract 失败；将脆弱的固定 --repo 出现次数替换为所有 gh release 调用的完整枚举与逐调用 repository pin 校验，聚焦测试 1/1 通过。"
+        - test: ui_tests::test_goto_line_clamps_out_of_range
+          disposition: "未触达的 GUI 集成时序失败；原断言不变，单独复跑 1/1 通过。"
+    - run_id: aac37168-55b8-4831-bad4-85835ba7db41
+      failures:
+        - test: shell_integration_tests::test_start_shell_in_deleted_directory
+          disposition: "未触达的 shell 集成启动时序失败；原断言不变，单独复跑 1/1 通过。"
+  diagnostic_round:
+    run_id: 62ba8aa8-5c25-4d81-81e0-9f13cca89f3e
+    total: 6154
+    passed: 6151
+    failed: 3
+    skipped: 84
+    failures:
+      - test: shell_integration_tests::test_create_session_with_new_tab_while_bootstrapping
+        root_cause: "测试在父 terminal cwd projection 落地前创建子 tab，把父 cd 元数据竞态混入了子 tab bootstrap 合同。"
+        fix: "新增 typed current-app-path assertion，确认父 cwd projection 后再制造子 tab bootstrap 场景。"
+      - test: shell_integration_tests::test_histfile_left_joined_with_persisted_history
+        root_cause: "History filter 已激活不代表异步 query results 已提交；测试立即发送 up/enter。"
+        fix: "统一 select_ready_history_filter，等待 filter active 与 committed non-empty results 两个状态。"
+      - test: notebooks::notebook::tests::test_command_block_dispatches_event
+        root_cause: "Notebook load future 只覆盖 edit-access；command child model 由后续 layout pipeline 创建。"
+        fix: "等待 editor render_state.layout_complete() 后再读取 runnable command。"
+    focused_verification:
+      - "notebooks::notebook::tests::test_command_block_dispatches_event: passed"
+      - "shell_integration_tests::test_create_session_with_new_tab_while_bootstrapping: passed"
+      - "shell_integration_tests::test_histfile_left_joined_with_persisted_history: passed"
+    result: superseded_by_final_zero_failure_round
+
+release_regression_checks:
+  - id: RETIRING-PID-TERMINATION
+    tests:
+      - shell_integration_tests::test_add_and_close_session
+      - workspace::view::tests::test_closed_nonfinal_tab_retains_durable_owner_until_terminal_exit
+      - workspace::view::tests::test_closed_window_retains_durable_session_ownership_until_terminal_exit
+      - workspace::view::tests::test_discarded_closed_tab_shuts_down_retained_terminal
+      - workspace::view::tests::test_hidden_closed_pane_reserves_durable_owner_while_undoable
+      - workspace::view::tests::test_restored_closed_tab_returns_retiring_owner_to_live
+      - workspace::view::tests::test_discarded_hidden_pane_shuts_down_retained_terminal
+      - workspace::view::tests::test_closed_window_tracks_every_duplicate_durable_terminal_owner_until_exit
+      - workspace::view::tests::test_transferred_tab_placeholder_is_permanently_shutdown_on_adoption
+    result: passed_full_workspace_nextest
+  - id: LOCAL_REMOTE-PARITY
+    source: docs/design/local-remote-parity-tracker.yaml
+    result: passed_static_contract_and_recorded_runtime_evidence
+  - id: ENV-RUNTIME-ERROR-RESELECT
+    source: LR-088
+    reproduction: "final v0.3.0 App proved the old Local→remote-fixture-relay SwitchEnvironment path bypassed explicit reconnect; the shared user-visible activation gateway now logs an explicit failed-runtime reconnect for the same UI path"
+    required_tests:
+      - test_reselect_failed_environment_runtime_tab_explicitly_reconnects
+      - test_switch_environment_action_reconnects_failed_runtime
+      - test_error_environment_runtime_does_not_implicitly_retry
+    focused_test: "nextest run 6f27c608-1780-4200-ad02-2f41e5d089a3: required 3 passed, 0 failed (5-test combined regression run)"
+    runtime_evidence: "final release GUI Local→remote-fixture-relay emitted queueing pane-owned terminal intent followed by explicit visible activation reconnecting failed authority=ssh:ssh-config:remote-fixture-relay"
+    result: passed_shared_gateway_focused_tests_and_final_gui_transition
+  - id: ENV-RUNTIME-PERSISTED-ERROR-RESTORE
+    source: LR-089
+    reproduction: "new v0.3.0 App restored windows.environment_json lifecycle_state=Error, but EnvironmentEntry::from_snapshot normalized the table row to Dormant; file-browser unavailable immediately logged forcing reconnect without user activation"
+    required_tests:
+      - restored_runtime_error_snapshot_remains_error_until_explicit_reconnect
+      - test_restored_error_environment_browser_unavailable_stays_error
+      - test_restored_error_window_snapshot_does_not_implicitly_connect
+    focused_test: "nextest run 6f27c608-1780-4200-ad02-2f41e5d089a3: required 2 passed, 0 failed (5 total)"
+    full_restore_test: "nextest run 4e3e1665-daab-4142-95b6-f6f1d44eabdb: WindowSnapshot → NewWorkspaceSource::Restored → configure_new_workspace passed, 0 failed"
+    runtime_evidence: "final release cold start preserved Error, skipped implicit runtime ensure, and ignored browser-unavailable retry until an explicit ReconnectCurrentEnvironment action"
+    result: passed_table_unit_full_window_restore_and_cold_start_runtime_boundary
+  - id: TERMINAL-SESSION-BOOTSTRAP-QUERY
+    source: LR-092
+    reproduction: "fresh terminal startup logged the same Expected to have session warning once per render frame until Shell is bootstrapped for that ID"
+    required_tests:
+      - test_pending_session_launch_data_query_treats_bootstrap_as_unavailable
+    focused_test: "nextest run 187ff3bb-a529-4116-9838-574dd770091b: 1 passed, 0 failed"
+    runtime_evidence: "latest AshideDev startup bootstrapped multiple local shells without any Expected to have session warning before Session materialization"
+    result: passed_focused_test_locked_cargo_check_and_gui_log_verification
+  - id: ENV-NAVIGATION-CONTAINER-MATERIALIZATION
+    source: LR-093
+    reproduction: "workspace nextest run 1b0fb454-a7b5-4f02-b41d-02acf0d5ebda showed SwitchEnvironment recreating a lost runtime-registry tab, then queueing a pane-owned default terminal even though navigation was not a session-creation request"
+    required_tests:
+      - test_switch_to_runtime_registry_environment_without_tab_does_not_queue_terminal
+      - test_switch_to_existing_environment_placeholder_queues_terminal_intent
+      - test_deleting_only_live_environment_session_keeps_environment_selected
+    focused_test: "nextest run fb42b1cc-939d-4a2a-a77f-483e0197cb9d: 3 passed, 0 failed"
+    result: passed_typed_activation_result_and_navigation_materialization_boundary
+  - id: WORKFLOW-PATH-GENERATION
+    source: LR-094
+    reproduction: "workspace nextest run a4bfe5e4-173c-4c8b-8318-5471c8b5ed73 completed the cd command before terminal CWD projection; Workflow browser captured the old path once and stayed at 0 project workflows after repo indexing"
+    required_tests:
+      - project_workflow_load_state_rejects_stale_path_and_generation
+      - test_loading_project_workflows
+    focused_tests:
+      - "nextest run 588bac3e-7b4a-456c-b586-be715430d8fa: generation ownership unit test passed"
+      - "nextest run 39b0374a-cef7-4bda-adaf-d8cc43a3b2a9: real integration app CWD projection refresh passed"
+    result: passed_reactive_path_refresh_and_stale_completion_guard
+  - id: RELEASE-SETTINGS-SCHEMA-CHANNEL
+    source: LR-084
+    result: passed
+  - id: RELEASE-BUNDLE-OFFLINE-METADATA
+    source: LR-085
+    result: passed_final_offline_bundle_assembly
+  - id: RELEASE-MACOS-DMG-STATE
+    source: LR-086
+    evidence: "repository builder Created and verified; independent APFS read-only mount contained only Ashide.app/.background/Applications/.DS_Store"
+    result: passed
+  - id: RELEASE-MACOS-DMG-WINDOW-GENERATION
+    source: LR-090
+    reproduction: "second real bundle compressed the image, then read-only verify reused the writable volume's stale Finder container window and reported concatenated bounds 7993117201440; failed verify left the compressed DMG behind"
+    required_tests:
+      - macos_dmg_is_repository_owned_state_driven_and_verified
+    focused_test: "nextest run 59780e5f-55d8-4fba-9b28-702524da356b: 1 passed, 0 failed"
+    runtime_evidence: "real script/macos/create_ashide_dmg completed writable configure, compressed UDZO, fresh closed-window read-only verify, and emitted Created and verified /private/tmp/Ashide-lr090-verify.dmg"
+    result: passed_real_builder_and_atomic_output_contract
+  - id: RELEASE-MACOS-DMG-DISPLAY-GEOMETRY
+    source: LR-091
+    reproduction: "full bundle read-only verify reported concatenated bounds 11953261956826, which resolves to {1195,326,1956,826}: valid 761×500 size moved by Finder to the active display"
+    required_tests:
+      - macos_dmg_is_repository_owned_state_driven_and_verified
+    focused_test: "nextest run ad49eaef-482c-4a49-8a8f-6d6d8c763ddd: 1 passed, 0 failed"
+    runtime_evidence: "full ./script/bundle completed final read-only DMG verification with Finder-selected origin and invariant 761×500 window size; unverified-output cleanup remained armed"
+    result: passed_full_bundle_display_independent_geometry
+  - id: RELEASE-LICENSE-FAIL-CLOSED
+    source: LR-087
+    evidence: "cargo-about 0.9.1; real workspace THIRD_PARTY_LICENSES.txt=1314698 bytes; no GPL-2.0 parse error"
+    result: passed
+  - id: MACOS-APP-BUNDLE
+    evidence: "arm64 0.3.0/v0.3.0; LSMultipleInstancesProhibited=true; DMG sha256=b443fc4bfc77034726ca5f82bcb5d71dfe23c165eaa53ee43da23708cb9bd586"
+    runtime_evidence: "final release App launched, reached InitShell → Bootstrapped, open -n preserved one GUI process, and logs contained no Expected to have session/panic/fatal"
+    result: passed_artifact_contract_and_gui_smoke
+  - id: REMOTE-HELPER-ASSETS
+    source: LR-095
+    expected:
+      - ashide-linux-x86_64.tar.gz
+      - ashide-linux-aarch64.tar.gz
+      - ashide-macos-x86_64.tar.gz
+      - ashide-macos-aarch64.tar.gz
+      - SHA256SUMS
+    evidence: "four locked target builds succeeded; archives each contain one executable named ashide; ELF x86_64/aarch64 are static; Mach-O x86_64/aarch64 both report Ashide v0.3.0; all five SHA256SUMS entries verified"
+    result: passed_platform_complete_release_asset_contract
+  - id: RELEASE-CI-STATIC-CHECK-TOOLCHAIN
+    source: LR-096
+    reproduction: "GitHub Actions run 29516067416 failed because rg was absent; each rg invocation emitted command not found and then reported false missing contract markers."
+    required_tests:
+      - parity_checker_fails_fast_without_ripgrep
+      - clean_ci_local_remote_parity_contract
+    focused_test: "PATH=/usr/bin:/bin checker run exited 1 with one precise missing-rg prerequisite error and no false missing-contract-marker fan-out"
+    result: passed_declared_dependency_and_fail_fast_prerequisite_contract
+
+  - id: RELEASE-CROSS-PLATFORM-LICENSE-GRAPH
+    source: LR-097
+    reproduction: "GitHub Actions release run 29516794982 Linux job failed because cargo about --workspace --frozen needed alsa v0.11.0 outside the previously built Linux CLI dependency subset."
+    required_tests:
+      - complete_license_dependency_graph_is_fetched_by_resource_entrypoints
+      - clean_linux_and_windows_release_resource_generation
+    focused_evidence: "real Unix resource entrypoint fetched the locked graph and generated a non-empty 1,314,698-byte THIRD_PARTY_LICENSES.txt"
+    result: passed_clean_linux_job_87778064799_and_windows_job_87778064797_run_29545895954
+  - id: WINDOWS-SFTP-STAGING-HANDLE-IDENTITY
+    source: LR-098
+    reproduction: "GitHub Actions release run 29516794982 Windows job failed on unstable windows_by_handle MetadataExt APIs; the same branch ignored expected staging identity during commit/drop."
+    required_tests:
+      - windows_sftp_staging_uses_stable_handle_identity
+      - windows_release_compile
+    focused_evidence: "exact Win32 handle helper compiled for x86_64-pc-windows-msvc; local SFTP suite c63c7fd2-3257-4338-aa82-08b010d52a19 passed 212/212"
+    result: passed_clean_windows_release_run_29545895954_job_87778064797
+
+  - id: RELEASE-HELPER-STATIC-GUARD
+    source: LR-099
+    reproduction: "full nextest run 0353b1c2-6e08-4f0f-af57-75cb3b9ac391 failed because the helper asset test expected adjacent zero-indented shell calls while the valid case body is indented."
+    required_tests:
+      - release_workflow_publishes_versioned_remote_helper_assets
+      - local_remote_parity_static_release_helper_test_guard
+    focused_evidence: "nextest run ea78f77d-e2bd-4a87-9ede-d8a26f0b81aa passed 1/1"
+    result: passed_full_workspace_nextest_run_85bab1e6_6166_of_6166
+
+  - id: DYNAMIC-SEARCH-SOURCE-CURRENT-QUERY
+    source: LR-100
+    reproduction: "full nextest run 0353b1c2-6e08-4f0f-af57-75cb3b9ac391 first exposed late History source registration; run 63f12d34-8c06-4b3b-ac0e-032aa99aee7a then proved old renderers remained selectable while the current History query was still pending."
+    required_tests:
+      - test_async_source_added_after_query_runs_current_matching_query
+      - test_async_source_added_after_commit_preserves_results_but_reopens_query_readiness
+      - test_command_search_loads_history
+      - test_histfile_left_joined_with_persisted_history
+      - test_history_command_is_linked_to_local_workflow
+      - full_workspace_nextest
+    focused_evidence: "nextest run 2d8aa5cd-10b3-44e2-8201-da6a258296c2 passed two mixer state-machine regressions plus three concurrent history flows 5/5"
+    result: passed_full_workspace_nextest_run_85bab1e6_6166_of_6166
+
+  - id: CURRENT-FRAME-INTERACTION-POSITION
+    source: LR-101
+    reproduction: "full nextest run 8150e43e-ed91-42e3-bfdf-3dab6437b0cc clicked a stale prompt_area coordinate, dispatched OpenInputContextMenu, and timed out because Copy prompt was never painted."
+    required_tests:
+      - test_position_cache_current_frame_interaction_ownership
+      - test_copy_prompt_from_input_honor_ps1_enabled
+      - full_workspace_nextest
+    focused_evidence: "nextest run 4aa40f12-816c-4b1b-8c00-e84f57687f84 passed PositionCache ownership and original prompt integration regression 2/2"
+    result: passed_full_workspace_nextest_run_85bab1e6_6166_of_6166
+
+  - id: EXPLICIT-NEGATIVE-INTERACTION-GEOMETRY
+    source: LR-102
+    reproduction: "full nextest run 4861b203-9c23-4f20-bf1d-c1e40267abc9 passed 6165/6166 and failed only test_secret_tooltip_respects_safe_mode_setting because the test intentionally clicked the same secret-cell geometry after safe mode removed that target from current-scene interaction ownership."
+    required_tests:
+      - test_secret_tooltip_respects_safe_mode_setting
+      - test_copy_prompt_from_input_honor_ps1_enabled
+      - full_workspace_nextest
+    focused_evidence: "nextest run 2e1b04dd-38ae-4e68-906c-9c1a74ad3d59 passed safe-mode negative geometry, stale prompt rejection, and PositionCache ownership 3/3"
+    result: passed_full_workspace_nextest_run_85bab1e6_6166_of_6166
+
+  - id: NONEMPTY-CURRENT-SCENE-POINTER-GEOMETRY
+    source: LR-103
+    reproduction: "full nextest run b426ebd6-18bf-448c-9f69-a3f25416281a painted prompt_area in the current scene with zero-width geometry; its center routed right-click to OpenInputContextMenu and Copy prompt never painted."
+    required_tests:
+      - test_position_cache_current_frame_interaction_ownership
+      - test_copy_prompt_from_input_honor_ps1_enabled
+      - full_workspace_nextest
+    focused_evidence: "nextest run 54635a5d-c35f-4ae2-aa46-2a3d7fdbe1d9 passed non-empty PositionCache ownership plus prompt context-menu regression 2/2 within a 4-test focused set"
+    result: passed_full_workspace_nextest_run_85bab1e6_6166_of_6166
+
+  - id: RETRYABLE-ASYNC-LAYOUT-ASSERTIONS
+    source: LR-104
+    reproduction: "full nextest run b426ebd6-18bf-448c-9f69-a3f25416281a observed Agent Mode pane_size_px 0 immediately after entity creation; panic-style assert_approx_eq prevented the integration driver from rendering and retrying until layout commit."
+    required_tests:
+      - test_agent_mode_pane_minimum_size
+      - test_open_launch_config_with_custom_size
+      - full_workspace_nextest
+    focused_evidence: "nextest run 54635a5d-c35f-4ae2-aa46-2a3d7fdbe1d9 passed Agent Mode pane and custom-window retryable layout regressions 2/2 within a 4-test focused set"
+    result: passed_full_workspace_nextest_run_85bab1e6_6166_of_6166
+
+  - id: RELEASE-SOURCE-REF-PRODUCT-VERSION
+    source: LR-105
+    reproduction: "GitHub Actions candidate run 29545895954 checked out candidate/v0.3.0-9a01bcc but overwrote workflow_dispatch inputs.tag=v0.3.0 with the source ref; macOS release-LTO and App bundle succeeded before update_plist rejected the non-semver candidate name."
+    required_tests:
+      - release_workflow_separates_source_ref_from_product_version
+      - local_remote_parity_static_release_identity_guard
+      - candidate_release_three_platform_build
+    focused_evidence: "nextest run f8460906-af61-4214-980e-bcf44c2a6e8f passed release_workflow_separates_source_ref_from_product_version 1/1; candidate run 29550633147 validated source refs/tags/candidate/v0.3.0-0488b3c separately from product v0.3.0, then Linux job 87792184706, macOS job 87792184718, and Windows job 87792184730 all succeeded and uploaded artifacts 8396648033, 8398099047, and 8396330944"
+    result: passed_candidate_release_run_29550633147_three_platform_zero_failures
+
+  - id: TERMINAL-SIGNAL-TARGET-READINESS
+    source: LR-106
+    reproduction: "full workspace run 8d17cb25-a242-4d0f-aa56-9f148283a1ac failed test_ctrl_c 1/6167; integration-only concurrent run c7a3373b-0664-4bb3-8ea5-74a5e0ced72f reproduced after Preexec: Ctrl-C rendered ^C but active block remained Executing until the 10-second assertion deadline."
+    required_tests:
+      - test_ctrl_c
+      - local_remote_parity_static_signal_readiness_guard
+      - integration_only_concurrent_suite
+      - full_workspace_nextest
+    focused_evidence: "nextest run 4168c969-fbe0-4cab-96de-1fdf5d69ed9a passed test_ctrl_c 1/1 after the target installed its SIGINT trap and emitted __ASHIDE_CTRL_C_READY__"
+    result: passed_integration_run_46864338_226_of_226_and_full_workspace_run_393d0a8a_6167_of_6167
+
+  - id: COMMAND-PALETTE-SELECTED-BINDING-READINESS
+    source: LR-107
+    reproduction: "post-LR-106 integration-only concurrent nextest run 6c5c6fee-2748-4188-bbab-98ac61bb1d0d failed test_pane_group_state_multi_pane: both requested Activate Previous Pane accepts dispatched root_view:handle_pane_navigation_event instead of WorkspaceAction::NavigatePrevPaneOrPanel, proving the helper accepted a non-binding intermediate result."
+    required_tests:
+      - test_pane_group_state_multi_pane
+      - local_remote_parity_static_selected_binding_guard
+      - integration_only_concurrent_suite
+      - full_workspace_nextest
+    focused_evidence: "nextest run 87cbe5d6-8f51-4449-a823-047f0e6a7d33 passed test_block_bulk_deletion_using_escape_codes plus test_pane_group_state_multi_pane 2/2 after canonicalizing the requested description and waiting for the exact selected AcceptBinding"
+    result: passed_integration_run_46864338_226_of_226_and_full_workspace_run_393d0a8a_6167_of_6167
+
+  - id: RELEASE-MACOS-UNSIGNED-BUNDLE-SEAL
+    source: LR-108
+    reproduction: "Candidate run 29550633147 artifact 8398099047 and formal v0.3.0 run 29558681001 both contained an arm64 0.3.0 App whose main executable was adhoc linker-signed while Info.plist was not bound and Sealed Resources was none; codesign --verify --deep --strict failed before local full-bundle ad-hoc sealing made the same App valid and launchable."
+    required_tests:
+      - macos_unsigned_release_bundle_is_ad_hoc_sealed_and_verified
+      - local_remote_parity_static_unsigned_bundle_seal_guard
+      - corrected_macos_release_artifact_strict_verify
+    focused_evidence: "Standalone Rust contract test passed; formal v0.3.0 artifact reproduced code-has-no-resources strict verification failure, then the new full-bundle ad-hoc seal postcondition made the same App pass deep strict verification. Corrected remote macOS artifact passed strict verification and packaging validation."
+    result: passed_corrected_macos_release_artifact_strict_verify
+
+  - id: SESSION-CONTAINER-ALLOCATION-DELIVERY-PARITY
+    source: LR-109,LR-146,LR-147,LR-148
+    reproduction: "Remote-only Resume replaces its placeholder with a terminal before PTY bootstrap and CLIAgentSessionsModel registration; the intermediate terminal is projected as a generic live container at the top of Session Navigator, then disappears when provider binding arrives and consumes the virtual row. A second runtime reproduction opened a provider without startup_command, allocated a placeholder with intent=None, and therefore never created the first terminal/execution carrier after Connected. A clean rebuilt cold start restored that placeholder but startup called only ensure_current_environment_runtime_transport_if_needed, so the non-persisted pending queue was never reconstructed; red b1bbf9eb further proved the runtime restore branch reallocated its persisted container UUID. Global callsite scan then found agent/startup/fork split paths ensuring transport before allocating and queuing their loading-pane owner."
+    required_tests:
+      - test_environment_runtime_resume_never_projects_transient_generic_terminal_row
+      - test_environment_entry_intents_share_container_allocation_delivery_contract
+      - test_open_environment_runtime_provider_without_startup_queues_plain_terminal_intent
+      - test_cold_restored_active_environment_placeholder_rebuilds_terminal_intent_before_transport
+      - test_restored_error_window_snapshot_does_not_implicitly_connect
+      - test_runtime_materialization_call_sites_establish_owner_before_transport
+      - test_add_plain_terminal_pane_on_connecting_runtime_stages_loading_pane_and_queues
+      - local_remote_parity_static_session_container_delivery_guard
+      - full_workspace_nextest
+    focused_evidence: "LR-109 evidence remains valid for Resume carrier identity. LR-146 red e5157f4c proved a newly allocated provider placeholder had no PlainTerminal owner; green 7047576b passed 1/1 and combined 32de3dcc passed 8/8. Real remote-fixture-secondary Provider picker opening a new container logged pane-owned PlainTerminal intent before transport, then runtime terminal creation, EnvironmentRuntimeCommandExecutor selection and commit without NoOp/No executor/SessionNotFound/reconnect; 160 captured frames had no empty or decreasing remote projection. LR-147 red b1bbf9eb proved cold restore replaced the persisted container before the missing-pending assertion. LR-148 red c9eade65 proved the direct ensure inventory still contained bypasses; implementation preserves the pane tree, enumerates every runtime placeholder, and stages generic/agent/startup/fork typed owners before transport. Full-tree owner inventory and alias/new-wrapper probes fail closed. The rebuilt remote-fixture-secondary composition test queued the provider placeholder owner, dispatched SplitPaneDown 25ms later, queued a second owner before one transport, and committed two Environment runtime terminals. Cold restart PID 84341→92009 reconstructed two placeholder owners before a single transport ensure and visibly restored both panes with two runtime executors/commits and no NoOp, No executor or SessionNotFound. Full workspace nextest remains the shared release gate."
+    result: passed_focused_static_cargo_check_rebuilt_split_plural_cold_restore_and_full_workspace_6326_of_6326
+
+  - id: AGENT-HARNESS-ARCHITECTURE
+    source: LR-110
+    reproduction: "A remote-only Resume regression initially suggested a Navigator snapshot metadata patch because the project harness stored session context in a feature-named SessionBridge skill instead of routing lifecycle/identity problems through current SPEC and shared abstractions."
+    required_tests:
+      - agent_harness_checks_pass
+      - local_remote_parity_static_agent_harness_guard
+    focused_evidence: "script/check_agent_harness passed; CI/presubmit routing is present; local_remote parity checker has no LR-110 error."
+    result: passed_harness_and_static_contract
+
+  - id: SESSION-SOURCE-USER-STATE-BACKEND-PARITY
+    source: LR-111
+    reproduction: "同构 local/remote 分支扫描命中 Session Navigator 的 alias/pin read/mutation、indexed CLI session cache 与 Refresh scheduling：local 直接访问 current-app sidecar/Workspace cache，remote 访问 EnvironmentTable/runtime RPC。"
+    required_tests:
+      - test_session_navigator_source_and_user_state_use_environment_backend
+      - test_local_and_runtime_session_user_state_share_optimistic_commit_contract
+      - local_remote_parity_static_session_source_user_state_guard
+      - full_workspace_nextest
+    focused_evidence: "nextest run 587f22d4-ff26-4aae-a3a1-36714e765ded passed both backend-owned source/user-state tests 2/2; LR-118 run e9156277 passed the shared Alias projection chain 7/7. Real local and root@remote-fixture-secondary GUI Pin/Unpin each switched the committed context action between Pin and Cancel Pin, showed success feedback, preserved unrelated rows, and returned to the original state; evidence is under /tmp/ashide-verify/lr118."
+    result: passed_focused_static_cargo_full_workspace_and_local_remote_gui
+
+  - id: SESSION-ACTION-AUTHORITY-CANONICAL
+    source: LR-112
+    reproduction: "WorkspaceSessionActionTarget allowed authority=None and Navigator interpreted it as implicit local/current-app, preserving a high-level local fallback and id-only wildcard semantics."
+    required_tests:
+      - test_workspace_session_action_target_always_carries_canonical_authority
+      - local_remote_parity_static_action_authority_guard
+      - full_workspace_nextest
+    focused_evidence: "nextest run ce779e2c-7241-4393-b223-f8c4c1e4025d passed canonical action authority; parity checker reports no LR-112 error; cargo check --locked passed in 48.38s. Clean rebuilt AshideDev local and remote session-row Resume actions used explicit selector authority and kept stable rows."
+    result: verified
+
+  - id: ENV-NAVIGATION-BACKEND
+    source: LR-113
+    reproduction: "Delete post-close and SplitPane conversation restore chose TerminalBootstrap versus Runtime containers in product action code and reconstructed target EnvironmentSnapshot independently. Runtime GUI verification then found the Session Navigator historical Conversation caller still hardcoded NewTab, bypassing the existing shared layout preference and making the SplitPane product path unreachable from that entry."
+    required_tests:
+      - test_environment_navigation_activation_uses_shared_backend_for_delete_and_split_restore
+      - test_deleting_only_live_environment_session_keeps_environment_selected
+      - test_restored_conversation_new_tab_uses_shared_fork_delivery
+      - test_restored_conversation_split_pane_reuses_local_environment_container
+      - test_restored_conversation_split_pane_reuses_runtime_environment_container_without_plain_terminal_intent
+      - test_session_navigator_historical_conversation_honors_shared_split_layout_preference
+      - test_environment_backend_kind_dispatch_call_sites_are_audited
+      - local_remote_parity_static_navigation_backend_guard
+      - full_workspace_nextest
+    focused_evidence: "2026-07-20 expected-red nextest 21f25212-73d6-4658-adc1-4ce0fc9a1fb8 proved Navigator activation ignored SplitPane (2 tabs vs expected 1). After deleting the NewTab override, nextest 0e409104-d12f-453f-bff2-8ff818e7d9f7 passed 4/4 for default NewTab, shared SplitPane preference, local delivery, and runtime delivery; LR-113 static guards are clean and cargo check --locked -p warp passed in 41.89s. The rebuilt and strict-verifiable AshideDev app then activated the same historical Conversation through the real Navigator entry: remote stayed at 11 tabs while changing 11 leaves/0 branches to 12 leaves/1 branch under ssh:ssh-config:remote-fixture-secondary, and local stayed at 5 tabs while changing 5 leaves/0 branches to 6 leaves/1 branch under local:/Users/admin/ashide; both focused panes retained conversation ffe96606-5adf-4a15-b73f-4b6233c3e2ab."
+    result: passed_focused_static_cargo_current_build_local_remote_gui_and_full_workspace_6326_of_6326
+
+  - id: SESSION-BRIDGE-CONVERSATION-SOURCE
+    source: LR-114
+    reproduction: "A persisted Ashide Conversation with runtime authority was rejected before current-app SQLite cold-read because execution authority had been confused with source ownership. Conversation data never belongs to CLI-agent Environment roots."
+    required_tests:
+      - test_remote_authority_historical_conversation_edit_reuses_shared_session_bridge_source_reader
+      - test_remote_session_bridge_fork_to_ashide_preserves_explicit_source_authority_for_delivery
+      - local_remote_parity_static_session_bridge_conversation_source_guard
+      - full_workspace_nextest
+    focused_evidence: "expected-red nextest run 07f0d353-8fac-4f6b-b961-185f05d2ebbd failed because the dialog stayed closed; nextest run 9cf45bbc-3a79-4a12-9058-f6466c48e0c2 passed all 3 source/finish tests after forwarding explicit authority only into shared restore delivery; locked warp GUI cargo check passed in 55.95s; 2026-07-19 current-build GUI Fork from remote-fixture-secondary wrote Conversation ffe96606-5adf-4a15-b73f-4b6233c3e2ab to current-app SQLite and restored 183 blocks in the remote runtime without the former missing-Environment error."
+    result: passed_focused_static_cargo_current_build_remote_runtime_and_full_workspace_6326_of_6326
+
+  - id: ENV-NAVIGATION-ACTIVATION-INTENT
+    source: LR-115
+    reproduction: "Full workspace nextest run 93dc6ae2 showed delete-after-close creating a second current-app tab despite an existing visible neighbor because activation had no lifecycle intent."
+    required_tests:
+      - test_environment_navigation_activation_uses_shared_backend_for_delete_and_split_restore
+      - test_deleting_active_current_app_session_with_neighbor_tab_does_not_create_empty_replacement
+      - test_deleting_only_live_current_app_session_creates_replacement_before_close
+      - test_deleting_only_live_environment_session_keeps_environment_selected
+      - local_remote_parity_static_navigation_activation_intent_guard
+      - full_workspace_nextest
+    focused_evidence: "green nextest run 2031ad7a-6051-4fa1-893c-10452fe5ee1c passed the expanded LR-115 through LR-118 contract group 19/19; static guards and cargo check --locked passed except the intentional LR-063 completion gate. Clean rebuilt AshideDev runtime then created and deleted a controlled fifth local tab, returned to the four existing neighbors without an empty replacement, and cold-restored the active remote carrier as the same stable environment_runtime_placeholder; evidence is under /tmp/ashide-verify/lr115-local-delete and /tmp/ashide-verify/lr113-117-current."
+    result: passed_focused_static_cargo_gui_runtime_and_full_workspace_6326_of_6326
+
+  - id: ENV-SESSION-REFRESH-INTENT
+    source: LR-116
+    reproduction: "Full workspace nextest run 93dc6ae2 restored a persisted runtime Error correctly, then configure-time passive session refresh reconnected it and changed lifecycle to Connecting."
+    required_tests:
+      - test_restored_error_window_snapshot_does_not_implicitly_connect
+      - test_session_navigator_source_and_user_state_use_environment_backend
+      - test_local_and_runtime_session_user_state_share_optimistic_commit_contract
+      - local_remote_parity_static_session_refresh_intent_guard
+      - full_workspace_nextest
+    focused_evidence: "green nextest run 2031ad7a-6051-4fa1-893c-10452fe5ee1c passed the expanded LR-115 through LR-118 contract group 19/19; persisted Error stayed inert during passive projection; cargo check --locked passed. Rebuilt AshideDev then cold-restored the persisted remote-fixture-secondary Error at 13:30 on 2026-07-20: passive Session Navigator scans left it inert with no remote proxy or implicit connection. Dispatching the explicit ReconnectCurrentEnvironment action at 13:37 started one connection, resolved roots, materialized the runtime terminal and restored the 43-session collection."
+    result: passed_focused_static_cargo_gui_runtime_and_full_workspace_6326_of_6326
+
+  - id: SOURCELESS-RESTORE-CONTAINER-BINDING
+    source: LR-117
+    reproduction: "Focused contract run 510648e9 passed 11/12 and showed Antigravity restore without a native session ID projecting both tab:3:leaf:0 and environment-agy-restore. On 2026-07-20 a real remote cold restore converted TerminalPaneSnapshot into EnvironmentRuntimePlaceholder and lost PaneSessionBinding, reopening LR-117."
+    required_tests:
+      - test_environment_runtime_restored_first_class_cli_agents_queue_remote_startup_commands
+      - test_environment_runtime_restore_tree_preserves_leaf_session_binding
+      - test_sourceless_restore_binding_survives_leaf_snapshot_round_trip
+      - test_runtime_placeholder_leaf_binding_survives_sqlite_round_trip
+      - test_restored_runtime_placeholder_configuration_owns_leaf_session_binding
+      - test_cold_restored_runtime_placeholder_materialization_preserves_pane_session_binding
+      - test_session_navigator_refresh_collapses_materialized_alias_to_live_row
+      - local_remote_parity_static_sourceless_restore_binding_guard
+      - full_workspace_nextest
+    focused_evidence: "2026-07-20 the new cold-restore → placeholder → queued materialization → terminal replacement test first failed because completion-triggered snapshot rewrote the binding with cwd=None. TerminalPane::snapshot is now read-only and Started/SessionUpdated explicitly refresh the pane owner before projection/save. Nextest run a29d4c3c passed the new red test 1/1; run 7030ea70 passed the expanded LR-117 group 11/11. A rebuilt, strictly codesign-verified AshideDev then completed two consecutive remote/local cold restores; the fixed remote and local container bindings remained byte-for-byte identical in both post-restart JSON captures and SQLite integrity_check returned ok."
+    result: passed_focused_and_two_cycle_runtime_2026_07_20
+
+  - id: MATERIALIZED-SOURCE-USER-STATE-PROJECTION
+    source: LR-118
+    reproduction: "A materialized remote session accepted Pin and showed a success toast, but Navigator kept the row unpinned because merge_for_session_navigator checked only live container keys and ignored persisted PaneSessionBinding source identities."
+    required_tests:
+      - test_environment_projection_data_uses_canonical_navigation_key
+      - test_session_navigator_alias_projection_uses_canonical_environment_navigation_key
+      - test_session_navigator_source_and_user_state_use_environment_backend
+      - test_materialized_sourceless_restore_does_not_apply_source_alias_and_preserves_pin
+      - test_local_materialized_sourceless_restore_does_not_apply_source_alias_and_preserves_pin
+      - test_sourceless_restore_binding_survives_leaf_snapshot_round_trip
+      - test_runtime_placeholder_leaf_binding_survives_sqlite_round_trip
+      - test_session_navigator_merge_does_not_project_or_preserve_pin_state
+      - local_remote_parity_static_materialized_source_user_state_projection_guard
+      - full_workspace_nextest
+    focused_evidence: "red nextest run 11598290-ea1d-42a9-832a-67d8f97b45fb reproduced is_pinned=false for local/runtime; red run 00db1cec-e486-4a54-a215-5c3aad1b31af exposed merge as a second pin owner; green run 2031ad7a-6051-4fa1-893c-10452fe5ee1c passed 19/19 after Refresh became the sole pin projection owner. Runtime red on 2026-07-19 then exposed exact-authority indexed/user-state caches plus a post-reducer Alias clone; green run e9156277 passed 7/7 after direct fixture mutations adopted the production owner commit boundary. Real local and root@remote-fixture-secondary GUI Pin/Unpin each showed the success toast, switched the context action to Cancel Pin, preserved unrelated rows, and returned to the original unpinned state; evidence is under /tmp/ashide-verify/lr118. SQLite round-trip covers cold binding persistence."
+    result: passed_focused_static_cargo_check_full_workspace_and_local_remote_gui
+
+  - id: RESTORE-IN-FLIGHT-PROJECTION-OWNERSHIP
+    source: LR-119
+    requirement: "Session Navigator canonical sessions 与 lifecycle/order/identity state 必须由同一 Environment-scoped reducer model 原子持有；local/runtime Resume 全阶段列表基数、无关 rows、顺序与 RowId 稳定。"
+    gates:
+      - test_restore_refresh_preserves_target_carrier_and_unrelated_rows_for_local_and_runtime
+      - test_restore_finished_removes_carrier_only_after_confirmed_source_absence
+      - test_environment_runtime_resume_preserves_full_navigator_cardinality
+      - test_local_resume_preserves_full_navigator_cardinality
+      - local_remote_parity_static_restore_projection_ownership_guard
+      - local_remote_gui_resume_cardinality_and_order
+      - full_workspace_nextest
+    focused_evidence: "Red run 65669f8b exposed stale selected RowId after confirmed source absence; green reducer run bbe13ed2 passed 2/2 for source-missing carrier/cardinality/materialization/cleanup, and workspace run 9bbeda2f passed 2/2 for local/runtime three-row Resume cardinality and order. Locked cargo check passed in 45s; full workspace run 45f283ac passed 6183/6183 with 84 skipped. Static LR-119 guards pass; local/runtime GUI remains. Clean rebuilt AshideDev local and remote Resume each preserved cardinality/order across 240/240 frames."
+    result: verified
+
+  - id: CODEX-NATIVE-FORK-SYSTEM-CONFIGURATION
+    source: LR-120
+    requirement: "Codex Fork 只转换 transcript/index；native bootstrap 必需的 model_provider 只能从各自目标 CODEX_HOME/config.toml 派生，Fork/Resume 不接受运行参数，不修改私有 state_5.sqlite，真实 CLI 可加载。"
+    gates:
+      - codex_native_writer_reads_bootstrap_provider_from_target_system_configuration
+      - codex_native_writer_without_model_provider_fails_before_writing
+      - local_and_remote_codex_native_plans_use_target_owned_configuration
+      - codex_native_writer_does_not_mutate_codex_private_sqlite_registry
+      - codex_native_fork_real_cli_resume_bootstrap
+      - local_remote_parity_static_codex_native_system_configuration_guard
+      - full_workspace_nextest
+    focused_evidence: "red real command failed because generated session_meta/registry hard-coded provider codex；真实 Codex schema 又证明完全省略 provider 会变成空 provider。目标契约因此收敛为 config-derived bootstrap provider + no private registry mutation + normal codex resume <id>. 2026-07-20 remote remote-fixture-secondary GUI Fork generated rollout 283b80cb using target Codex 0.144.6 and provider yggdrasil; real codex exec resume returned ASHIDE_LR120_REMOTE_OK."
+    result: verified
+
+  - id: CLAUDE-NATIVE-FORK-TARGET-OWNERSHIP
+    source: LR-121
+    requirement: "Claude Fork 只转换 transcript/history；配置根统一读取目标 CLAUDE_CONFIG_DIR，禁止伪造 version/git branch/mode/permission/runtime model，真实 Claude 可加载。"
+    gates:
+      - claude_native_writer_omits_target_owned_runtime_configuration
+      - claude_native_writer_uses_claude_config_dir
+      - local_and_remote_native_write_plans_are_equivalent
+      - claude_native_fork_real_cli_resume_bootstrap
+      - local_remote_parity_static_claude_native_target_ownership_guard
+      - full_workspace_nextest
+    focused_evidence: "Red runtime sample: installed Claude 2.1.211 writes branch main, permission bypassPermissions and synthetic model, while SessionBridge guessed 2.1.0, HEAD, default and ashide-session-bridge. Green nextest cfafcd47 passed writer/config/plan tests；72494adc 用真实 Claude 2.1.211 加载生成 transcript，向本地 mock Anthropic endpoint 发送包含历史 marker 的请求并成功完成。2026-07-20 remote remote-fixture-secondary GUI Fork generated session 8c604e49 without fabricated target-owned fields; real Claude 2.1.158 resume returned ASHIDE_LR121_REMOTE_OK."
+    result: verified
+
+  - id: CLI-AGENT-STORE-ROOT-OPERATION-CONTEXT
+    source: LR-122
+    requirement: "CLI-agent store roots 是 target-owned operation context；local/runtime scan/read/mutate/Fork 共用完整 roots snapshot，remote helper 不读取 daemon 进程环境猜测。"
+    gates:
+      - local_cli_agent_source_target_uses_shared_custom_codex_root
+      - delete_codex_index_entry_uses_shared_custom_codex_root
+      - delete_jsonl_uses_shared_custom_claude_root_allowlist
+      - remote_cli_agent_operations_use_explicit_target_store_roots
+      - environment_cli_agent_store_roots_are_shared_by_scan_read_mutate_and_fork
+      - local_cli_agent_operation_reuses_one_store_root_snapshot_across_scan_read_mutate_and_fork
+      - session_bridge_cli_agent_operations_require_resolved_store_root_context
+      - local_remote_parity_static_cli_agent_store_root_context_guard
+      - remote_custom_codex_home_scan_read_delete_and_fork
+      - remote_custom_claude_config_dir_scan_read_delete_and_fork
+      - full_workspace_nextest
+    focused_evidence: "Red code review: local delete/index source/allowlist rebuilt ~/.codex and ~/.claude; remote helper scan/read/mutate read daemon HOME/CODEX_HOME/CLAUDE_CONFIG_DIR while Fork writer resolved target Environment session variables. Green runs 60c653a7 与 cfafcd47 覆盖 custom local/runtime roots 与显式 RPC roots；3e2e6fac 3/3、c838feb8 17/17 进一步证明 unresolved environment 不能执行 store operation，且同 execution context 的 scan/read/mutate/Fork 复用一个 roots snapshot。2026-07-20 remote remote-fixture-secondary 使用隔离 CODEX_HOME/CLAUDE_CONFIG_DIR 后只扫描到 custom sessions；GUI read/Fork 写入 custom Codex root，真实 target Codex resume 返回 ASHIDE_LR122_CUSTOM_ROOT_OK；GUI delete 只删除 custom Claude transcript，默认 roots 无对应 ID，最后恢复 .bashrc 原 SHA256 并删除隔离目录。"
+    result: verified
+
+
+  - id: REMOTE-HELPER-PROTOCOL-REVISION
+    source: LR-123
+    requirement: "remote helper protocol compatibility 必须由 Initialize 双向 revision 明确证明；source/dev 与 release 安装身份都含 protocol slot；旧 client/helper、缺失字段和错误 revision 全部 fail-closed，且失败先于 auth mutation。"
+    gates:
+      - initialize_sends_current_protocol_revision
+      - initialize_rejects_missing_server_protocol_revision
+      - initialize_rejects_wrong_server_protocol_revision
+      - initialize_rejects_wrong_client_protocol_revision_before_auth_mutation
+      - protocol_round_trip_preserves_revision
+      - release_remote_server_slot_includes_protocol_revision
+      - oss_source_build_remote_server_binary_uses_dev_protocol_slot_v5
+      - local_remote_parity_static_remote_protocol_revision_guard
+      - real_remote_helper_v5_initialize_pty_and_server_file_browser
+      - full_workspace_nextest
+    focused_evidence: "2026-07-25 `cargo test -p remote_server --lib --no-fail-fast` 94/94 通过 v5 Initialize/slot/fail-closed gates；随后用 active AshideDev 的显式 ControlMaster 运行 `environment_runtime_transport::ssh_transport::tests::real_remote_helper_v5_initialize_pty_and_server_file_browser -- --ignored --exact`，production SshTransport 使用 `~/.ashide-dev/remote-server/ashide-dev-pty-v5`，真实 daemon 返回 v5 Initialize，并完成只读 ListDirectory(/) 与 CreatePty/ClosePty。v4 runtime 日志只保留历史用途。"
+    result: verified
+
+
+  - id: REMOTE-CONNECTION-HANDSHAKE-OWNERSHIP
+    source: LR-124
+    requirement: "每条 helper connection 的 sender/handshake phase/snapshot delivery 必须由单一 ConnectionState 持有；非 Ready connection 的任何业务消息都不得 dispatch。"
+    gates:
+      - connection_starts_awaiting_initialize
+      - initialize_marks_only_matching_revision_ready
+      - pre_initialize_business_message_is_rejected_without_side_effects
+      - failed_initialize_cannot_be_bypassed_by_later_business_message
+      - duplicate_initialize_is_rejected
+      - deregister_removes_complete_connection_state
+      - local_remote_parity_static_connection_handshake_owner_guard
+      - real_remote_connection_handshake
+      - full_workspace_nextest
+    focused_evidence: "Compile-red run exposed missing ConnectionState/gate contract. Green runs d88ace8f and e4a55827 passed 7/7 each for phase gating cleanup duplicate Initialize and Ready-only broadcasts; cargo check passed for remote_server and warp tests. 2026-07-19 clean rebuilt App completed two independent current-revision Initialize handshakes and remote PTY bootstraps for the same authority."
+    result: passed_focused_static_cargo_real_remote_runtime_and_full_workspace_6326_of_6326
+
+
+  - id: REMOTE-CONNECTION-RESOURCE-OWNERSHIP
+    source: LR-125
+    requirement: "remote executor 与 cancellable request 必须由 ConnectionState 原子持有；相同 SessionId/RequestId 在不同 connection 中完全独立并随 owner disconnect 清理。"
+    gates: [same_session_id_is_independent_across_connections, disconnect_removes_only_owned_executors, same_request_id_is_independent_across_connections, cross_connection_abort_is_rejected, request_completion_removes_only_owner_entry, disconnect_aborts_only_owned_in_progress_requests, full_workspace_nextest]
+    focused_evidence: "Previous 1192dceb 5/5 proved value-level owner checks but review found daemon-global key collisions remained. Reworked ConnectionState namespace nextest 3ab665cd passed 6/6 and Warp tests check passed. 2026-07-19 clean rebuilt App ran independent commands on two connections; Ctrl-C aborted only A while B remained usable and both proxies stayed alive."
+    result: passed_focused_static_cargo_real_multi_connection_runtime_and_full_workspace_6326_of_6326
+
+  - id: REMOTE-PTY-CONNECTION-OWNERSHIP
+    source: LR-126
+    requirement: "remote PTY registry 与 write/resize/close/disconnect 必须共享 ConnectionState owner；foreign numeric pty_id 不可操作另一连接资源。"
+    gates: [foreign_close_pty_does_not_remove_owner_resource, owner_close_pty_removes_resource, disconnect_removes_only_owned_ptys, pty_mutation_handlers_require_connection_owner, local_remote_parity_static_remote_pty_owner_guard, full_workspace_nextest]
+    focused_evidence: "Code review found WritePty/ResizePty/ClosePty discarded dispatch conn_id and used daemon-global pty_id. ConnectionState PTY ownership nextest 3ab665cd passed 4/4 and Warp tests check passed. 2026-07-19 clean rebuilt App kept two same-authority PTYs independent across commands Ctrl-C and divergent CWD navigation."
+    result: passed_focused_static_cargo_real_multi_connection_pty_and_full_workspace_6326_of_6326
+
+  - id: REMOTE-BUFFER-MUTATION-SERIALIZATION
+    source: LR-127
+    requirement: "同一 remote buffer 的 Save/Resolve 必须由 ServerBufferTracker 单 active + FIFO queue 串行；一个 event 只完成一个 active request。"
+    gates: [same_buffer_mutations_are_fifo_and_single_active, completion_advances_exactly_one_buffer_mutation, different_buffer_mutations_remain_independent, disconnect_removes_queued_but_preserves_active_mutation, failed_active_mutation_advances_next_intent, production_buffer_mutation_pipeline_serializes_resolve_then_save, local_remote_parity_static_buffer_mutation_owner_guard, full_workspace_nextest]
+    focused_evidence: "Queue-state tests proved single-active FIFO ownership. Nextest 17154e66 exercised the production ServerModel→ServerBufferTracker→GlobalBufferModel→FileModel path with a real temporary file: ResolveConflict responded before queued SaveBuffer and the resolved content was the final disk state."
+    result: passed_focused_static_cargo_production_runtime_and_full_workspace_6326_of_6326
+
+  - id: REMOTE-FILE-TRANSFER-CONNECTION-OWNERSHIP
+    source: LR-128
+    requirement: "inode-pinned file transfer registry 必须由 ConnectionState 持有；chunk/finish/abort 只操作当前 connection namespace。"
+    gates: [file_transfer_handle_is_connection_scoped, same_transfer_handle_locator_is_independent_across_connections, foreign_finish_and_abort_do_not_remove_owner_transfer, disconnect_drops_only_owned_file_transfers, production_dispatch_keeps_multi_connection_transfers_independent, local_remote_parity_static_file_transfer_owner_guard, full_workspace_nextest]
+    focused_evidence: "Nextest e3f992e7 passed production dispatch through Initialize, ClientMessage/ServerMessage envelopes and two ConnectionId states: after both transfers advanced, deregistering A removed only A while B preserved its cursor, read the remaining bytes and finished successfully."
+    result: passed_focused_static_cargo_production_runtime_and_full_workspace_6326_of_6326
+
+  - id: REMOTE-FILE-TRANSFER-SNAPSHOT-INTEGRITY
+    source: LR-129
+    requirement: "remote read transfer 必须固定 Begin 时 total_size 并精确验证 chunk cursor；source 增长不得越界读取，提前截断/过早 eof/offset jump 必须失败，bounded reader 在首 chunk 前拒绝超限。"
+    gates: [read_transfer_does_not_include_bytes_appended_after_begin, read_transfer_reports_truncation_instead_of_successful_eof, read_transfer_rejects_zero_budget_before_eof, environment_read_cursor_requires_exact_progress_and_terminal_size, environment_write_cursor_requires_exact_progress, production_dispatch_enforces_pinned_growth_and_truncation_snapshots, local_remote_parity_static_file_transfer_integrity_guard, full_workspace_nextest]
+    focused_evidence: "Red nextest 93ebfb0e reproduced growth/truncation/zero-budget failures. Green nextest e19fab78 passed 5/5 server+typed-cursor regressions; a11382c6 passed the complete server model/tracker suite; e3f992e7 passed production handle_message dispatch on real files, proving Begin-size growth capping and explicit truncation failure."
+    result: passed_focused_static_cargo_production_runtime_and_full_workspace_6326_of_6326
+
+  - id: REMOTE-BUFFER-RESOLVE-TRANSACTION
+    source: LR-130
+    requirement: "ResolveConflict 必须 staged；FileSaved 前 canonical content/version/clock 不变，FailedToSave 丢弃 staging，成功才原子 commit。"
+    gates: [resolve_conflict_keeps_canonical_state_until_file_saved, failed_resolve_conflict_preserves_committed_buffer_and_clock, queued_save_after_failed_resolve_uses_committed_state, production_failed_resolve_rolls_back_before_queued_save, local_remote_parity_static_resolve_transaction_guard, full_workspace_nextest]
+    focused_evidence: "Transactional unit tests cover staged commit and rollback. Nextest 17154e66 forced a real asynchronous FileModel save failure inside the production server pipeline, restored the backing directory at the failure event boundary, and proved queued SaveBuffer persisted only the unchanged committed content/clock."
+    result: passed_focused_static_cargo_production_failure_runtime_and_full_workspace_6326_of_6326
+
+  - id: REMOTE-BUFFER-BINDING-OWNERSHIP
+    source: LR-131
+    requirement: "Environment buffer 必须拥有 stable session binding、single daemon writer owner 与 UI consumer leases；last release 前不得 CloseBuffer。"
+    gates: [shared_buffer_close_releases_only_last_consumer, environment_buffer_operations_keep_opening_session_binding, same_host_session_churn_does_not_switch_buffer_connection, second_connection_cannot_open_or_mutate_owned_buffer, owner_disconnect_releases_buffer_writer_owner, local_remote_parity_static_buffer_binding_owner_guard, full_workspace_nextest]
+    focused_evidence: "Code review found client_for_host chooses an arbitrary session on every Open/Edit/Save/Close and GlobalBufferModel close unconditionally destroys shared state from the first closing tab. On 2026-07-20 two real remote-fixture-secondary windows opened /root/lr131-dir/shared.txt; closing window A's file consumer left both proxy processes alive, while window B remained editable and saved LR131_WINDOW_B_SURVIVED to the authoritative remote file. Artifacts are under /tmp/ashide-runtime-evidence/lr127-132/current."
+    result: passed_focused_static_cargo_two_window_remote_runtime_and_full_workspace_6326_of_6326
+
+  - id: SHARED-BUFFER-LOAD-EDITABILITY
+    source: LR-132
+    requirement: "initial buffer materialization 前所有 consumer 必须 non-editable；成功后统一解锁，失败/late response 不得吞编辑或复活 state；Loaded 快路径缺 content/SyncClock 必须通过统一 cleanup fail-closed。"
+    gates: [environment_buffer_is_not_editable_until_loaded, shared_loading_consumers_unlock_together, failed_environment_buffer_never_becomes_editable, late_open_response_does_not_revive_closed_buffer, local_remote_parity_static_buffer_loading_editability_guard, full_workspace_nextest]
+    focused_evidence: "Code review found an explicit TODO: user edits are allowed while sync_clock=None, silently ignored by transport, then overwritten by OpenBufferResponse replace_all. Final review also removed loaded-path unwrap_or_default/unwrap_or(1), so incomplete canonical state can no longer be reported as a successful OpenBuffer. On 2026-07-20 a real remote-fixture-secondary daemon STOP/CONT run activated the pending open.txt tab, rejected LR132_PENDING_MUST_NOT_ENTER, materialized LR132_CANONICAL_SMALL unchanged, then accepted and remotely saved only LR132_AFTER_LOAD_SAVED; screenshot/OCR/daemon/remote-content artifacts are under /tmp/ashide-runtime-evidence/lr127-132/current."
+    result: passed_focused_static_cargo_remote_runtime_and_full_workspace_6326_of_6326
+
+  - id: REMOTE-TRANSPORT-SESSION-BINDING
+    source: LR-133
+    requirement: "具体 Environment operation 必须保留 exact SessionId；HostId 只能做 canonical identity，不得选择 transport。"
+    gates: [saved_ssh_node_runtime_lookup_uses_shared_authority_identity, environment_file_runtime_uses_registered_session_binding, active_environment_inventory_uses_active_session_binding, terminal_session_alias_matches_environment_runtime_navigation_binding, local_remote_parity_static_exact_session_binding_guard, full_workspace_nextest]
+    focused_evidence: "全仓扫描发现 client_for_host 在 terminal inventory、AI tools、SFTP 和 FileModel remote writer 中丢失已有 SessionId；首次实现删除 arbitrary API 并传播 exact binding。2026-07-18 真实 v0.3.0 runtime 又捕获 Workspace 用裸 SessionId 比较 terminal alias 与 Environment owner。compile-red 后，nextest 342d4207 通过 terminal alias 1/1，locked Warp tests check 通过；重建 App 的远程 cwd/file-browser 往返不再出现 stale navigation warning。2026-07-19 同 host 双 session 中 A 导航到 /root/manga-review-platform 而 B 保持 /root，证明 exact operation routing 未串线。"
+    result: passed_focused_static_cargo_two_same_host_runtime_and_full_workspace_6326_of_6326
+
+  - id: NATIVE-SESSION-TARGET-PROJECT-IDENTITY
+    source: LR-134
+    requirement: "native CLI store identity 必须使用 target execution environment 解析出的 canonical project path；source lexical path 不能直接生成 provider project slug/cwd。"
+    gates: [local_native_project_context_canonicalizes_symlink_path, environment_native_project_context_uses_runtime_resolved_path, claude_native_plan_uses_target_canonical_project_identity, claude_native_fork_real_cli_resume_bootstrap, environment_native_fork_remote_symlink_real_cli_resume_bootstrap, local_remote_parity_static_native_project_identity_guard, full_workspace_nextest]
+    focused_evidence: "Red real Claude 2.1.211: /tmp lexical slug produced No conversation found because consumer canonical cwd is /private/tmp. Local nextest ed1b2039 proved symlink spelling → canonical plan → real Claude resume. Remote nextest 39623c46 used production EnvironmentRuntimeTransport on remote-fixture-secondary and proved symlink project → exact-session pwd -P → shared native writer → real Claude 2.1.158 resume with preserved context and prompt."
+    result: passed_local_remote_real_claude_consumer_and_full_workspace_6326_of_6326
+
+  - id: REMOTE-CONTROL-MASTER-SESSION-OWNERSHIP
+    source: LR-135
+    requirement: "同 authority 的每个 Environment-owned SessionId 必须拥有独立 SSH ControlMaster path；第二窗口启动和任一 session teardown 都不得关闭 sibling transport。"
+    gates: [environment_runtime_control_paths_are_session_owned_for_same_authority, environment_runtime_control_path_is_stable_and_short_for_owner_session, local_remote_parity_static_control_master_session_owner_guard, two_window_same_authority_pty_abort_navigation_runtime, full_workspace_nextest]
+    focused_evidence: "2026-07-18 real GUI red reproduced first ControlMaster preemption and orphaned terminal binding. Compile-red proved the old authority-only API; nextest 1f03aff3 passed 2/2 authority+SessionId path ownership tests and cargo check --locked -p warp --tests passed. 2026-07-19 clean rebuilt App kept two independent ControlMaster sockets and proxies alive for the same authority; A Ctrl-C did not interrupt B, A/B CWD remained /root/manga-review-platform vs /root, and logs had no EOF, Broken pipe, missing host binding, or stale navigation."
+    result: verified
+
+  - id: RESUME-CARRIER-BIRTH-BINDING
+    source: LR-136
+    requirement: "SessionRestore terminal/placeholder carrier 必须在任何 sync/notify 前持有 source PaneSessionBinding；不得先显示 generic live row 再补绑定合并。"
+    gates: [test_terminal_bootstrap_resume_allocates_bound_container_before_projection, test_environment_runtime_resume_never_projects_transient_generic_terminal_row, local_remote_parity_static_resume_carrier_birth_binding_guard, local_remote_gui_resume_first_frame_cardinality, full_workspace_nextest]
+    focused_evidence: "Red nextest c7629545 proved TerminalBootstrap delivery returned a visible carrier without PaneSessionBinding. Green run 97e881cf passed after reusing EnvironmentEntryIntent::pane_session_binding at allocation; combined run b826ca4f passed 7/7 local/runtime projection, birth-binding and render-identity tests. Static LR-136 guards pass except the intentional LR-063 completion gate; cargo check --locked passed in 43s. Clean rebuilt AshideDev first-frame capture showed no pre-binding generic carrier for local or remote Resume."
+    result: verified
+
+  - id: SESSION-NAVIGATOR-STABLE-RENDER-IDENTITY
+    source: LR-137
+    requirement: "Virtual/source/placeholder/live carrier 更换时，Vertical Tabs 的 element、position、hover/drag 与 detail sidecar 必须继续绑定 Environment navigation key + canonical RowId。"
+    gates: [test_session_navigator_render_identity_uses_canonical_row_id, local_remote_parity_static_session_navigator_stable_render_identity_guard, local_remote_gui_resume_stable_render_identity, full_workspace_nextest]
+    focused_evidence: "Static guard first failed on physical session.id row/position keys. Implementation now centralizes Workspace::workspace_session_row_id + ParsedEnvironmentAuthority.navigation_key in SessionNavigatorRowIdentity for element, position, mouse/drag and detail sidecar state. Combined nextest b826ca4f passed 7/7 including source-to-live canonical identity; static LR-137 guards pass except LR-063 and cargo check --locked passed in 43s. Clean rebuilt AshideDev local and remote Resume each showed no visual row rebuild or y shift across 240/240 frames."
+    result: verified
+
+  - id: SESSION-NAVIGATOR-STABLE-INLINE-EDIT-IDENTITY
+    source: LR-138
+    requirement: "Alias rename lifecycle 必须使用 SessionNavigatorRowIdentity；source/placeholder/live carrier 更换不得退出编辑、清空 buffer 或把提交写到错误行。"
+    gates: [test_session_navigator_inline_edit_identity_survives_carrier_replacement, local_remote_parity_static_session_navigator_stable_inline_edit_identity_guard, local_remote_gui_resume_inline_edit_identity, full_workspace_nextest]
+    focused_evidence: "SessionNavigatorRowIdentity owns rename lifecycle across source/live carrier replacement. Nextest run 3ca57d99-5c93-48d4-a0f3-5f0115f36938 passed the focused identity test 1/1. Real local and root@remote-fixture-secondary runs kept uncommitted editor text visible for all 60/60 captured Resume frames while unrelated rows remained present; temporary aliases were then removed through the product Clear Alias action. Evidence: /tmp/ashide-verify/lr138-local-2 and /tmp/ashide-verify/lr138-remote-2."
+    result: verified
+
+
+  - id: ENVIRONMENT-TARGET-HOME-MATERIALIZATION
+    source: LR-139
+    requirement: "Environment runtime 历史 session scan 必须由 exact target HOME/root materialization success transition 启动，失败/stale 不得清空 rows 或 fallback 到 /。"
+    gates: [test_environment_runtime_root_materialization_owns_passive_session_refresh, test_environment_runtime_root_resolution_failure_never_materializes_filesystem_root_home, test_environment_runtime_passive_refresh_without_client_preserves_projection_and_lifecycle, local_remote_parity_static_environment_target_home_materialization_guard, remote_gui_connect_and_resume_preserves_history_cardinality, full_workspace_nextest]
+    focused_evidence: "Root/HOME success now owns PassiveProjection refresh; failure preserves cache and never writes / fallback. Nextest 450021e8 passed success/failure/no-client preservation in the 8/8 focused set; cargo check --locked passed in 34.55s. Clean remote runtime resolved /root then scanned 42 sessions. Clean remote runtime resolved target HOME, scanned 42 sessions, then preserved history cardinality across 240/240 Resume frames."
+    result: verified
+
+  - id: SESSION-NAVIGATOR-ATOMIC-RENDER-MODEL
+    source: LR-140
+    requirement: "Vertical Tabs 必须从同一个 SessionNavigatorModel 原子读取 sessions 与 state，Resume identity transition 不得出现跨帧 RowId fallback 或组件重建。"
+    gates: [test_session_navigator_render_model_keeps_sessions_and_state_atomic, local_remote_parity_static_session_navigator_atomic_render_model_guard, local_remote_gui_resume_atomic_render_model, full_workspace_nextest]
+    focused_evidence: "Red compile proved no atomic render boundary existed. Vertical Tabs and detail sidecar now consume one SessionNavigatorModel; legacy scroll_to_tab was removed. Nextest 450021e8 passed 8/8, static LR-140 guards pass except LR-063, and cargo check --locked passed in 34.55s. A clean rebuilt AshideDev then preserved cardinality/order/y across local 240/240 and remote 240/240 Resume frames."
+    result: verified
+
+  - id: SESSION-NAVIGATOR-ATOMIC-ACTION-MODEL
+    source: LR-141
+    requirement: "所有 Session Navigator reducer action 必须从同一个刷新后的 SessionNavigatorModel 原子读取 sessions 与 state。"
+    gates: [test_session_navigator_action_model_refreshes_sessions_and_state_atomically, local_remote_parity_static_session_navigator_atomic_action_model_guard, local_remote_gui_resume_atomic_action_model, full_workspace_nextest]
+    focused_evidence: "Red nextest ba2f1694 proved RestoreStarted committed refreshed rows with stale identity/order state; extended red 976d90c4 proved PaneFocused/TabActivated dropped a newly observed row. Shared session_navigator_model now feeds every reducer action, raw split-read helper is removed, nextest 9362a6ba passed 10/10, LR-141 static guards pass except LR-063, and cargo check --locked passed in 34.07s. A clean rebuilt AshideDev local and remote Resume each remained identity-stable for 240/240 frames."
+    result: verified
+
+  - id: DESKTOP-SINGLETON-ALL-GUI-CHANNELS
+    source: LR-052
+    requirement: "单实例 ownership 是所有 GUI channel 的 lifecycle correctness，不得由 release_bundle feature 或 WARP_DATA_PROFILE 控制；同一 AshideDev.app 无论数据 profile 是否相同，第二次启动都必须转发退出。"
+    gates: [desktop_singleton_is_not_release_feature_gated, desktop_singleton_ignores_data_profile_namespace, mac_single_instance_contract_is_fail_closed, local_remote_parity_static_singleton_all_channels_guard, dev_bundle_cross_profile_double_launch_single_owner_runtime, full_workspace_nextest]
+    focused_evidence: "Red runtime on 2026-07-19 first observed release_bundle-gated concurrent GUI processes, then observed the same bundle split between profile/non-profile namespaces. After app-identity path repair, red b68ee71f became green e8bc100d; cargo check passed; a clean rebuilt owner PID 35749 accepted an env-cleared second bundle launch with exit 0 while the sole terminal-server PID 35782 remained unchanged."
+    result: verified
+
+  - id: SESSION-NAVIGATOR-INDEXED-SCAN-TRANSACTION
+    source: LR-142
+    requirement: "EnvironmentTable 必须原子拥有 indexed-session scan generation 与 collection；远程旧成功子集不得覆盖后启动扫描并让无关行闪退。"
+    gates: [stale_successful_subset_scan_preserves_canonical_session_collection, local_remote_parity_static_indexed_scan_transaction_guard, remote_gui_resume_preserves_unrelated_row_cardinality, full_workspace_nextest]
+    focused_evidence: "Code review traced remote scan completion to an unversioned EnvironmentTable destructive replace. Compile-red proved no generation transaction existed; nextest f8db381f passed the new stale-subset owner test and combined nextest 8b21bd5b passed 6/6 with LR-140/141. cargo check --locked passed in 53.20s. Clean rebuilt remote Resume preserved the same 9 tracked target/unrelated titles and y positions for 240/240 frames."
+    result: verified
+
+  - id: SESSION-NAVIGATOR-COMMITTED-RENDER-PROJECTION
+    source: LR-143
+    requirement: "Vertical Tabs 与 detail sidecar 只能读取已提交 SessionNavigatorModel；render 不得自行 Refresh 或创造未提交 rows/RowId/order。"
+    gates: [test_session_navigator_render_never_projects_uncommitted_source_rows, test_close_active_environment_pane_syncs_session_navigator_active_row, local_remote_parity_static_committed_render_projection_guard, local_remote_gui_resume_has_no_transient_row_or_cardinality_shift, full_workspace_nextest]
+    focused_evidence: "Red test proved read-only render exposed an uncommitted fourth source row. Implementation made render/detail consume only EnvironmentTable committed model, moved action refresh to the existing reducer path, and routed PaneGroup split/add/close AppStateChanged through the same owner. Nextest 5a444689 passed 13/13; cargo check --locked passed in 45.90s. Clean rebuilt AshideDev window capture found no transient row/cardinality/order/y shift in remote 240/240 or local 240/240 Resume frames."
+    result: verified
+
+  - id: SESSION-NAVIGATOR-COMMITTED-FOCUS-PROJECTION
+    source: LR-154
+    requirement: "canonical SessionNavigator sync 必须原子提交 membership + 当前 focus projection；禁止调用方选择 membership-only Refresh 后再补 active row。"
+    gates: [test_deleting_local_tab_session_focuses_same_env_neighbor_tab, test_deleting_active_environment_session_reselects_same_environment_session, test_undo_close_environment_pane_restores_session_navigator_active_row, local_remote_parity_static_committed_focus_projection_guard, full_workspace_nextest, local_remote_gui_delete_undo_focus_has_exactly_one_active_row]
+    focused_evidence: "Red rerun reproduced local/runtime Delete and Undo paths with physical focus moved but committed active rows empty. Canonical Refresh now atomically publishes membership and focus for every caller; focused regression runs passed 3/3, 17/17 and 28/28, cargo check --locked passed, and full workspace run 354bd675-f62c-4cc9-804b-e3fb4e72ec5e passed 6326/6326. In the real rebuilt AshideDev app, local 70-frame and remote-fixture-secondary runtime 80-frame Resume sequences held 31 visible Navigator rows throughout; local Delete emitted RequestDeleteWorkspaceSession without a collection drop, while remote CloseCurrentSession → RemoveActive → focus and consumed UndoCloseStack preserved all unrelated titles across 110 frames."
+    result: verified
+
+  - id: PARITY-HARNESS-FAIL-CLOSED-COMPLETION-GATE
+    source: LR-145
+    requirement: "Release completion gate 必须解析 tracker item/evidence 与 capability matrix status；重复 tracker id、任意非 verified tracker 状态、任意 pending evidence、任意非终态 matrix 状态都必须 fail closed。"
+    gates: [local_remote_parity_completion_gate_contract, local_remote_parity_static_check]
+    focused_evidence: "Red fixture run proved checker had no isolated completion boundary and ignored fixture state; a second red run proved duplicate tracker ids were silently accepted. The shared check_completion_gate now requires unique tracker ids, parses four-space verification children, requires every tracker item to be verified, and uses a completion-status allowlist for matrix rows. script/tests/local_remote_parity_completion_gate.sh covers verified, historical wording, duplicate id, pending evidence, fixed/unknown tracker, fixed_pending_runtime matrix, and partial matrix cases."
+    result: verified
+
+  - id: TERMINAL-SESSION-EXECUTION-CONTEXT
+    source: LR-144
+    requirement: "SessionId command executor 必须拥有目标 terminal bootstrap 后的 cwd 与 HOME/PATH/CODEX_HOME/CLAUDE_CONFIG_DIR；helper daemon 冲突环境不可见，reconnect 重放同一 snapshot。"
+    gates:
+      - terminal_bootstrap_captures_cli_agent_execution_context
+      - session_bootstrapped_transports_target_execution_context
+      - session_execution_context_deregistered_is_transported
+      - run_command_uses_session_context_instead_of_daemon_environment
+      - missing_session_root_variable_does_not_inherit_daemon_value
+      - two_remote_sessions_keep_distinct_execution_contexts
+      - reconnect_replays_session_execution_context
+      - environment_cli_agent_roots_use_session_owned_execution_context
+      - environment_runtime_root_probe_rejects_missing_home_snapshot
+      - environment_runtime_control_session_rejects_missing_execution_context
+      - two_terminal_sessions_do_not_overwrite_runtime_owner_execution_context
+      - reconnect_replays_all_alias_session_execution_contexts
+      - deregistered_alias_context_is_not_replayed
+      - session_bootstrapped_rejects_missing_required_execution_context
+      - alias_deregister_removes_current_helper_executor
+      - reconnect_wire_replays_owner_and_alias_execution_contexts
+      - owner_teardown_removes_alias_context_records
+      - root_resolution_waits_for_bootstrapped_execution_carrier
+      - heartbeat_waits_for_bootstrapped_execution_carrier
+      - local_remote_parity_static_terminal_session_execution_context_guard
+      - remote_custom_roots_scan_read_mutate_fork_resume
+      - full_workspace_nextest
+    focused_evidence: "Red run 6ecdcf65 proved SessionConnected still scheduled heartbeat before an execution carrier, and red 0e50e98f proved Session initialization selected NoOp before alias/context commit. The shared execution-carrier gate and pre-initialization context commit are green; current focused run 127d9aa7 passed 11/11. A clean rebuilt real remote target observed custom HOME/PATH/CODEX_HOME/CLAUDE_CONFIG_DIR/workspace cwd through the session-owned executor; scan/read/Pin/Fork/Resume succeeded, Fork consumed target-owned config without model/provider overrides, source SHA256 remained unchanged, and a full heartbeat interval had no NoOp/No executor/reconnect. Full workspace nextest remains an overall release gate."
+    result: passed_focused_static_remote_custom_root_runtime_and_full_workspace_6326_of_6326
+
+  - id: WORKSPACE-SPLIT-ACTION-AUTHORITY
+    source: LR-149
+    requirement: "四个用户 split binding 必须由 Workspace active Environment authority 路由；旧 focused PaneGroup 不得选择 execution environment，PaneGroup Environment terminal-options 缓存必须删除。"
+    gates:
+      - test_workspace_split_bindings_route_through_workspace_action
+      - test_workspace_split_action_uses_active_environment_when_focus_is_stale
+      - local_remote_parity_static_workspace_split_action_authority_guard
+      - rebuilt_provider_click_immediate_split_local_remote_runtime
+      - full_workspace_nextest
+    focused_evidence: "Real remote-fixture-secondary provider-click followed by immediate SplitPaneDown originally logged PaneGroupAction::Add on the stale local PaneGroup and started /bin/zsh before the remote placeholder completed. The four descriptors now register exactly once under workspace::init and dispatch WorkspaceAction::AddTerminalPane; copied PaneGroup Environment option/runtime caches are deleted. Red binding/compile evidence turned green in e8c08854 (5/5), including stale application focus, exact pending carrier, owner-before-transport ordering and workspace state save. The full-tree static inventory reports path:line plus enclosing owner and rejects a temporary duplicate binding in a new file. Rebuilt runtime verified local and remote-fixture-secondary: the provider row was clicked and SplitPaneDown dispatched 25ms later, no post-action local shell/executor appeared, two Environment runtime terminals bootstrapped and committed, and one app process exposed the expected two remote panes. Full workspace nextest remains the shared release gate."
+    result: passed_focused_static_cargo_check_rebuilt_local_remote_runtime_and_full_workspace_6326_of_6326
+
+  - id: ENV-RUNTIME-RECONNECT-OWNER
+    source: LR-150
+    requirement: "retained Runtime Environment reconnect 必须保持 synthetic owner SessionId 与完整 terminal alias/execution/client-host graph；只有显式 teardown 才能删除 owner。"
+    gates:
+      - test_environment_runtime_reconnect_preserves_owner_session_id
+      - reconnect_preserves_owner_alias_execution_contexts
+      - test_environment_runtime_reconnect_preserves_project_explorer_session_binding
+      - local_remote_parity_static_environment_reconnect_owner_guard
+      - rebuilt_remote_disconnect_reconnect_project_explorer_recovery
+      - full_workspace_nextest
+    focused_evidence: "Workspace red 4/4 failures and manager red 1/1 proved owner replacement and alias loss. Same-owner generation implementation passed focused Workspace 4/4, manager 1/1, associated 9/9, remote_server 93/93 and wide Environment regression 21/21; locked remote_server+warp cargo check passed. In the rebuilt app, killing the real remote-fixture-secondary proxy at 13:38 on 2026-07-20 reconnected exactly once while preserving owner SessionId(18446744073709551615), host 56987a43-fceb-418e-a747-e8ec51a5416e and terminal alias 178452587811731. Root resolution and the 43-session Navigator recovered, and Files Palette subsequently opened HANDOFF.md and README.md through that same host."
+    result: passed_contract_static_focused_cargo_check_rebuilt_remote_runtime_and_full_workspace_6326_of_6326
+
+  - id: ENV-RUNTIME-HEARTBEAT-LIVENESS
+    source: LR-151
+    requirement: "heartbeat 必须区分 transport disconnect 与 target command/cwd execution failure；只有前者可让同一 owner 进入 reconnect。"
+    gates:
+      - test_environment_runtime_heartbeat_execution_failure_does_not_reconnect
+      - test_environment_runtime_heartbeat_transport_failure_reconnects_same_owner
+      - local_remote_parity_static_environment_heartbeat_liveness_guard
+      - rebuilt_remote_deleted_cwd_preserves_owner_alias_and_project_explorer
+      - full_workspace_nextest
+    focused_evidence: "Typed heartbeat classification passed focused Workspace 4/4, associated regression 9/9 and wide Environment regression 21/21; remote_server 93/93 and locked remote_server+warp cargo check passed. The rebuilt app cold-restored remote-fixture-secondary with an isolated canonical bootstrap cwd; deleting it produced two real No such file or directory heartbeat ExecutionFailure results at 13:24 and 13:25 on 2026-07-20 while owner SessionId(18446744073709551615), client/host, aliases and Navigator projection remained intact and no reconnect was emitted. The live terminal was restored to /root/manga-review-platform after the probe."
+    result: passed_contract_static_focused_cargo_check_rebuilt_remote_runtime_and_full_workspace_6326_of_6326
+
+  - id: ENV-RUNTIME-RECONNECT-REENTRY
+    source: LR-152
+    requirement: "一次 Runtime reconnect intent 只能产生一个 transport generation；disconnect cause 必须 typed，自动 missing-client 调用方等待 active generation，禁止回流或二次 restart。"
+    gates:
+      - test_environment_runtime_explicit_transport_restart_does_not_reenter_reconnect
+      - test_environment_runtime_automatic_reconnect_waits_for_active_generation
+      - restart_transport_disconnect_event_has_typed_cause
+      - local_remote_parity_static_environment_reconnect_reentry_guard
+      - rebuilt_remote_single_generation_reconnect_without_navigator_error_frame
+      - full_workspace_nextest
+    focused_evidence: "Static and red tests proved explicit restart emitted untyped SessionDisconnected and automatic missing-client callers lacked an inactive-only boundary. The first combined run exposed real recursive Left Panel reconnect stack overflow plus nine stale replacement-owner tests. Typed disconnect cause, canonical Connecting-before-projection and inactive-only request ownership now pass manager 93/93, Workspace 11/11 and wide Environment 21/21; locked remote_server+warp cargo check passed. The rebuilt real remote-fixture-secondary proxy disconnect at 13:38 on 2026-07-20 emitted one retained reconnect intent, one Starting connection and one Connected generation; automatic browser consumers explicitly waited for the in-progress generation, no recursive restart or stack overflow occurred, and Navigator committed only the recovered 43-session collection."
+    result: passed_contract_static_focused_cargo_check_rebuilt_remote_runtime_and_full_workspace_6326_of_6326
+
+  - id: CODEX-REAL-CONSUMER-TEST-GUARD
+    source: LR-153
+    requirement: "LR-120 的真实 Codex bootstrap 证据必须对应仓库内可执行 ignored Rust test；static checker 必须验证函数与真实 codex exec resume consumer 调用存在，0 tests 不得算通过。"
+    gates:
+      - codex_native_fork_real_cli_resume_bootstrap
+      - local_remote_parity_static_codex_real_consumer_test_guard
+      - full_workspace_nextest
+    focused_evidence: "2026-07-20 审计发现 required_tests 与 matrix 声明了 codex_native_fork_real_cli_resume_bootstrap，但 app/src/session_bridge/tests.rs 不存在该函数；带过滤器的 nextest 仅完成编译并以 0 tests/exit 0 返回。新增 ignored test 后，真实安装的 Codex 0.144.6 在隔离 CODEX_HOME 中执行 codex exec resume，读取 writer 生成的 rollout，并向本地 mock Responses provider 发出同时包含恢复历史 marker 与新 prompt marker 的请求。real consumer 1/1、SessionBridge unit 40/40、locked warp local_fs cargo check 均通过；static checker 锁定函数和 consumer body markers。"
+    result: passed_real_codex_consumer_static_focused_and_cargo_check_2026_07_20
+
+  - id: RELEASE-PRIVACY-TARGET-IDENTITY
+    source: LR-155
+    requirement: "公开 source、Release notes 与解包资产禁止出现开发者真实 SSH target，测试证据只能使用 remote-fixture-*。"
+    gates:
+      - release_privacy_contract
+      - local_remote_parity_static_release_privacy_guard
+      - release_source_and_versioned_notes_scan
+      - downloaded_release_archive_scan
+    focused_evidence: "2026-07-21 current public Release was converted to Draft and its body was overwritten with sanitized versioned notes. All tracked real target aliases were replaced by remote-fixture identities. The local-only private token, bare/full ssh-config and root-target negative probes pass; downloaded legacy assets and rebuilt DMG passed unpacked/mounted payload scanning, and the old public tag was removed."
+    result: passed_draft_body_sanitized_remote_ref_cutoff_source_and_all_legacy_plus_rebuilt_assets_zero_private_target_hits
+
+  - id: RELEASE-MACOS-DIRECT-DMG
+    source: LR-156
+    requirement: "macOS 用户安装入口必须直接发布 Ashide-macos.dmg；禁止 zip 包裹 DMG 或裸 App fallback。"
+    gates:
+      - macos_release_publishes_direct_verified_dmg_instead_of_zip
+      - local_remote_parity_static_macos_direct_dmg_guard
+      - real_release_dmg_verify_checksum_and_mount_scan
+    focused_evidence: "2026-07-21 static macOS release contract passed 2/2 after make_release_artifacts switched app output to direct DMG, required hdiutil verify, deleted bare App fallback, and workflow replaced zip/upload/checksum references with Ashide-macos.dmg. Rebuilt 134 MiB DMG passed App seal/identity, hdiutil verify, checksum, mount privacy scan and zero stale macOS zip checks."
+    result: passed_direct_134MiB_dmg_seal_identity_image_checksum_mount_privacy_and_zero_zip
+
+  - id: TEST-HARNESS-SSH-FIXTURE-HERMETICITY
+    source: LR-157
+    requirement: "Workspace Environment lifecycle/reconnect 测试必须只使用隔离 SQLite saved-provider fixture，禁止依赖开发者 ~/.ssh/config。"
+    gates:
+      - test_workspace_environment_fixture_uses_saved_provider_without_user_ssh_config
+      - local_remote_parity_static_hermetic_saved_ssh_fixture_guard
+      - affected_workspace_environment_lifecycle_and_reconnect_tests_22_of_22
+      - test_environment_runtime_disconnected_request_after_bootstrap_reconnects_retained_authority
+      - full_workspace_nextest
+    focused_evidence: "2026-07-21 full workspace nextest exposed 22 shared Environment lifecycle/reconnect failures after anonymization; every failure resolved ssh-config:remote-fixture-primary through developer SSH config instead of the isolated test SQLite. One idempotent saved-provider fixture and shared helper correction passed descriptor 1/1, the original 22/22, retained-disconnect semantics 2/2, locked cargo check and full workspace 6327/6327."
+    result: passed_hermetic_saved_provider_static_focused_cargo_check_and_full_workspace_zero_failure
+
+  - id: RELEASE-PRIVACY-BINARY-TEXT-BOUNDARY
+    source: LR-158
+    requirement: "private token 扫描覆盖所有 bytes；通用 SSH fixture 语法只解释源码和解包后的结构化文本，禁止机器码字符串相邻假阳性。"
+    gates:
+      - release_privacy_binary_adjacency_probe
+      - release_privacy_bare_and_root_target_negative_probes
+      - release_privacy_archived_text_fixture_probe
+      - real_release_artifacts_privacy_scan
+    focused_evidence: "2026-07-21 rebuilt release scan exposed a compiled-binary adjacency false positive. MIME-owned text scanning removed the false syntax path while byte-level private denylist remained unchanged; contract probes and the rebuilt DMG plus all helper archives pass."
+    result: passed_binary_text_ownership_contract_and_real_artifacts_scan
+
+  - id: RELEASE-ARTIFACT-FORMAT-MIGRATION-CHECKSUM
+    source: LR-159
+    requirement: "macOS ZIP→DMG 迁移必须由 producer 删除旧文件/sidecar/SHA256SUMS 行，checksum manifest 禁止引用不存在产物。"
+    gates:
+      - macos_release_format_migration_removes_stale_zip_and_checksum
+      - local_remote_parity_static_format_migration_checksum_guard
+      - real_release_sha256sums_zero_missing_files
+    focused_evidence: "2026-07-21 final checksum validation exposed a stale Ashide-macos.zip manifest row after the physical ZIP had been removed. make_release_artifacts now owns current/obsolete extensions, removes obsolete file/sidecar and both basename rows before appending the DMG checksum; contract 3/3 and real five-artifact shasum verification pass."
+    result: passed_producer_owned_format_migration_and_zero_dead_checksum_references
+
+  - id: RELEASE-NOTES-VERSIONED-SOURCE-OF-TRUTH
+    source: LR-160
+    requirement: "GitHub Release body 必须由当前 tag 的 docs/releases/<tag>.md 覆盖；资产聚合期间保持 Draft，全部 producer/checksum/upload 成功后由同一 job 自动公开，禁止 inline placeholder、旧人工 body 或永久 Draft 成为发布真相。"
+    gates:
+      - release_privacy_workflow_versioned_notes_markers
+      - local_remote_parity_static_versioned_release_notes_guard
+      - final_remote_release_body_privacy_scan
+    focused_evidence: "2026-07-23 v0.4.1 tag workflow built and uploaded every required asset successfully but remained untagged Draft because upload-release had no public transition. The canonical job now edits/creates exclusively from versioned notes, retains Draft during aggregation, verifies the complete checksum manifest, uploads assets, then performs the only --draft=false --latest transition."
+    result: passed_versioned_notes_post_asset_automatic_publish_contract
+
+  - id: RELEASE-MACOS-DMG-OPTIONAL-SIGNING
+    source: LR-161
+    requirement: "macOS Release 必须直接产出 Ashide-macos.dmg；零 secrets 允许 ad-hoc seal，六项完整 credentials 自动启用 Developer ID/notarization/Gatekeeper，部分配置失败，上传意图不得成为签名要求。"
+    gates:
+      - macos_release_shell_scripts_parse_with_declared_shell
+      - macos_release_keeps_direct_dmg_available_with_optional_complete_signing_configuration
+      - macos_signed_release_requires_developer_id_notarization_and_gatekeeper_postconditions
+      - macos_public_distribution_shell_contract
+      - release_workflow_publishes_versioned_remote_helper_assets
+      - local_remote_parity_static_direct_dmg_optional_signing_guard
+      - remote_direct_dmg_artifact_verification
+    focused_evidence: "2026-07-21 requirement correction separated direct DMG packaging from optional signing identity. Shared resolver accepts exactly zero secrets as adhoc, six as signed and rejects partial configuration. Remote run 29851524177 uploaded the direct DMG independently; downloaded SHA-256 5d3fc631… passed strict seal, hdiutil, arm64/v0.4.0 identity and privacy verification."
+    result: passed_direct_remote_dmg_and_optional_signing_contract
+
+  - id: RELEASE-MACOS-INDEPENDENT-ARTIFACT-JOBS
+    source: LR-162
+    requirement: "macOS App/DMG 与 remote helpers 必须由独立并行 producer jobs 构建并分别上传；helpers 还必须按 x86_64/aarch64 matrix 并行，任一 helper 超时不得阻止已完成 DMG 成为可下载 workflow artifact，最终 Release 仍须等待全部 producer。"
+    gates:
+      - macos_release_builds_app_and_helpers_in_independent_jobs
+      - release_workflow_publishes_versioned_remote_helper_assets
+      - release_helper_arch_selector_rejects_unknown_arch
+      - local_remote_parity_static_independent_macos_artifact_job_guard
+      - remote_parallel_macos_jobs_and_separate_artifact_verification
+    focused_evidence: "2026-07-21 remote run 29831109841 proved the old combined job lost a completed DMG after helper timeout. Replacement run 29851524177 started App/DMG, x86_64 helper and aarch64 helper within 2 seconds, completed them independently and uploaded three separate artifacts. Downloaded DMG and both Mach-O helpers passed identity/archive/privacy verification and report v0.4.0."
+    result: passed_independent_parallel_macos_producers_and_remote_artifacts
+
+  - id: WINDOWS-SSH-CONFIG-SHARED-CATALOG
+    source: LR-164
+    requirement: "SSH config 路径解析与文件 IO 必须位于底层唯一 owner；Workspace picker、SSH Manager、candidate action 和 reconnect 共用 committed catalog，UI 不得拼路径、读取 home、做平台分支或 render-time IO。"
+    gates:
+      - windows_home_path_is_preserved_as_config_open_target
+      - unavailable_config_source_never_fabricates_open_target
+      - ssh_config_catalog_refresh_replaces_path_outcome_and_candidates_atomically
+      - ssh_config_runtime_lookup_uses_only_committed_catalog_generation
+      - config_candidate_server_uses_catalog_resolved_source_path
+      - config_candidate_server_without_source_path_has_no_origin_note
+      - workspace_provider_render_never_loads_or_resolves_ssh_config
+      - ssh_config_production_load_owner_inventory_is_closed
+      - cargo_check_locked_warp_ssh_manager_and_warp
+      - cargo_xwin_check_windows_release_features
+      - real_windows_config_open_and_alias_connection
+    focused_evidence: "2026-07-22 static parity inventory proves the only production load_candidates call is SshConfigCatalog::load_snapshot and forbids UI path/home/IO/platform ownership. Focused catalog, candidate, runtime lookup and Windows path tests pass 15/15; locked macOS cargo check and x86_64-pc-windows-msvc release-feature cargo-xwin check pass."
+    result: wontfix_current_macos_linux_only_release_scope_windows_runtime_is_not_a_release_gate

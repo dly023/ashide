@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TARGET="$ROOT/target"
+EXECUTE=0
+REMOTE_HELPER=0
+AGGRESSIVE=0
+
+usage() {
+  cat <<'EOF'
+Usage: script/dev-clean-cache [--execute] [--remote-helper] [--aggressive]
+
+Safe by default: prints what would be removed.
+
+Modes:
+  default / safe:
+    - target/debug/incremental
+    - target/aarch64-apple-darwin/debug/incremental
+    - obvious temporary upload/build leftovers under target
+
+  --remote-helper:
+    Also remove remote-helper build caches that are expensive but rebuildable:
+    - target/x86_64-unknown-linux-musl
+    - target/dev-remote
+
+  --aggressive:
+    Also remove selected app crate fingerprints/deps to recover more space.
+    This is safe for source, but next build will recompile more.
+
+  --execute:
+    Actually delete. Without this flag the command is dry-run.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --execute) EXECUTE=1 ;;
+    --remote-helper) REMOTE_HELPER=1 ;;
+    --aggressive) AGGRESSIVE=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown arg: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if [[ ! -d "$TARGET" ]]; then
+  echo "target directory not found: $TARGET"
+  exit 0
+fi
+
+size_of() {
+  local path="$1"
+  [[ -e "$path" ]] && du -sh "$path" 2>/dev/null | awk '{print $1}' || echo "0B"
+}
+
+remove_path() {
+  local path="$1"
+  [[ -e "$path" ]] || return 0
+  echo "remove $(size_of "$path") $path"
+  if [[ "$EXECUTE" -eq 1 ]]; then
+    rm -rf "$path"
+  fi
+}
+
+remove_glob() {
+  local pattern="$1"
+  local matched=0
+  shopt -s nullglob
+  for path in $pattern; do
+    matched=1
+    remove_path "$path"
+  done
+  shopt -u nullglob
+  [[ "$matched" -eq 1 ]] || true
+}
+
+echo "Ashide dev cache cleanup"
+echo "root: $ROOT"
+echo "mode: $([[ "$EXECUTE" -eq 1 ]] && echo execute || echo dry-run)"
+echo "before: $(size_of "$TARGET") target"
+
+# Fast, low-risk cache. Cargo will recreate it automatically.
+remove_path "$TARGET/debug/incremental"
+remove_path "$TARGET/aarch64-apple-darwin/debug/incremental"
+
+# Temporary leftovers from interrupted bundle/helper operations.
+remove_glob "$TARGET"'/**/*.tmp'
+remove_glob "$TARGET"'/**/*.upload-*'
+
+if [[ "$REMOTE_HELPER" -eq 1 ]]; then
+  remove_path "$TARGET/x86_64-unknown-linux-musl"
+  remove_path "$TARGET/dev-remote"
+fi
+
+if [[ "$AGGRESSIVE" -eq 1 ]]; then
+  remove_glob "$TARGET/debug/.fingerprint/warp-*"
+  remove_glob "$TARGET/debug/.fingerprint/ashide-*"
+  remove_glob "$TARGET/debug/deps/warp-*"
+  remove_glob "$TARGET/debug/deps/libwarp-*"
+  remove_glob "$TARGET/debug/deps/ashide-*"
+fi
+
+echo "after:  $(size_of "$TARGET") target"
+if [[ "$EXECUTE" -ne 1 ]]; then
+  echo "dry-run only; add --execute to delete"
+fi

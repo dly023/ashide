@@ -1,0 +1,162 @@
+#!/bin/bash
+#
+# 使用系统 diskutil image API 构建 Ashide DMG，并从最终只读镜像重新读取
+# Finder 布局做复验。这里是 DMG 结构、布局和 readiness 的唯一生产入口。
+
+set -euo pipefail
+
+if [[ $# -ne 3 ]]; then
+  echo "usage: $0 <Ashide.app> <output.dmg> <background.png>" >&2
+  exit 64
+fi
+
+APP_BUNDLE="$1"
+OUTPUT_DMG="$2"
+BACKGROUND_IMAGE="$3"
+VOLUME_NAME="Ashide"
+APP_NAME="$(basename "$APP_BUNDLE")"
+BACKGROUND_NAME="$(basename "$BACKGROUND_IMAGE")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LAYOUT_SCRIPT="$SCRIPT_DIR/configure_ashide_dmg.applescript"
+
+if [[ ! -d "$APP_BUNDLE" || "$APP_NAME" != *.app ]]; then
+  echo "error: expected an existing .app bundle, got: $APP_BUNDLE" >&2
+  exit 65
+fi
+if [[ ! -f "$BACKGROUND_IMAGE" ]]; then
+  echo "error: DMG background does not exist: $BACKGROUND_IMAGE" >&2
+  exit 66
+fi
+if [[ ! -f "$LAYOUT_SCRIPT" ]]; then
+  echo "error: DMG layout script does not exist: $LAYOUT_SCRIPT" >&2
+  exit 67
+fi
+
+OUTPUT_DIR="$(dirname "$OUTPUT_DMG")"
+mkdir -p "$OUTPUT_DIR"
+OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd -P)"
+OUTPUT_DMG="$OUTPUT_DIR/$(basename "$OUTPUT_DMG")"
+
+if [[ -e "$OUTPUT_DMG" ]]; then
+  echo "error: refusing to overwrite existing DMG: $OUTPUT_DMG" >&2
+  exit 68
+fi
+
+TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ashide-dmg.XXXXXX")"
+RW_IMAGE="$TMP_ROOT/Ashide.raw.dmg"
+ATTACH_PLIST="$TMP_ROOT/attach.plist"
+MOUNT_DIR=""
+
+is_mounted() {
+  [[ -n "$MOUNT_DIR" ]] && /sbin/mount | /usr/bin/awk -v target="$MOUNT_DIR" '$3 == target { found = 1 } END { exit !found }'
+}
+
+cleanup() {
+  local exit_code=$?
+  if [[ $exit_code -ne 0 && -n "$MOUNT_DIR" && -d "$MOUNT_DIR" ]]; then
+    echo "DMG failure diagnostics for $MOUNT_DIR:" >&2
+    ls -la "$MOUNT_DIR" >&2 || true
+    if [[ -f "$MOUNT_DIR/.DS_Store" ]]; then
+      stat -f "size=%z mtime=%m path=%N" "$MOUNT_DIR/.DS_Store" >&2 || true
+      shasum -a 256 "$MOUNT_DIR/.DS_Store" >&2 || true
+    fi
+  fi
+  if [[ $exit_code -ne 0 ]]; then
+    # OUTPUT_DMG is not a release artifact until the final read-only Finder
+    # verification succeeds. Never leave a compressed but unverified image
+    # where a later packaging step or human can mistake it for a valid build.
+    rm -f "$OUTPUT_DMG"
+  fi
+  if is_mounted; then
+    if ! /usr/sbin/diskutil eject "$MOUNT_DIR" >&2; then
+      echo "error: failed to eject temporary Ashide DMG mount: $MOUNT_DIR" >&2
+      if [[ $exit_code -eq 0 ]]; then
+        exit_code=69
+      fi
+    fi
+  fi
+  rm -rf "$TMP_ROOT"
+  exit "$exit_code"
+}
+trap cleanup EXIT
+
+attach_image() {
+  local image_path="$1"
+  local access_mode="$2"
+  local args=(image attach --plist)
+  if [[ "$access_mode" == "read_only" ]]; then
+    args+=(--readOnly)
+  fi
+  args+=("$image_path")
+
+  /usr/sbin/diskutil "${args[@]}" > "$ATTACH_PLIST"
+  MOUNT_DIR=""
+  for entity_index in {0..8}; do
+    local candidate
+    candidate="$(/usr/bin/plutil -extract "system-entities.$entity_index.mount-point" raw -o - "$ATTACH_PLIST" 2>/dev/null || true)"
+    if [[ -n "$candidate" ]]; then
+      MOUNT_DIR="$(/bin/realpath "$candidate")"
+      break
+    fi
+  done
+  if [[ -z "$MOUNT_DIR" || ! -d "$MOUNT_DIR" ]] || ! is_mounted; then
+    echo "error: diskutil did not return a mounted APFS volume for $image_path" >&2
+    exit 71
+  fi
+}
+
+# 不接管或强制卸载其他进程挂载的同名卷；同名卷会让 Finder 的 disk identity
+# 产生歧义，因此发布构建必须显式失败。
+if /usr/bin/osascript -e "tell application \"Finder\" to exists disk \"$VOLUME_NAME\"" | /usr/bin/grep -qx true; then
+  echo "error: Finder already has a mounted '$VOLUME_NAME' volume; eject it before packaging" >&2
+  exit 70
+fi
+
+SOURCE_KB="$(/usr/bin/du -sk "$APP_BUNDLE" "$BACKGROUND_IMAGE" | /usr/bin/awk '{ total += $1 } END { print total }')"
+IMAGE_SIZE_MB="$(( (SOURCE_KB + 131072 + 1023) / 1024 ))"
+
+echo "Creating writable APFS image (${IMAGE_SIZE_MB} MiB)..."
+/usr/sbin/diskutil image create blank \
+  --format RAW \
+  --size "${IMAGE_SIZE_MB}m" \
+  --volumeName "$VOLUME_NAME" \
+  --fs APFS \
+  "$RW_IMAGE" >/dev/null
+
+attach_image "$RW_IMAGE" read_write
+/usr/bin/ditto "$APP_BUNDLE" "$MOUNT_DIR/$APP_NAME"
+mkdir -p "$MOUNT_DIR/.background"
+/usr/bin/ditto "$BACKGROUND_IMAGE" "$MOUNT_DIR/.background/$BACKGROUND_NAME"
+ln -s /Applications "$MOUNT_DIR/Applications"
+
+/usr/bin/osascript "$LAYOUT_SCRIPT" \
+  configure "$VOLUME_NAME" "$MOUNT_DIR" "$APP_NAME" "$BACKGROUND_NAME"
+
+chmod -Rf go-w "$MOUNT_DIR"
+rm -rf "$MOUNT_DIR/.fseventsd"
+/usr/sbin/diskutil eject "$MOUNT_DIR" >/dev/null
+MOUNT_DIR=""
+
+# 只在卷已安全卸载后收缩并压缩；不使用 macOS 26 已废弃的 hdiutil API。
+/usr/sbin/diskutil image resize --size min "$RW_IMAGE" >/dev/null
+/usr/sbin/diskutil image create from --format UDZO "$RW_IMAGE" "$OUTPUT_DMG" >/dev/null
+
+# 从最终只读产物重新读取 Finder 属性，证明 .DS_Store 中保存的是最终布局，
+# 而不是只验证构建阶段内存中的窗口状态。
+attach_image "$OUTPUT_DMG" read_only
+[[ -s "$MOUNT_DIR/.DS_Store" ]]
+/usr/bin/strings -a "$MOUNT_DIR/.DS_Store" | /usr/bin/grep -Fqx ".icvpblob"
+/usr/bin/strings -a "$MOUNT_DIR/.DS_Store" | /usr/bin/grep -Fq "backgroundType"
+[[ -f "$MOUNT_DIR/.background/$BACKGROUND_NAME" ]]
+[[ -d "$MOUNT_DIR/$APP_NAME" ]]
+[[ -L "$MOUNT_DIR/Applications" ]]
+[[ "$(readlink "$MOUNT_DIR/Applications")" == "/Applications" ]]
+
+/usr/bin/osascript "$LAYOUT_SCRIPT" \
+  verify "$VOLUME_NAME" "$MOUNT_DIR" "$APP_NAME" "$BACKGROUND_NAME"
+/usr/sbin/diskutil eject "$MOUNT_DIR" >/dev/null
+MOUNT_DIR=""
+
+trap - EXIT
+rm -rf "$TMP_ROOT"
+echo "Created and verified $OUTPUT_DMG"

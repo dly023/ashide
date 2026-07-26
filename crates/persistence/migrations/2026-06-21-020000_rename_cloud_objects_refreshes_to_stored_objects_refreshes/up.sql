@@ -1,0 +1,1 @@
+ALTER TABLE cloud_objects_refreshes RENAME TO stored_objects_refreshes;

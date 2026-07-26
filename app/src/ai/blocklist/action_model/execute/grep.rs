@@ -1,0 +1,563 @@
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use warp_util::standardized_path::StandardizedPath;
+
+use futures::future::BoxFuture;
+use futures::FutureExt;
+use warpui::r#async::FutureExt as AsyncFutureExt;
+use warpui::{AppContext, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity};
+
+use crate::ai::agent::{AIAgentAction, AIAgentActionType, GrepResult};
+use crate::ai::blocklist::BlocklistAIPermissions;
+use crate::ai::paths::{host_native_absolute_path, shell_native_absolute_path};
+use crate::terminal::model::session::ExecuteCommandOptions;
+use crate::{
+    ai::agent::{AIAgentActionResultType, GrepFileMatch, GrepLineMatch},
+    terminal::{
+        model::session::active_session::ActiveSession, model::session::Session, shell::ShellType,
+        ShellLaunchData,
+    },
+};
+
+use super::{
+    is_file_path, is_git_repository, ActionExecution, AnyActionExecution, ExecuteActionInput,
+    PreprocessActionInput,
+};
+
+const GREP_TIMEOUT: Duration = Duration::from_secs(10);
+const NON_ZERO_EXIT_CODE_ERROR: &str = "Grep command exited with non-zero exit code";
+
+fn escape_double_quotes(s: &str) -> String {
+    s.replace('"', "\\\"")
+}
+
+fn powershell_escape_double_quotes(s: &str) -> String {
+    s.replace('"', "`\"")
+}
+
+struct GrepError {
+    output: Option<String>,
+    error: GrepErrorType,
+}
+
+enum GrepErrorType {
+    NonZeroExitCode,
+    Other(String),
+}
+
+impl GrepError {
+    /// Create a new GrepError with the given error message. This should NOT
+    /// contain UGC.
+    pub fn new(error_message: String) -> Self {
+        Self {
+            output: None,
+            error: GrepErrorType::Other(error_message),
+        }
+    }
+
+    pub fn new_for_non_zero_exit_code() -> Self {
+        Self {
+            output: None,
+            error: GrepErrorType::NonZeroExitCode,
+        }
+    }
+
+    pub fn with_output(mut self, output: String) -> Self {
+        self.output = Some(output);
+        self
+    }
+
+    /// Returns an error message for logging. This should not contain UGC.
+    pub fn error_message(&self) -> &str {
+        match &self.error {
+            GrepErrorType::NonZeroExitCode => NON_ZERO_EXIT_CODE_ERROR,
+            GrepErrorType::Other(error) => error,
+        }
+    }
+
+    /// Returns an error message to be returned as input to the AI conversation.
+    /// This may contain UGC.
+    pub fn error_for_conversation(&self) -> String {
+        match &self {
+            GrepError {
+                error: GrepErrorType::NonZeroExitCode,
+                output: Some(output),
+                ..
+            } => format!("{NON_ZERO_EXIT_CODE_ERROR}, output:\n{output}"),
+            GrepError {
+                error: GrepErrorType::NonZeroExitCode,
+                output: None,
+                ..
+            } => NON_ZERO_EXIT_CODE_ERROR.to_string(),
+            GrepError {
+                error: GrepErrorType::Other(error),
+                ..
+            } => error.clone(),
+        }
+    }
+}
+
+pub struct GrepExecutor {
+    active_session: ModelHandle<ActiveSession>,
+    terminal_view_id: EntityId,
+}
+
+impl GrepExecutor {
+    pub fn new(active_session: ModelHandle<ActiveSession>, terminal_view_id: EntityId) -> Self {
+        Self {
+            active_session,
+            terminal_view_id,
+        }
+    }
+
+    pub(super) fn should_autoexecute(
+        &self,
+        input: ExecuteActionInput,
+        ctx: &mut ModelContext<Self>,
+    ) -> bool {
+        let ExecuteActionInput {
+            action:
+                AIAgentAction {
+                    action: AIAgentActionType::Grep { path, .. },
+                    ..
+                },
+            conversation_id,
+        } = input
+        else {
+            return false;
+        };
+
+        let active_session = self.active_session.as_ref(ctx);
+        if active_session
+            .session_type(ctx)
+            .as_ref()
+            .is_some_and(|session_type| session_type.uses_environment_runtime())
+        {
+            return BlocklistAIPermissions::handle(ctx)
+                .as_ref(ctx)
+                .can_read_environment_files_with_conversation(
+                    &conversation_id,
+                    Some(self.terminal_view_id),
+                    ctx,
+                )
+                .is_allowed();
+        }
+
+        let current_working_directory = active_session.current_working_directory().cloned();
+        let shell = self.active_session.as_ref(ctx).shell_launch_data(ctx);
+        let absolute_path = host_native_absolute_path(path, &shell, &current_working_directory);
+
+        BlocklistAIPermissions::handle(ctx)
+            .as_ref(ctx)
+            .can_read_files_with_conversation(
+                &conversation_id,
+                vec![PathBuf::from(absolute_path)],
+                Some(self.terminal_view_id),
+                ctx,
+            )
+            .is_allowed()
+    }
+
+    pub(super) fn execute(
+        &mut self,
+        input: ExecuteActionInput,
+        ctx: &mut ModelContext<Self>,
+    ) -> impl Into<AnyActionExecution> {
+        let AIAgentAction {
+            action: AIAgentActionType::Grep { queries, path },
+            ..
+        } = input.action
+        else {
+            return ActionExecution::InvalidAction;
+        };
+
+        let shell_launch_data = self.active_session.as_ref(ctx).shell_launch_data(ctx);
+        let current_working_directory = self
+            .active_session
+            .as_ref(ctx)
+            .current_working_directory()
+            .cloned();
+        let absolute_path = shell_native_absolute_path(
+            path,
+            shell_launch_data.as_ref(),
+            current_working_directory.as_ref(),
+        );
+
+        let session = self.active_session.as_ref(ctx).session(ctx);
+
+        let queries_clone = queries.clone();
+        ActionExecution::new_async(
+            async move {
+                match run_grep(queries_clone, absolute_path, session, shell_launch_data)
+                    .with_timeout(GREP_TIMEOUT)
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(GrepError::new("Grep operation timed out".to_string())),
+                }
+            },
+            move |result, _| match result {
+                Ok(grep_result) => {
+                    if let GrepResult::Error(ref e) = grep_result {
+                        log::warn!("Executing grep resulted in error: {e:?}");
+                    }
+                    AIAgentActionResultType::Grep(grep_result)
+                }
+                Err(e) => {
+                    log::warn!("Failed to execute grep: {:?}", e.error_message());
+                    let error_for_conversation = e.error_for_conversation();
+                    AIAgentActionResultType::Grep(GrepResult::Error(error_for_conversation))
+                }
+            },
+        )
+    }
+
+    pub(super) fn preprocess_action(
+        &mut self,
+        _action: PreprocessActionInput,
+        _ctx: &mut ModelContext<Self>,
+    ) -> BoxFuture<'static, ()> {
+        futures::future::ready(()).boxed()
+    }
+
+    pub(super) fn can_execute_in_parallel(&self, ctx: &AppContext) -> bool {
+        self.active_session
+            .as_ref(ctx)
+            .session(ctx)
+            .is_some_and(|session| session.supports_parallel_command_execution())
+    }
+}
+
+/// Runs a grep-like search to find the files and line numbers that match the queries.
+///
+/// Depending on the environment, this uses the most optimized tool to perform the search:
+/// - if the search is in a git repo, we run `git grep` in the session.
+///   `git grep` is the most optimized tool for searching in a git repo since it's already indexed.
+/// - otherwise, if the search is against the local file system, we run `ripgrep` via the library.
+///   `ripgrep` is a more optimized version of `grep`.
+/// - otherwise, we run vanilla `grep` in the session
+async fn run_grep(
+    queries: Vec<String>,
+    absolute_path: String,
+    session: Option<Arc<Session>>,
+    shell_launch_data: Option<ShellLaunchData>,
+) -> Result<GrepResult, GrepError> {
+    if queries.is_empty() {
+        return Err(GrepError::new("No queries provided to grep".to_string()));
+    }
+    let Some(session) = session else {
+        return Err(GrepError::new("No session provided to grep".to_string()));
+    };
+
+    let is_file = is_file_path(&absolute_path, &session).await;
+    let execute_directory = if is_file {
+        // If path is a file, use its parent directory as the execution directory.
+        // Use StandardizedPath instead of std::path::Path to avoid encoding a
+        // remote path with the local platform's path separators.
+        let Ok(standardized) = StandardizedPath::try_new(&absolute_path) else {
+            return Err(GrepError::new(
+                "Could not determine parent directory of file when running grep".to_string(),
+            ));
+        };
+        let Some(parent) = standardized.parent() else {
+            return Err(GrepError::new(
+                "Could not determine parent directory of file when running grep".to_string(),
+            ));
+        };
+        Cow::Owned(parent.as_str().to_owned())
+    } else {
+        Cow::Borrowed(absolute_path.as_str())
+    };
+
+    // TODO(CODE-239): Cache the result of this check.
+    let is_grep_in_git_repo = is_git_repository(&execute_directory, &session)
+        .await
+        .unwrap_or_else(|e| {
+            log::error!("Failed to run command to check if in git repository: {e:?}");
+            false
+        });
+    let shell_type = session.shell().shell_type();
+
+    // The most optimized tool to perform the search is `git grep`;
+    // whether the session is local or remote, we can run `git grep` in the session.
+    // The next best way to search is ripgrep, but we can only run that if the session is local;
+    // ripgrep is run using the core lib, not as a command (not everyone will have it installed).
+    // And in the worst case, we run vanilla `grep` in the session. Although not optimal, this should always work.
+    if is_grep_in_git_repo {
+        run_git_grep_command(
+            &queries,
+            &absolute_path,
+            &session,
+            shell_launch_data,
+            shell_type,
+            &execute_directory,
+        )
+        .await
+    } else {
+        #[cfg(not(target_family = "wasm"))]
+        if session.uses_current_app_environment() {
+            return run_ripgrep(&queries, absolute_path).await;
+        }
+        if shell_type == ShellType::PowerShell {
+            run_select_string_command(
+                &queries,
+                &absolute_path,
+                &session,
+                shell_launch_data,
+                &execute_directory,
+            )
+            .await
+        } else {
+            run_grep_command(
+                &queries,
+                &absolute_path,
+                &session,
+                shell_launch_data,
+                &execute_directory,
+            )
+            .await
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+async fn run_ripgrep(queries: &[String], absolute_path: String) -> Result<GrepResult, GrepError> {
+    let path = PathBuf::from(absolute_path);
+    let result = warp_ripgrep::search::search(queries, &[path], false, false).await;
+
+    match result {
+        Ok(matches) => {
+            let mut files_map: HashMap<PathBuf, Vec<GrepLineMatch>> = HashMap::new();
+            for m in matches {
+                files_map
+                    .entry(m.file_path)
+                    .or_default()
+                    .push(GrepLineMatch {
+                        line_number: m.line_number as usize,
+                    });
+            }
+            let matched_files: Vec<GrepFileMatch> = files_map
+                .into_iter()
+                .map(|(file_path, matched_lines)| GrepFileMatch {
+                    file_path: file_path.to_string_lossy().to_string(),
+                    matched_lines,
+                })
+                .collect();
+            Ok(GrepResult::Success { matched_files })
+        }
+        Err(e) => Err(GrepError::new(format!("Ripgrep search failed: {e}"))),
+    }
+}
+
+/// Assumes that git is installed in the user's session.
+async fn run_git_grep_command(
+    queries: &[String],
+    target_path: &str,
+    session: &Session,
+    shell_launch_data: Option<ShellLaunchData>,
+    shell_type: ShellType,
+    execute_directory: &str,
+) -> Result<GrepResult, GrepError> {
+    // This command works on all the shells we support (even PowerShell).
+    let mut grep_command = "git --no-pager grep --color=never --untracked -nIE".to_string();
+    for query in queries {
+        let escaped_query = format!(
+            "\"{}\"",
+            if shell_type == ShellType::PowerShell {
+                powershell_escape_double_quotes(query)
+            } else {
+                escape_double_quotes(query)
+            }
+        );
+        grep_command.push_str(format!(" -e {escaped_query}").as_str());
+    }
+    grep_command.push_str(format!(" \"{target_path}\"").as_str());
+
+    let command_output = session
+        .execute_command(
+            grep_command.as_str(),
+            Some(execute_directory),
+            None,
+            ExecuteCommandOptions::default(),
+        )
+        .await
+        .map_err(|e| GrepError::new(e.to_string()))?;
+    let output = String::from_utf8_lossy(command_output.output());
+
+    if command_output.success() {
+        parse_grep_output(
+            output.as_ref(),
+            shell_launch_data,
+            Some(execute_directory.to_string()),
+        )
+        .map(|matched_files| GrepResult::Success { matched_files })
+        .map_err(|e| GrepError::new(e.to_string()).with_output(output.into()))
+    } else if command_output
+        .exit_code()
+        .is_some_and(|exit_code| exit_code.value() == 1)
+    {
+        // If the exit code is 1, then grep completed successfully but found no
+        // matches.
+        Ok(GrepResult::Success {
+            matched_files: vec![],
+        })
+    } else {
+        Err(GrepError::new_for_non_zero_exit_code().with_output(output.into()))
+    }
+}
+
+async fn run_grep_command(
+    queries: &[String],
+    target_path: &str,
+    session: &Session,
+    shell_launch_data: Option<ShellLaunchData>,
+    execute_directory: &str,
+) -> Result<GrepResult, GrepError> {
+    // Summary of the options we use:
+    // * "--color=never" ensures we don't get colorized output which is harder to parse due to escape sequences
+    // * "-n" includes line numbers
+    // * "-r" performs a recursive search
+    // * "-I" ignores binary files
+    // * "-H" prints file name headers
+    // * "-E" uses extended regex expressions
+    let mut grep_command = "grep --color=never -nrIHE --devices=skip".to_string();
+    for query in queries {
+        grep_command.push_str(format!(" -e \"{}\"", escape_double_quotes(query)).as_str());
+    }
+    grep_command.push_str(format!(" \"{target_path}\"").as_str());
+
+    let command_output = session
+        .execute_command(
+            grep_command.as_str(),
+            Some(execute_directory),
+            None,
+            ExecuteCommandOptions::default(),
+        )
+        .await
+        .map_err(|e| GrepError::new(e.to_string()))?;
+    let output = String::from_utf8_lossy(command_output.output());
+
+    if command_output.success() {
+        parse_grep_output(
+            output.as_ref(),
+            shell_launch_data,
+            Some(execute_directory.to_string()),
+        )
+        .map(|matched_files| GrepResult::Success { matched_files })
+        .map_err(|e| GrepError::new(e.to_string()).with_output(output.into()))
+    } else if command_output
+        .exit_code()
+        .is_some_and(|exit_code| exit_code.value() == 1)
+    {
+        // If the exit code is 1, then grep completed successfully but found no
+        // matches.
+        Ok(GrepResult::Success {
+            matched_files: vec![],
+        })
+    } else {
+        Err(GrepError::new_for_non_zero_exit_code().with_output(output.into()))
+    }
+}
+
+/// Runs a PowerShell `Select-String` command.
+async fn run_select_string_command(
+    queries: &[String],
+    target_path: &str,
+    session: &Session,
+    shell_launch_data: Option<ShellLaunchData>,
+    execute_directory: &str,
+) -> Result<GrepResult, GrepError> {
+    // We enable the `-CaseSensitive` flag to match the default behavior of grep.
+    // TODO(CODE-239): Make this command more efficient when searching a file.
+    let select_string_command = format!(
+        "Get-ChildItem -Path \"{}\" -Recurse -File | Select-String -NoEmphasis -CaseSensitive -Pattern {}",
+        target_path,
+        queries
+            .iter()
+            .map(|q| format!("\"{}\"", powershell_escape_double_quotes(q)))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+
+    let command_output = session
+        .execute_command(
+            select_string_command.as_str(),
+            Some(execute_directory),
+            None,
+            ExecuteCommandOptions::default(),
+        )
+        .await
+        .map_err(|e| GrepError::new(e.to_string()))?;
+    let output = String::from_utf8_lossy(command_output.output());
+
+    if command_output.success() {
+        parse_grep_output(
+            output.as_ref(),
+            shell_launch_data,
+            Some(execute_directory.to_string()),
+        )
+        .map(|matched_files| GrepResult::Success { matched_files })
+        .map_err(|e| GrepError::new(e.to_string()).with_output(output.into()))
+    } else {
+        Err(GrepError::new_for_non_zero_exit_code().with_output(output.into()))
+    }
+}
+
+/// Parses the output of grep or a grep-like command into the format that we pass
+/// back to the agent.
+///
+/// Assumes the output is in the format:
+/// `{relative_file_path}:{line_number}:{line_contents}`.
+fn parse_grep_output(
+    output: &str,
+    shell_launch_data: Option<ShellLaunchData>,
+    current_working_directory: Option<String>,
+) -> anyhow::Result<Vec<GrepFileMatch>> {
+    let mut matched_files = HashMap::new();
+
+    for line in output.trim().split("\n") {
+        let mut parts = line.split(":");
+        let file = parts.next();
+        let line_number = parts.next();
+
+        let (Some(file), Some(line_number)) = (file, line_number) else {
+            return Err(anyhow::anyhow!(
+                "Failed to parse Grep output, unexpected format"
+            ));
+        };
+        let line_number = match line_number.parse::<usize>() {
+            Ok(line_number) => line_number,
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to parse line number in Grep output: {:?}",
+                    e
+                ));
+            }
+        };
+
+        matched_files
+            .entry(file)
+            .or_insert_with(Vec::new)
+            .push(GrepLineMatch { line_number });
+    }
+
+    Ok(matched_files
+        .into_iter()
+        .map(|(file, matched_lines)| GrepFileMatch {
+            file_path: host_native_absolute_path(
+                file,
+                &shell_launch_data,
+                &current_working_directory,
+            ),
+            matched_lines,
+        })
+        .collect())
+}
+
+impl Entity for GrepExecutor {
+    type Event = ();
+}

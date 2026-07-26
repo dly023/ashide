@@ -1,0 +1,12 @@
+Package: @@PACKAGE_NAME@@
+Version: @@VERSION@@
+Section: devel
+Depends: fontconfig, libegl1, libwayland-client0, libwayland-egl1, libx11-6, libxcb1, libxcursor1, libxi6, libxkbcommon-x11-0, zlib1g
+Recommends: libgl1-mesa-dri, yaru-icon-theme | adwaita-icon-theme-full
+Priority: optional
+Architecture: @@ARCH@@
+Maintainer: Ashide Maintainers <ashide-maintainers@localhost>
+Homepage: https://github.com/OpenPawz/ashide
+Description: Ashide, a terminal-native agent IDE
+ Ashide is a terminal-native agent IDE focused on real CLI agents,
+ remote workspaces, durable sessions, and local-first project assets.

@@ -1,0 +1,1620 @@
+# Ashide 本地/远程能力一致性规范
+#
+# 跨 backend 的共享行为先在此定义，再进入 capability matrix、静态门禁和测试。
+# Session Navigator 的专用状态模型仍以 docs/SESSION_NAVIGATOR_SPEC.yaml 为权威。
+
+spec_version: 42
+last_updated: "2026-07-24"
+
+application_lifecycle_contracts:
+  single_gui_process:
+    id: APP-SINGLE-INSTANCE-MAC-01
+    capability: "single GUI process with app-internal multi-window support"
+    invariant: >-
+      每个 channel / OS user session 只能有一个 Ashide GUI 进程；第二次启动必须把 URL/目录/new-window
+      intent 转发给既有进程并退出。多窗口只能由该进程内部创建，禁止用第二个进程模拟多窗口。
+    enforcement_layers:
+      os_bundle: "macOS Info.plist 声明 LSMultipleInstancesProhibited，阻止 LaunchServices 显式创建第二实例。"
+      process_lock: "所有 GUI channel（包括 script/run 生成的 dev/local/preview bundle）在 UI/SQLite 初始化前获取自动随进程释放的 advisory lock；锁已占用时不得继续初始化。release_bundle 只能控制资源打包，禁止控制 lifecycle correctness。"
+      startup_ipc: "锁已占用时重试连接既有进程的固定本地 IPC，将启动参数转成 typed URL intent 后退出。"
+      fail_closed: "检测到 owner 但 IPC 暂不可用时等待有界 server-ready 窗口并显式失败；禁止回退启动第二 GUI。"
+    channel_scope: >-
+      lock 与 IPC 地址只由 ChannelState::app_id application identity 决定；同一 .app 即使以不同
+      WARP_DATA_PROFILE 启动也必须竞争同一个 owner namespace。data profile 只隔离 SQLite、日志与缓存，
+      禁止拆分 GUI ownership；不同 bundle/channel app id 仍可并行。
+    worker_exclusion: "terminal-server、remote helper、CLI/worker subcommand 不参与 GUI singleton。"
+
+  startup_intent_ipc:
+    id: APP-SINGLE-INSTANCE-IPC-02
+    capability: "bounded framed startup-intent transport"
+    invariant: >-
+      singleton owner 与第二启动进程必须通过显式长度帧交换 typed URL intent；listener 的 nonblocking
+      accept 策略不得泄漏到 accepted stream 的消息读取语义，也不得依赖 EOF/half-close 判断一条消息结束。
+    enforcement_layers:
+      framing: "client 先在内存中序列化完整 payload，再发送固定宽度长度头和有上限的 JSON body；server 用 read_exact 读取一帧。"
+      accepted_stream: "每个 accepted stream 在读帧前显式恢复 blocking mode，并设置有界 read/write timeout。"
+      acknowledgement: "server 只有在完整解帧、解析并入队后才返回 ACK；拒绝帧返回 REJECTED，禁止提前关闭造成 Broken pipe。"
+      observability: "server 对 framing、JSON、queue rejection 记录明确原因；client 区分 serialization、payload size 与 transport failure。"
+    failure_rule: "owner 已检测到时任何 framing/IPC 错误都 fail-closed；禁止因此启动第二 GUI，也禁止静默丢弃目录/URL intent。"
+
+  startup_owner_before_shared_side_effects:
+    id: APP-SINGLE-INSTANCE-SIDE-EFFECT-ORDER-03
+    capability: "single-instance ownership before shared process side effects"
+    invariant: >-
+      release GUI 必须在共享日志初始化、日志轮转、SQLite 预热和其他 owner-only 副作用之前完成 owner claim
+      或 startup-intent forwarding；第二启动进程只允许执行无共享副作用的参数解析和 ownership transport。
+    enforcement_layers:
+      startup_order: "run_internal 对 LaunchMode::App 先执行 pass_startup_args_to_existing_instance，owner 才进入 init_common。"
+      logging: "非 owner 禁止调用 warp_logging::init，不能截断、轮转或重新绑定既有 owner 的日志文件。"
+      static_check: "presubmit 校验 run_internal 中 singleton claim 的源码顺序严格早于 init_common。"
+      runtime: "第二启动退出后 owner 的日志 fd 与当前 ashide.log 保持同一活动日志链，历史内容不被覆盖。"
+    failure_rule: "ownership 未决前禁止新增任何写共享目录、注册服务、初始化持久化或启动后台线程的步骤。"
+
+  cross_platform_preinit_singleton:
+    id: APP-SINGLE-INSTANCE-CROSS-PLATFORM-04
+    capability: "cross-platform fail-closed singleton arbitration before shared initialization"
+    invariant: >-
+      macOS、Linux、FreeBSD 与 Windows release GUI 都必须在 init_common、logging、SQLite 与后台线程前完成
+      owner claim 或 framed startup forwarding；owner 已存在时任何 IPC/协议错误都 fail-closed，禁止继续第二 GUI。
+    enforcement_layers:
+      shared_entry: "run_internal 通过一个 platform-neutral preinit singleton entry 完成所有 desktop OS arbitration。"
+      platform_transport: "各 OS 只实现 claim/forward transport，不决定是否允许 fail-open。"
+      static_check: "presubmit 校验所有 platform forwarding 调用严格早于 init_common 且删除 post-init 分支。"
+    failure_rule: "除了 NoExistingInstance / update 完成后的新 owner，任何结果都不得进入共享初始化。"
+
+release_build_contracts:
+  locked_dependency_graph:
+    id: RELEASE-LOCKED-DEPENDENCIES-01
+    capability: "reproducible desktop app and remote-helper release builds"
+    invariant: >-
+      macOS App、Linux helper 与 CLI release 的每个实际 cargo build 都必须消费已提交的 Cargo.lock；
+      bundle wrapper 不得在 tag 构建时隐式重新解析依赖。
+    enforcement_layers:
+      macos_app: "先用 cargo fetch --locked 获取完整锁定依赖图并显式 cargo build --locked，再让 cargo-bundle 以 CARGO_BUNDLE_SKIP_BUILD=1、CARGO_NET_OFFLINE=true 仅基于本地 locked dependency graph 装配 .app。"
+      remote_helper: "make_release_helper_artifacts 对每个 musl target 使用 cargo build/zigbuild --locked。"
+      ci: "release workflow 只调用上述唯一生产入口，不得复制第二套未锁定构建命令。"
+    failure_rule: "Cargo.lock 与 manifest 不一致时发布必须立即失败，禁止临时更新 lockfile 或继续打包旧 binary。"
+
+  offline_bundle_metadata:
+    id: RELEASE-BUNDLE-OFFLINE-METADATA-02
+    capability: "deterministic cargo-bundle metadata assembly"
+    invariant: >-
+      macOS bundle 入口必须先显式获取完整 locked dependency graph；主二进制构建完成后，
+      cargo-bundle 的 metadata 与 App 装配不得再次访问 registry 或根据网络状态重新解析依赖。
+    enforcement_layers:
+      fetch: "script/macos/bundle 在构建与装配前执行 cargo fetch --locked。"
+      assembly: "cargo-bundle 仅在 CARGO_NET_OFFLINE=true 与 CARGO_BUNDLE_SKIP_BUILD=1 下运行。"
+      static_guard: "release_builds_are_reproducibly_locked 同时锁定 fetch、build、skip-build 与 offline assembly 四段合同。"
+    failure_rule: "完整 locked graph 缺失时必须在显式 fetch 阶段失败，禁止在 cargo-bundle 内隐式长时间联网或回退未锁定解析。"
+
+  state_driven_macos_dmg:
+    id: RELEASE-MACOS-DMG-STATE-03
+    capability: "repository-owned state-driven macOS DMG assembly"
+    invariant: >-
+      macOS DMG 必须由 script/macos/create_ashide_dmg 唯一生产；镜像创建、挂载、收缩和压缩只使用
+      diskutil image API，Finder layout 只按可观察状态 readiness 推进，禁止 create-dmg、废弃 hdiutil
+      lifecycle API 和无条件固定等待。最终只读 DMG 必须重新挂载并复验结构及持久化布局。
+    enforcement_layers:
+      image_lifecycle: "RAW APFS 经 diskutil image create blank/attach/resize/create from --format UDZO 完成，并以 --readOnly 重挂最终产物。"
+      finder_persistence: ".DS_Store 必须非空、相对配置前 hash 已变化且连续稳定；writable→read-only 重挂验证前先关闭旧 container-window generation，再从最终 .DS_Store 打开；Finder window size 固定为 761×500，但全局 origin 由当前 display/Space 决定且不得进入发布合同；icon position 与 backgroundType 同时复验。"
+      atomic_output: "最终只读 Finder 复验未通过时必须删除 OUTPUT_DMG；压缩完成但未验证的镜像不属于 release artifact。"
+      contents: "DMG 顶层只允许 Ashide.app、Applications symlink 与 .background，禁止把 staging dmg/ 目录复制进产物。"
+      static_guard: "macos_dmg_is_repository_owned_state_driven_and_verified 锁定唯一入口、API、readiness 与最终只读复验。"
+    failure_rule: "任何 layout、.DS_Store、Applications link、background 或只读重挂 postcondition 缺失都必须让发布失败。"
+
+  fail_closed_third_party_licenses:
+    id: RELEASE-LICENSE-FAIL-CLOSED-04
+    capability: "version-pinned fail-closed third-party license generation"
+    invariant: >-
+      所有 release OS 必须精确使用 cargo-about 0.9.1，并以 --features cli 安装；许可证生成必须覆盖
+      workspace、冻结依赖解析并在未知/无法解析许可证时失败，禁止缓存中的旧 cargo-about 或 warning-only
+      输出进入发布产物。
+    enforcement_layers:
+      installer: "Unix、Windows 与 release workflow 都检查精确 cargo-about 0.9.1；不匹配时执行 cargo install --locked --force --features cli cargo-about@0.9.1。"
+      generation: "prepare_bundled_resources 在 Unix/Windows 上统一执行 cargo about generate --workspace --frozen --fail。"
+      static_guard: "third_party_license_generation_is_version_pinned_and_fail_closed 同时锁定版本、CLI feature 与 fail-closed flags。"
+    failure_rule: "版本不精确、生成退出非零或 THIRD_PARTY_LICENSES.txt 缺失/为空时不得继续 bundle。"
+
+  complete_license_dependency_graph:
+    id: RELEASE-CROSS-PLATFORM-LICENSE-GRAPH-07
+    capability: "cross-platform complete license dependency graph"
+    invariant: >-
+      Unix 与 Windows 的唯一 bundled-resource 入口必须在 frozen cargo-about 读取完整 workspace metadata 前执行
+      cargo fetch --locked；release workflow 不得依赖前序 target/feature build 偶然下载的依赖子集。
+    enforcement_layers:
+      resource_entrypoint: "script/prepare_bundled_resources 与 script/windows/prepare_bundled_resources.ps1 在 license generation 内共同拥有 locked fetch。"
+      offline_generation: "fetch 成功后才允许 cargo about generate --workspace --frozen --fail；fetch 或 generation 任一失败立即终止 bundle。"
+      static_guard: "complete_license_dependency_graph_is_fetched_by_resource_entrypoints 锁定 Unix/Windows 两个入口的 fetch-before-generate 顺序。"
+    failure_rule: "clean runner 缓存不完整时必须由资源入口补齐 locked graph；禁止在 workflow 临时补命令或放宽 --frozen。"
+
+  platform_complete_remote_helper_assets:
+    id: RELEASE-REMOTE-HELPER-PLATFORM-MATRIX-05
+    capability: "platform-complete remote-helper release assets"
+    invariant: >-
+      RemotePlatform 接受的每个 OS/arch 组合都必须由唯一 helper 生产入口从当前 checkout 显式构建，
+      并出现在 release workflow 上传清单与最终 SHA256SUMS 中；禁止从碰巧存在的 App、旧 target
+      或 /Applications 二进制推断 helper 产物。
+    enforcement_layers:
+      platform_matrix: "Linux 与 macOS 各自生产 x86_64/aarch64 两个 helper；不支持的平台在参数解析阶段显式失败。"
+      build_ownership: "script/make_release_helper_artifacts 对每个 target 执行带 --locked 的 cargo build/zigbuild，输出只来自专用 target/release-helper。"
+      workflow: "Linux 与 macOS job 都调用同一脚本并上传各自双架构 tarball；upload-release 对所有最终主资产重新生成完整 SHA256SUMS。"
+      static_guard: "presubmit 同时锁定 RemoteOs/RemoteArch 支持矩阵、脚本 target 矩阵、CI 上传清单、禁止 stale binary fallback 与最终 checksum 聚合。"
+    failure_rule: "任一 runtime 可探测平台缺少 release 资产、checksum 未覆盖或 helper 不是当前 checkout 的显式 locked build 时，发布必须失败。"
+
+  semantic_release_helper_static_guard:
+    id: RELEASE-HELPER-STATIC-GUARD-08
+    capability: "format-independent release-helper static guard"
+    invariant: >-
+      release helper 合同测试必须分别验证每个受支持 target 的显式 build 调用，不得把 shell 缩进、相邻布局或格式化结果
+      当作行为合同；脚本重排但 target 集不变时测试保持稳定，任一 target 调用删除时测试失败。
+    enforcement_layers:
+      semantic_assertions: "Rust 合同测试分别匹配 Linux x86_64 与 aarch64 build invocation。"
+      parity_guard: "script/check_local_remote_parity 锁定两个独立断言，禁止恢复 whitespace-coupled multiline match。"
+    failure_rule: "静态测试不得因合法缩进失败，也不得用一个脆弱的连续字符串替代逐 target 资产检查。"
+
+  source_ref_product_version_separation:
+    id: RELEASE-SOURCE-REF-PRODUCT-VERSION-14
+    capability: "independent release source and product version identities"
+    invariant: >-
+      release workflow 的 checkout source ref 与产品 release tag 是两个独立身份：workflow_dispatch 必须始终以
+      inputs.tag 作为产品版本，即使当前 source ref 本身是 candidate tag；正式 v* push 才以 github.ref_name
+      作为产品版本。candidate/branch/commit source 名禁止进入 plist、installer、artifact 或 GitHub Release identity。
+    enforcement_layers:
+      source_identity: "SOURCE_REF 只记录 github.ref，用于审计实际 checkout 来源，不参与产品版本生成。"
+      product_identity: "RELEASE_TAG 按 event_name 选择 workflow_dispatch inputs.tag 或正式 tag push 的 github.ref_name；concurrency 也按同一产品身份串行化。"
+      fail_fast: "独立 validate-release-identity job 在任何跨平台长编译前验证 vMAJOR.MINOR.PATCH，并让三个 build job 显式依赖该 gate。"
+      static_guard: "Rust workflow contract test 与 parity checker 锁定事件分支表达式、SOURCE_REF 分离、前置 validation dependency，并禁止恢复 ref_type 优先表达式。"
+    failure_rule: "source ref 与产品版本再次混用、非 semver 产品 tag 进入构建、或长编译可绕过 identity validation 时，发布合同失败。"
+
+  unsigned_macos_bundle_seal:
+    id: RELEASE-MACOS-UNSIGNED-BUNDLE-SEAL-17
+    capability: "complete macOS app bundle seal without Developer ID credentials"
+    invariant: >-
+      macOS release runner 未配置 Developer ID/notarization secrets 时，--nosign 只能跳过 Developer ID 与 Apple notarization，
+      不能跳过 .app bundle seal。最终 App 必须以完整 ad-hoc bundle signature 绑定 Info.plist、主 executable 与 Resources；
+      禁止把 linker-signed 主 Mach-O 与未 sealed resources 组合成半签名 App 后打入 DMG。
+    enforcement_layers:
+      assembly: "script/macos/bundle 在 CODESIGN=false 且 SELFSIGN=false 的 app 路径执行 codesign --force --deep --sign - --timestamp=none。"
+      postcondition: "所有 app 签名模式在创建 DMG 前统一执行 codesign --verify --deep --strict --verbose=4。"
+      packaging_gate: "script/make_release_artifacts 在读取版本并打包 DMG/ZIP 前再次验证最终 APP_BUNDLE，失败立即终止发布。"
+      static_guard: "Rust release contract test 与 parity checker 锁定 ad-hoc seal、统一 postcondition、packaging fail-closed 和 workflow 日志语义。"
+    failure_rule: "App 只有 linker ad-hoc executable signature、Info.plist not bound、Sealed Resources=none 或 codesign strict verify 非零时，禁止生成或上传 macOS release artifact。"
+
+  public_macos_distribution_identity:
+    id: RELEASE-MACOS-DMG-OPTIONAL-SIGNING-66
+    capability: "Developer ID signed, notarized and Gatekeeper-accepted public macOS distribution"
+    invariant: >-
+      完整 ad-hoc bundle seal 只证明开发产物内部完整，不能证明其可公开分发。任何 tag push 或
+      upload_to_release=true 的 macOS App 必须由显式 Developer ID Application identity 签名并启用 hardened runtime，
+      DMG 必须经 Apple notarization、stapling 与 stapler validation，App 和 DMG 必须分别通过 Gatekeeper assessment；
+      local/dev 非发布构建才允许显式 --nosign。禁止把 codesign --verify 成功当成公开发布授权。
+    enforcement_layers:
+      credential_owner: "Developer ID certificate/password、临时 keychain password、Apple ID app password 与 Team ID 全部来自 GitHub Actions secrets；bundle、entitlements 与 runtime 禁止硬编码 Team ID、猜 signing identity 或用本机配置代填。"
+      workflow_gate: "release workflow 在长编译前要求六项 macOS signing/notarization secrets 全部存在；缺失或部分配置立即失败，tag/public upload 禁止追加 --nosign。"
+      bundle_postcondition: "script/macos/bundle 从导入 keychain 中解析唯一且 Team ID 匹配的 Developer ID Application identity，签名后验证 Authority、TeamIdentifier、runtime flag、App Gatekeeper、DMG notarization ticket 与 DMG Gatekeeper。"
+      runtime_authority: "无 App Extension 共享需求的 local-first App 不声明 App Group entitlement，也不维护 Team-ID-prefixed secure-state 路径；非 OSS 自动更新从当前运行 bundle 的真实签名读取 TeamIdentifier，并用它验证 staged App，禁止编译期常量。"
+      packaging_gate: "script/make_release_artifacts 对 oss/stable/preview App 重跑 Developer ID identity、hardened runtime、stapler 与 App/DMG Gatekeeper postcondition，任一失败禁止复制到 target/release-artifacts。"
+      publish_gate: "GitHub Release upload job 只能依赖通过上述 postcondition 的 macOS artifact job；公开转换前仍须下载远程 DMG 做同一 Gatekeeper 验证。"
+      static_guard: "Rust contract test 与 parity checker 锁定六项 secret、零 ad-hoc public fallback、目标配置 Team ID、Developer ID/runtime/notarization/stapling/Gatekeeper 双层验证。"
+    failure_rule: >-
+      缺少任一凭据、Team ID/identity 在脚本/entitlements/runtime 中硬编码、Authority 不是 Developer ID Application、TeamIdentifier 不匹配、
+      runtime flag 缺失、notarization/stapling 无票据或 spctl 拒绝 App/DMG 时，正式 macOS Release 必须 fail closed 并保持 Draft。
+
+  dynamic_search_source_current_query:
+    id: SEARCH-DYNAMIC-SOURCE-CURRENT-QUERY-09
+    capability: "generation-owned dynamic search source registration"
+    invariant: >-
+      SearchMixer 已存在 current query 时，后注册且匹配该 query 的 async source 必须立即参与同一 generation；
+      禁止依赖用户再次输入、机器负载或 source 恰好在 view 创建前初始化。旧可见结果可按原子提交策略保留，
+      但在新 source 完成或 initial timeout 提交前不得把旧 query 的可见结果标记为 current-query committed，也不得接受旧 selection。
+      新 source 的结果必须由当前 query ownership 驱动并受后续 generation abort 约束。
+    enforcement_layers:
+      mixer_contract: "add_async_source 注册完成后统一检查 current query/filter；已提交 query 重新建立 pending buffer/readiness，保留旧结果仅作视觉占位，再通过 run_query_internal 启动匹配 source。"
+      lifecycle: "HistoryEvent::Initialized 只负责注册 history source；是否补跑当前 query 由 SearchMixer 统一保证，CommandSearchView 不维护第二套时序分支。"
+      selection_guard: "CommandSearchView 只在 mixer 确认 visible results 已提交给 current query 后接受 selection；旧 query 结果即使仍显示也不可执行。"
+      regression: "mixer unit tests 固定 query-before-source、已提交结果保留但 readiness 重开；history integration tests 覆盖 histfile/SQLite enrichment 与 workflow metadata。"
+      static_guard: "parity checker 锁定 mixer current-query hook、current-query commit predicate、selection guard、确定性单测与 LR-100 tracker/matrix。"
+    failure_rule: "动态 source 晚到后 current query 没有自动执行、旧结果仍被当作当前 query 接受、或只能靠额外按键/测试串行化恢复时，视为产品行为失败。"
+
+  environment_runtime_remote_session_cache:
+    id: ENV-RUNTIME-REMOTE-SESSION-CACHE-18
+    capability: "environment runtime remote session cache"
+    invariant: >-
+      Remote environment sessions live only in the remote authority's runtime-scoped indexed cache.
+      The local app must not persist a second copy of remote session history, and disconnect must
+      clear the authority cache so reconnect performs fresh remote discovery instead of replaying
+      stale remote rows from local storage.
+    enforcement_layers:
+      authority_scope: "EnvironmentTable and SessionNavigator partition remote rows by authority only while the remote authority is connected."
+      disconnect_semantics: "disconnect_environment_runtime_state clears the authority-scoped indexed cache before releasing the retained runtime owner."
+      reconnect_semantics: "reconnect_retained_environment_runtime_authority resolves transport through the committed SshTargetCatalog, then re-discovers remote rows into the same authority partition."
+      local_store_boundary: "No local persistence layer may materialize or mirror remote session rows as a long-lived local source of truth."
+      runtime_only: "Remote session rows are projected only while the remote authority is connected and remain part of the runtime cache contract, not the local data model."
+    failure_rule: "If remote rows survive a disconnect as a local persistent copy, reconnect bypasses the committed transport catalog, or reconnect does not perform a fresh remote discovery into the authority-scoped runtime cache, the contract fails."
+
+  current_frame_interaction_position:
+    id: UI-INTERACTION-CURRENT-FRAME-10
+    capability: "current-scene ownership for saved-position interaction"
+    invariant: >-
+      SavedPosition 的长期几何缓存可继续服务布局锚点，但任何模拟指针交互与交互 readiness 必须只接受最新完成场景中
+      实际 paint 的 position id；元素从渲染树消失后，旧坐标不得继续被点击并把事件误路由到父级或重用坐标处的新元素。
+    enforcement_layers:
+      position_cache: "每次 Presenter build_scene 开始新 frame ownership，paint 时登记本帧 position id，同时保留既有长期几何查询语义。"
+      integration_driver: "WithSavedPosition、WithSavedPositionFn 与 saved-position readiness 统一查询 current-frame position，不得读取仅存于历史 committed cache 的目标。"
+      regression: "PositionCache 单测证明长期坐标跨帧仍可查询，但未在新场景 paint 时不再具备 pointer-interaction 资格。"
+    failure_rule: "测试或自动化若能点击未在最新场景 paint 的 stale position，或用菜单 model-open 代替实际元素 paint readiness，则合同失败。"
+
+  explicit_negative_interaction_geometry:
+    id: UI-NEGATIVE-INTERACTION-GEOMETRY-11
+    capability: "explicit geometry ownership for negative pointer tests"
+    invariant: >-
+      普通 saved-position 点击只能命中最新完成场景中的交互目标。只有当负向测试明确验证“目标消失后，原屏幕坐标不再触发该目标”时，
+      才能通过单独命名的 API 读取最后一次 committed geometry；该 API 不得作为等待慢渲染、绕过 readiness 或恢复 stale target 的通用 fallback。
+    enforcement_layers:
+      typed_event: "IntegrationTestEvent 携带 SavedPositionRequirement，默认构造器固定为 CurrentScene，负向几何复用必须显式选择 LastCommittedGeometry。"
+      narrow_entry: "with_click_on_last_committed_saved_position 的名称、文档和唯一调用点都表明它只用于元素已故意失效后的负向断言。"
+      regression: "safe-mode 测试先建立 secret cell 几何，再禁用 secret interaction，点击同一屏幕点并断言 tooltip 仍关闭；普通 prompt/menu 测试继续受 current-scene guard 约束。"
+      static_guard: "parity checker 锁定 typed requirement、窄入口、safe-mode 负向用例与 LR-102 tracker/matrix。"
+    failure_rule: "若普通 pointer helper 可读取历史 geometry，或负向 helper 被用作等待/重试/交互 readiness fallback，则合同失败。"
+
+  nonempty_pointer_hit_geometry:
+    id: UI-INTERACTION-NONEMPTY-HIT-12
+    capability: "non-empty current-scene geometry before pointer dispatch"
+    invariant: >-
+      position id 在当前场景出现只证明元素参与了 paint，不证明其异步布局已产生可命中的面积。所有 saved-position pointer dispatch 与 readiness
+      必须同时要求 current-scene ownership、正 width 和正 height；零面积中心点不得被派发到相邻或底层元素。
+    enforcement_layers:
+      position_cache: "interactive_position_painted_in_current_frame 在 current-scene ownership 之上统一过滤零宽或零高矩形。"
+      integration_driver: "普通 click/right-click/hover 与 saved-position readiness 只调用 interactive position API，不各自复制几何判断。"
+      regression: "PositionCache 单测固定零面积 position 已 paint 但不可交互；prompt context-menu integration test 在高负载下等待 prompt 完成布局后才右键。"
+      static_guard: "parity checker 锁定 interactive API、统一调用点、零面积回归与 LR-103 tracker/matrix。"
+    failure_rule: "若自动化可向零面积 saved position 派发 pointer event，或 current-frame presence 被直接当作 hit readiness，则合同失败。"
+
+  retryable_layout_assertions:
+    id: UI-ASYNC-LAYOUT-ASSERTION-13
+    capability: "retryable assertions for asynchronously committed layout"
+    invariant: >-
+      integration assertion callback 中读取窗口、pane 或 element layout 时，未完成布局必须返回 AssertionOutcome::Failure 以驱动下一帧，
+      禁止使用 panic 型近似断言把暂态零尺寸变成不可重试的测试失败。
+    enforcement_layers:
+      assertion_contract: "布局断言使用 async_assert 返回 retryable outcome；driver 在失败后统一 maybe_render_frame，直至提交布局或真实 deadline。"
+      source_guard: "integration 测试源禁止 assert_approx_eq!；近似布局判断必须显式表达 epsilon 并返回 AssertionOutcome。"
+      regression: "Agent Mode minimum width 与 custom window size tests 覆盖 entity 已创建但 layout 尚未提交的阶段。"
+      static_guard: "parity checker 禁止 integration 测试中的 panic 型 approximate assertion，并锁定 LR-104 tracker/matrix。"
+    failure_rule: "若异步 layout assertion 在 deadline 前因暂态值 panic，或通过 sleep/固定等待代替 frame-driven retry，则合同失败。"
+
+  signal_target_readiness:
+    id: TEST-SIGNAL-TARGET-READINESS-15
+    capability: "process-owned readiness before terminal signal assertions"
+    invariant: >-
+      integration test 向前台命令发送 Ctrl-C 等终端信号前，必须由实际信号目标在安装 handler 后输出唯一 readiness marker；
+      shell Preexec、BlockState::Executing、long-running UI 状态与 input focus 都不是 foreground process 已可接收信号的充分证据。
+    enforcement_layers:
+      target_protocol: "测试命令在子 shell 内先安装 SIGINT trap，再输出 CTRL_C_READY_MARKER，随后进入无界工作循环。"
+      event_order: "Run step 必须先观察 active block 的 marker 与 executing/long-running 状态，后续 step 才允许派发 Ctrl-C。"
+      forbidden_masking: "禁止用固定 sleep、放宽 step timeout、nextest retry 或串行化掩盖 Preexec→foreground readiness 窗口。"
+      static_guard: "parity checker 锁定 marker、trap-before-marker 顺序、active output assertion，并禁止 test_ctrl_c 恢复 sleep 999。"
+    failure_rule: "若信号可在目标自证 readiness 前派发，或测试只能靠时间/重试稳定，则终端 signal lifecycle 合同失败。"
+
+  declared_ci_static_check_toolchain:
+    id: RELEASE-CI-STATIC-CHECK-TOOLCHAIN-06
+    capability: "repository-declared static-check toolchain"
+    invariant: >-
+      clean Linux CI 与本地开发必须通过同一 repository-owned dependency 入口获得 parity checker
+      所需工具；checker 启动时先验证全部非 POSIX 依赖，禁止把 command not found 扩散为大量伪合同缺失。
+    enforcement_layers:
+      provisioning: "script/linux/install_build_deps 显式安装 ripgrep；CI 只调用该统一依赖入口，不维护第二份隐式工具清单。"
+      fail_fast: "script/check_local_remote_parity 在执行任何合同搜索前验证 rg 与 python3，缺失时只报告精确 toolchain error 并立即退出。"
+      static_guard: "checker 自身锁定 spec、tracker、capability matrix、Linux dependency marker 与 required_commands marker。"
+    failure_rule: "clean checkout 缺少 checker 依赖或统一依赖入口删除该工具时，CI 必须以单一明确错误失败；禁止继续输出伪 parity violation。"
+
+  generated_macos_plist:
+    id: RELEASE-BUNDLE-PLIST-CONTRACT-01
+    capability: "generated macOS App Info.plist contract"
+    invariant: >-
+      进程生命周期护栏必须存在于 cargo-bundle 最终生成的主 App Info.plist；CLI plist、开发运行模板和
+      binary 内嵌 plist 都不能替代 release bundle 的实际产物合同。
+    enforcement_layers:
+      assembly: "script/macos/bundle 在 normalize_cargo_bundle_app 中写入 LSMultipleInstancesProhibited=true。"
+      postcondition: "资源装配完成、codesign 前重新读取最终 Info.plist；缺失或非 true 时发布立即失败。"
+      static_guard: "Rust contract test 与 local/remote parity check 都必须覆盖主 bundle 的唯一装配脚本。"
+    failure_rule: "禁止仅因模板 plist 含目标 key 就判定通过；最终 .app 未满足合同即视为 release 构建失败。"
+
+filesystem_contracts:
+  symlink_transfer:
+    id: LR-FILE-TRANSFER-SYMLINK-01
+    capability: "file byte transfer without link-preserving protocol"
+    invariant: >-
+      只要协议不能表达 readlink/create-symlink，所有 upload/download 入口都必须拒绝
+      symlink inode；禁止把 link 静默降级成 target bytes，也禁止覆盖目标路径上的 symlink。
+    enforcement_layers:
+      ui_planning: "Workspace File Browser 与 SFTP Browser 在创建 transfer task 前拒绝 symlink。"
+      backend_boundary: >-
+        SftpBackend 与 Workspace File Browser 的实际 source/destination open 再次校验 lexical inode；
+        Unix 文件句柄使用 O_NOFOLLOW，destination 任一已存在 ancestor 为 symlink 时整体拒绝。
+      remote_protocol: "ReadFileChunk/WriteFileChunk 在 helper 端 lstat 末级路径并拒绝 symlink，不能依赖客户端自律。"
+      remote_conflict: >-
+        远端目标为 symlink 时不得进入 Overwrite；staging promotion 在最终 mv 前重新检查 final path，
+        禁止规划后替换绕过。
+    lexical_identity: "导航可跟随 symlink-to-directory，但 mutation 和 transfer capability 始终读取 link inode kind。"
+    destination_rule: "上传目标已存在且为 symlink 时必须失败；禁止 OpenOptions 跟随链接覆盖 target。"
+    future_extension: "若要支持 symlink 传输，先新增类型化 ReadLink/CreateSymlink RPC，再开放 UI capability。"
+
+  atomic_directory_tree_reload:
+    id: LR-FILE-TREE-ATOMIC-01
+    capability: "atomic expanded directory tree reload"
+    invariant: >-
+      File Browser 的 root listing 与所有待恢复 expanded child listing 是同一个 snapshot transaction；
+      只有全部目录成功时才能替换 UI tree，任一 child Error 都必须保留旧 snapshot。
+    enforcement_layers:
+      fetch: "reload_directory_tree 对 root 与 expanded child 使用同一 Result 链，禁止吞掉 child error。"
+      commit: "finish_directory_reload 只接收完整 DirectoryTreeReload；Error 只更新错误状态，不提交 partial rows/expanded set。"
+      extension_rule: "若未来需要 partial tree，必须新增显式 partial snapshot 与逐目录 error，不能复用 Success。"
+    ordering: "成功 snapshot 内各目录仍使用唯一共享排序规则；原子性不得通过重排或删除失败 subtree 伪造。"
+
+  complete_directory_listing:
+    id: LR-FILE-LIST-COMPLETE-01
+    capability: "directory listing snapshot"
+    invariant: >-
+      目录枚举的 Success 必须代表完整、可解释的 lexical snapshot；任何 iterator、file_type
+      或 lexical metadata 错误都必须返回显式 Error，禁止静默跳过 entry 或伪造降级 metadata。
+    enforcement_layers:
+      local_backend: "Terminal/InMemory/SFTP backend 保持 fail-closed：read_dir entry 与 symlink_metadata 错误直接失败。"
+      remote_helper: "ListDirectory 通过统一 collector 收集全部 entry；不得使用 read_dir.flatten/filter_map(Result::ok)。"
+      lexical_symlink: "symlink inode metadata 与 target metadata 分离；broken/不可达 target 只映射 target_kind，不能删除 lexical row。"
+    ordering: "只有完整收集成功后才按 name 排序并返回 Success。"
+    extension_rule: "需要 best-effort listing 时必须新增显式 partial-result 协议和逐项 error，不得复用 Success。"
+
+  lexical_symlink_rename:
+    id: LR-FILE-SYMLINK-RENAME-01
+    capability: "filesystem watcher lexical rename projection"
+    invariant: >-
+      watcher 对 rename source/destination 的存在性判断必须观察路径自身 inode，而不是跟随
+      symlink target；dangling symlink 的新 lexical path 必须被归类为 added，旧 lexical path
+      必须被归类为 deleted，禁止等待完整重扫才能恢复 row。
+    enforcement_layers:
+      watcher_boundary: "RenameMode::Any 只允许通过统一 lexical path state resolver 分类；禁止使用 Path::exists、metadata 或 canonicalize。"
+      incremental_projection: "同一 rename debounce batch 必须把 old lexical path 移除并插入 new lexical path；Project Explorer 不得短暂或永久丢失 link row。"
+      repository_metadata: "增量 upsert 必须使用 symlink_metadata 重建 Entry::Symlink，并保留 SymlinkTargetKind::Missing。"
+    error_rule: >-
+      lexical metadata 的 NotFound 表示 Missing；其他错误属于 Unknown，必须显式中止该批归一化并记录错误，
+      禁止把不可判定状态静默降级成 delete。
+    identity_rule: "directory symlink rename 后仍保持 link inode identity 与新的 lexical children namespace，不得切换到 canonical target namespace。"
+
+remote_protocol_contracts:
+  required_oneof_result:
+    id: LR-REMOTE-REQUIRED-RESULT-01
+    capability: "remote helper request/response outcome"
+    invariant: >-
+      proto response 一旦声明 oneof result，该 result 就是 required outcome；缺失 result
+      是协议破坏，不是成功、未找到、已保存或幂等完成。
+    enforcement_layers:
+      transport_boundary: "RemoteServerClient::send_request 在把 response 交给任何业务方法前统一拒绝缺失的 required result。"
+      application_boundary: "业务转换函数仍穷尽匹配 Success/Error/None，None 只允许映射为显式错误，禁止领域默认值。"
+      static_contract: "静态检查从 proto 枚举所有 oneof result response，并要求 transport validator 覆盖；同时禁止 None 与 Success 共用成功分支。"
+    error_mapping: "缺失 result 统一返回 ClientError::UnexpectedResponse；server 返回的显式 error result 保留原领域错误。"
+    extension_rule: "新增 oneof result response 时必须同步进入 transport validator 和 contract test，否则 presubmit 失败。"
+
+  typed_resolve_path_result:
+    id: LR-REMOTE-RESOLVE-PATH-RESULT-02
+    capability: "typed remote path existence outcome"
+    invariant: >-
+      ResolvePath 必须穷尽区分 Success、NotFound、Error 与缺失 result；只有 helper 明确返回 NotFound
+      才能映射为 Option::None，permission、I/O 与协议错误必须保留为 Err。
+    enforcement_layers:
+      protocol: "ResolvePathResponse oneof 提供独立 not_found variant，禁止用 FileOperationError 文本猜测不存在。"
+      helper: "symlink_metadata 的 ErrorKind::NotFound 映射 NotFound；其他 io::Error 映射 Error。"
+      client: "Success→Some、NotFound→None、Error→Err、None→UnexpectedResponse，match 必须穷尽。"
+      consumer: "upload conflict scan 只把 typed NotFound 当作可创建目标，其他失败中止 mutation。"
+    failure_rule: "任何无法分类的 response 都 fail-closed，禁止为了继续上传而伪装目标不存在。"
+
+session_consistency_contracts:
+  source_authority_locator:
+    id: SESSION-SOURCE-AUTHORITY-01
+    capability: "authority-bound CLI-agent source locator"
+    invariant: >-
+      远程 CLI-agent source identity 必须作为 authority、agent、source 与 provider session id 的不可拆 typed locator 传播；
+      encoded authority 与 snapshot authority 不一致时读取和删除都必须 fail-closed。
+    enforcement_layers:
+      parser: "source id 解码一次并返回 typed locator，禁止解析后丢弃 authority。"
+      mutation: "read/delete executor 只消费 locator 自带 authority，禁止由当前 UI snapshot 覆盖。"
+    failure_rule: "authority 不一致、缺失或不可解析时不得发起远程文件操作。"
+
+  canonical_codex_ingress:
+    id: SESSION-CODEX-CANONICAL-INGRESS-02
+    capability: "canonical Codex identity at every ingress"
+    invariant: >-
+      OSC/plugin、scan、SessionBridge reader 与 persistence 进入 live model 或 IR 前必须共享 canonical UUID validator；
+      expected provider id 与 transcript session_meta id 不一致时必须报错。
+    enforcement_layers:
+      ingress: "所有 event/apply/read 路径在 mutation 前 canonicalize。"
+      reader: "expected id 与 transcript id 做 canonical equality check，禁止静默覆盖。"
+    failure_rule: "非 canonical 或 mismatch 的 Codex id 不得进入 pane binding、SessionIr 或 resume command。"
+
+  complete_remote_session_scan:
+    id: SESSION-REMOTE-SCAN-ATOMIC-03
+    capability: "complete-or-error remote CLI-agent scan"
+    invariant: >-
+      remote scan Success 中每条 record 都是 required outcome；任何 malformed record 使整个 scan 失败并保留旧 cache，
+      禁止 filter_map 静默提交部分列表。
+    enforcement_layers:
+      decoder: "record decoding 返回 Result<Vec<_>> 并保留精确字段错误。"
+      cache: "只有完整 Success 才替换 authority cache。"
+    failure_rule: "缺失 agent/source/id 等 required field 时返回 typed error。"
+
+  remote_native_append:
+    id: SESSION-REMOTE-APPEND-04
+    capability: "owning-host atomic append for native sessions"
+    invariant: >-
+      remote native Append 必须由 owning host 以 O_APPEND/server-side append 原子执行；禁止 client read-modify-truncate，
+      并发 provider 写入不得丢失。
+    enforcement_layers:
+      protocol: "append 是独立 typed operation，不复用 whole-file write。"
+      executor: "helper 打开一次并 append_all，不读取或重写既有 bytes。"
+    failure_rule: "helper 不支持原子 append 时显式失败，禁止降级为 read+rewrite。"
+
+  single_native_write_plan:
+    id: SESSION-NATIVE-WRITER-PLAN-05
+    capability: "single deterministic native session write plan"
+    invariant: >-
+      Codex 与 Claude 每种格式只能有一个 deterministic write-plan builder；local/remote 仅 executor 不同，
+      version、registry enrichment、backup、验证与 rollback 语义不得漂移。
+    enforcement_layers:
+      planner: "local 与 remote 都先生成同一 NativeSessionWritePlan。"
+      executor: "本地和远程 executor 对同一 operation 集执行并报告逐项结果。"
+    failure_rule: "禁止保留直接本地 writer 与 remote planner 两套格式生成器。"
+
+  canonical_action_authority:
+    id: SESSION-ACTION-AUTHORITY-CANONICAL-21
+    capability: "canonical Environment authority on every Session Navigator action"
+    invariant: >-
+      WorkspaceSessionActionTarget 在创建时必须把缺失的 snapshot authority 规范化为 TerminalBootstrap canonical authority；
+      action matching、rename、pin、delete、resume 与 context menu 只比较显式 authority，禁止在 Navigator 高层把 None 再解释为 local。
+    enforcement_layers:
+      target: "WorkspaceSessionActionTarget.environment_authority_key 是非 Optional canonical authority。"
+      projection: "所有 row/action target 通过同一 constructor 从 snapshot authority 生成 canonical authority。"
+      matching: "workspace_session_matches_action_target 只调用共享 session_authority_matches，不包含 local/runtime/legacy 分支。"
+    failure_rule: "authority-less action、None-as-local compatibility 或 id-only wildcard matching 必须静态失败。"
+
+environment_runtime_contracts:
+  authority_capability_restore_dispatch:
+    id: ENV-RUNTIME-RESTORE-DISPATCH-01
+    capability: "typed authority restore backend dispatch"
+    invariant: >-
+      restore backend 只能由 typed authority capability 决定；只有 TerminalBootstrap 可创建 current-app terminal，
+      SavedSsh/Runtime 缺 materializer 时保留 virtual row 并显式失败。
+    failure_rule: "runtime_connection_ref 只能作为 transport enrichment，禁止充当 backend discriminator。"
+
+  pane_owned_intent_retry:
+    id: ENV-RUNTIME-INTENT-RETRY-02
+    capability: "retryable pane-owned runtime restore intent"
+    invariant: >-
+      reconnect/helper/bootstrap failure 必须保留 pane-owned restore intent、startup command、selection 与 durable identity；
+      只有 pane/tab 明确取消或成功 commit 才能消费 intent。
+    failure_rule: "authority transport failure 禁止 authority-wide drain pending intents。"
+
+  all_close_path_retiring_lease:
+    id: ENV-RUNTIME-RETIRING-LEASE-03
+    capability: "retiring durable ownership on every close path"
+    invariant: >-
+      window、tab、pane、hidden/undoable close 都必须在 terminal model exit 前持有 app-wide Retiring lease；
+      undo-retained close 不得 shutdown PTY，restore 必须按 durable identity + terminal entity 取消 lease；
+      permanent close 或 undo discard/expiry 必须显式 shutdown PTY，并继续持有 lease 直到 model exit。
+    failure_rule: "UI 容器 detach 不等于 process ownership 释放；保留 undo 的 detach 也不等于 permanent process shutdown。"
+
+  single_environment_delivery_home:
+    id: ENV-ENTRY-DELIVERY-HOME-04
+    capability: "single EnvironmentBackend delivery home"
+    invariant: >-
+      plain terminal、restored conversation、fork/new-tab 等行为层只构造 intent 并调用 EnvironmentBackend；
+      local 同步 spawn 与 runtime 异步 materialize 的差异只能存在于 backend deliver 层。
+    failure_rule: "调用点禁止自行 if local/remote 或直接调用 runtime 专用 open 入口。"
+
+
+  shared_navigation_container_activation:
+    id: ENV-NAVIGATION-BACKEND-22
+    capability: "shared EnvironmentBackend navigation-container activation"
+    invariant: >-
+      delete 后重选、SplitPane conversation restore 与其他需要激活目标 Environment 的行为层只提交 canonical authority/snapshot；
+      TerminalBootstrap 创建或激活 current-app container、Runtime 激活或重建 inert placeholder 的差异只存在于 EnvironmentBackend；
+      Session Navigator historical Conversation 激活不得指定 NewTab override，必须复用共享 conversation layout preference。
+    enforcement_layers:
+      snapshot: "产品 action 只调用 EnvironmentTable.entry_target_snapshot，禁止自行按 local/runtime 重建 EnvironmentSnapshot。"
+      activation: "EnvironmentBackend.activate_navigation_container 是唯一 backend 分叉；Navigator 和 conversation restore 不判断 uses_terminal_bootstrap。"
+      split_delivery: "SplitPane restore 在 local/runtime 都复用目标 Environment tab，只新增一个 pane；runtime connecting carrier 只能排队 ForkedConversation，不得生成 PlainTerminal intent。"
+      layout_selection: "Session Navigator historical Conversation 激活把 restore_layout 留空，由 restore_or_navigate_to_conversation 读取用户 preference；禁止调用方硬编码 NewTab。"
+      side_effects: "激活 navigation container 不隐式排队 replacement runtime terminal；后续 entry delivery 仍由显式 intent 决定。"
+    failure_rule: "Navigator delete hook、conversation restore 或其他行为层出现 local/runtime activation branch，或 Navigator Conversation 入口硬编码 NewTab 时静态失败。"
+
+  typed_authority_construction:
+    id: ENV-AUTHORITY-CONSTRUCTION-05
+    capability: "single typed Environment authority construction"
+    invariant: >-
+      authority parse 与 construction 都只能由 environment_authority.rs 的 typed API 提供；SFTP/runtime lookup 禁止手拼 ssh:{node_id}。
+    failure_rule: "raw prefix format/parse 出现在共享 home 外时静态门禁失败。"
+
+  explicit_failed_environment_reselection:
+    id: ENV-RUNTIME-ERROR-RESELECT-06
+    capability: "explicit retry when a failed runtime Environment is reselected"
+    invariant: >-
+      runtime Environment 进入 Error 后不得由后台 render、restore 或 browser unavailable 事件隐式重试；
+      但用户通过 Environment Strip 的 SwitchEnvironment、键盘标签切换或 Session Navigator 显式重新激活该 Environment 时，
+      必须把这次 activation 解释为 reconnect intent，推进同一 Environment transport owner 的新 connection generation，
+      不得替换 owner SessionId 或丢失其 terminal alias graph。
+    enforcement_layers:
+      restore_boundary: "EnvironmentTable::from_snapshot 必须保留持久化 Error；仅 Connected/Connecting/Installing 的无 transport 冷恢复降为 Dormant。"
+      activation_gateway: "所有用户可见 tab/Environment 导航统一调用 activate_tab_for_user_visible_navigation；SwitchEnvironment 禁止手写 queue/ensure/open 序列。"
+      activation_boundary: "prepare_active_environment_after_visible_tab_activation 在 Error 状态调用唯一 reconnect_environment_runtime_authority，不走普通 implicit ensure。"
+      implicit_boundary: "ensure_current_environment_runtime_transport_if_needed 继续拒绝 Error 的后台自动重试，避免失败循环。"
+      state_machine: "同一 retained Environment 的 reconnect 必须保留 environment-owned SessionId，只推进 heartbeat/preparation/transport generation 并忽略旧 generation 的晚到结果；只有显式 teardown 后的新 Environment owner 才能分配新 SessionId。"
+    failure_rule: "UI 若提示重新选中即可恢复，则 Local→failed remote 后仍停留 Error 属于状态机破坏；禁止要求重启 App 或删除持久化状态。"
+
+  stable_environment_runtime_reconnect_owner:
+    id: ENV-RUNTIME-RECONNECT-OWNER-54
+    capability: "stable Environment transport owner across reconnect"
+    invariant: >-
+      retained Environment 的 synthetic SessionId 是 transport、terminal aliases、execution contexts、host binding 与 pending operations 的共同 owner identity；
+      heartbeat、显式重新激活、client unavailable 和 transport disconnect 触发 reconnect 时必须保留该 identity。
+      reconnect 只替换 transport resources 与 connection generation，不得 deregister owner、删除 alias registry 或分配 replacement owner。
+    enforcement_layers:
+      owner: "EnvironmentTable.synthetic_session_id 在 retained reconnect 全程保持不变；只有显式 Environment teardown 才清除。"
+      transport: "RemoteServerManager 在同一 canonical owner 下重启/重连 transport，并保留 SessionExecutionRegistry owner + aliases。"
+      projection: "Workspace、Project Explorer、FileModel 与 Navigator 始终携带原 exact SessionId；高层禁止猜测 newest/active owner。"
+      cleanup: "显式 disconnect 才原子删除 owner、全部 aliases、execution contexts、host index 与 pending operations。"
+    failure_rule: "reconnect 中调用 owner deregistration、clear_runtime_handle 后重新分配 SessionId，或让旧 live alias 失去 client/host resolution，均为模型破坏。"
+
+  typed_environment_runtime_heartbeat:
+    id: ENV-RUNTIME-HEARTBEAT-LIVENESS-55
+    capability: "transport liveness is distinct from target command execution"
+    invariant: >-
+      Environment heartbeat 只能根据 transport/client liveness 或明确的 disconnected protocol error 驱动 reconnect；
+      target shell command 的非零退出、cwd 删除、权限错误、SESSION_NOT_FOUND 与其他 execution-domain failure 必须保持 typed semantics，
+      不得被字符串化后统一解释为 transport disconnect。
+    enforcement_layers:
+      protocol: "heartbeat 结果必须保留 transport failure 与 RunCommand response failure 的类型边界。"
+      lifecycle: "只有 disconnected/closed transport 进入 reconnect；execution failure 保留 owner、aliases、client、host 与 canonical projection。"
+      root_recovery: "cwd/root 不存在时由 root/path lifecycle 显式处理，不得通过 replacement transport owner 伪装恢复。"
+    failure_rule: "以 Result<_, String> 合并 transport 与 command errors 后在任意 Err 上 reconnect，或用 retry/debounce 掩盖 cwd failure，必须静态失败。"
+
+sftp_file_mutation_contracts:
+  recursive_delete_identity:
+    id: SFTP-RECURSIVE-DELETE-IDENTITY-01
+    capability: "inode-bound recursive SFTP delete"
+    invariant: >-
+      destructive recursive delete 必须携带并重验选择时 lexical kind/opaque identity，递归过程固定同一 directory fd/inode；
+      directory 被替换为 symlink 时不得遍历 target。
+    failure_rule: "确认与执行间 identity 变化时返回 conflict。"
+
+  transfer_handle:
+    id: SFTP-TRANSFER-HANDLE-02
+    capability: "opaque inode-pinned chunk transfer handle"
+    invariant: >-
+      begin-transfer 首次 actual-open 后返回 opaque handle；后续 chunk 仅操作同一 fd/object，禁止每 chunk 按 path 重开。
+    failure_rule: "unknown/expired handle 或 identity 变化时终止 transfer。"
+
+  sftp_actual_open_nofollow:
+    id: SFTP-ACTUAL-OPEN-NOFOLLOW-03
+    capability: "shared nofollow actual-open for SFTP transfers"
+    invariant: >-
+      SFTP 与 Workspace 共用逐级 nofollow source/destination opener；planner 检查不能替代 execution actual-open，
+      source swap 与 destination ancestor symlink 必须 fail-closed。
+    failure_rule: "任一级 symlink 或非 regular source 都拒绝。"
+
+  atomic_operation_staging:
+    id: SFTP-ATOMIC-STAGING-04
+    capability: "operation-owned atomic SFTP staging"
+    invariant: >-
+      upload/download 使用同目录 O_EXCL 唯一 staging 并在完成后原子 promotion；失败保留旧 final，cleanup 只能删除本 operation identity。
+      Unix identity 来自 dev/inode；Windows identity 必须来自稳定 Win32 file handle 的 volume serial/file index，
+      commit/drop 前以 OPEN_REPARSE_POINT 重开 lexical path 并拒绝 identity 变化，禁止依赖 unstable std MetadataExt 或 path-only 检查。
+    failure_rule: "禁止直接 truncate final、复用固定 .sftp_partial 文件名、用零 identity 或忽略 expected identity。"
+
+  exact_promotion_commit:
+    id: WORKSPACE-PROMOTION-COMMIT-05
+    capability: "verified exact Workspace promotion commit"
+    invariant: >-
+      promotion success 必须证明每个 staging 被消费到精确 final；no-clobber 冲突返回 typed error，多文件 batch 返回准确 committed/failed 集。
+    failure_rule: "mv -n skip、部分提交或未知结果不得报告整体成功。"
+
+  exact_remote_rename:
+    id: REMOTE-RENAME-EXACT-TARGET-06
+    capability: "exact-target remote rename"
+    invariant: >-
+      remote rename destination 已存在时必须 typed conflict，禁止 mv 将 source 隐式移入目录；UI 只在 backend 返回实际 committed path 后更新缓存。
+    failure_rule: "backend committed path 不等于 requested target 时操作失败并刷新。"
+
+  listing_generation_ownership:
+    id: SFTP-LISTING-GENERATION-07
+    capability: "generation-owned SFTP directory listing"
+    invariant: >-
+      listing completion 必须绑定 connection、lexical path 与 generation；过期 completion 不得更新 rows、selection、loading 或 error 状态。
+    failure_rule: "导航后返回的旧请求结果一律丢弃且无状态副作用。"
+
+engineering_guard_contracts:
+  parity_presubmit_ci:
+    id: LR-PARITY-PRESUBMIT-CI-01
+    capability: "mandatory local/remote parity merge gate"
+    invariant: >-
+      SPEC、matrix、tracker、静态检查和 cargo check 必须接入 PR/push CI 必经路径，
+      不能依赖开发者或 AI 手工记得运行本地 presubmit。
+    required_steps:
+      - "cargo fmt --all -- --check"
+      - "./script/check_local_remote_parity"
+      - "cargo check --locked"
+    failure_rule: "任一步失败时 CI job 失败；release workflow 不能替代日常 parity gate。"
+
+  tracker_matrix_referential_integrity:
+    id: LR-PARITY-TRACKER-MATRIX-REF-01
+    capability: "tracker to capability-matrix referential integrity"
+    invariant: >-
+      tracker 中每个 capability_matrix 引用必须精确对应 capability matrix 的唯一 capability 行；
+      capability matrix 与 inconsistencies tracking CSV 都必须保持固定列数并由标准 CSV parser 可读；
+      禁止 tracker 已记录而 matrix 漏项、拼写漂移、重复 capability 或未引用逗号破坏 tracking row。
+    enforcement_layers:
+      static_check: "script/check_local_remote_parity 枚举全部 tracker 引用并与 CSV capability 列双向核对缺失与重复，同时用标准 CSV parser 检查 capability/inconsistencies 两份 tracking CSV 的固定列数。"
+      focused_test: "Rust contract test 使用仓库内嵌 tracker/matrix 复核同一引用完整性，避免 shell 门禁自身回归。"
+    failure_rule: "任一引用不存在或 capability 重复时 presubmit/CI 失败，禁止把 tracking list 当作无约束备注。"
+
+session_bridge_contracts:
+  conversation_source_environment_independence:
+    id: SESSION-BRIDGE-CONVERSATION-SOURCE-23
+    capability: "conversation SessionBridge cold-read independent of execution Environment"
+    invariant: >-
+      Ashide conversation transcript 的持久化权威始终是当前 app SQLite；source Environment authority
+      只描述该会话的执行/后续 fork 目标上下文，不得改变 Conversation source 的读取 backend。
+      local 与 runtime authority 必须复用同一个 current-app Conversation store reader；
+      Conversation 不得被强行塞入只服务于 CLI-agent installation roots 的 SessionBridgeEnvironment。
+    enforcement_layers:
+      source_owner: "Conversation ID 由 current-app Ashide SQLite store 解释；Environment authority 不是其 source locator。"
+      backend: "read_conversation_session_bridge_blocking 是唯一 cold-read 边界；SessionBridgeEnvironment 只处理需要 target CLI-agent roots 的 source/read/write。"
+      action: "show_session_bridge_edit_dialog 只保留 live-memory fast path；cold read 调用共享 current-app store reader，禁止内联 SQLite 或按 Environment 分支。Fork 到 Ashide 完成后必须把 action 已持有的 source Environment authority 显式传给共享 conversation restore 入口，禁止依赖新 Conversation 自带 Environment、当前焦点或再次扫描推断。"
+      async_boundary: "SQLite cold read 在 spawn_blocking 中执行，UI action 不同步阻塞数据库。"
+    failure_rule: "runtime authority 不能使已持久化 Ashide conversation 的编辑入口报 unavailable；远程 CLI source Fork 到 current-app Ashide store 后必须在原 source Environment 中交付新 Conversation，且不能建立第二个 remote conversation store。"
+
+ux_matrix:
+  - id: APP-SINGLE-INSTANCE-SIDE-EFFECT-ORDER-03
+    scenarios:
+      - "owner 正常运行时第二次启动：intent 转发并退出，owner 当前日志文件不被截断或轮转。"
+      - "第二启动 IPC 失败：进程显式报错退出，仍不得初始化共享日志或 SQLite。"
+      - "无 owner：首进程 claim 成功后才初始化日志、资源限制、TLS 与 SQLite。"
+      - "运行态诊断：第二启动前后的 owner 日志 fd 仍指向当前活动日志链。"
+    required_tests:
+      - mac_single_instance_claim_precedes_shared_logging_initialization
+
+  - id: APP-SINGLE-INSTANCE-MAC-01
+    scenarios:
+      - "从 Finder/Dock 重复打开 Ashide：只激活既有进程。"
+      - "直接执行当前 .app/Contents/MacOS/ashide：启动 intent 转发后第二进程退出，Dock 仍只有一个图标。"
+      - "script/run 构建的 AshideDev.app 直接执行两次：第二进程同样转发退出；不得因未启用 release_bundle feature 绕过 owner lock。"
+      - "同一 AshideDev.app 的 owner 以 WARP_DATA_PROFILE=codex-dev 启动、第二次无该变量直接执行 bundle binary：仍命中同一 lock/socket 并转发退出。"
+      - "带目录或 ashide:// URL 启动：既有进程接收并处理 intent。"
+      - "owner 已持锁但 IPC server 尚未 ready：第二进程有界重试，不得打开第二 GUI。"
+      - "owner 崩溃后 lock 自动释放；下一次启动可成为新 owner。"
+    required_tests:
+      - mac_single_instance_contract_is_fail_closed
+      - desktop_singleton_is_not_release_feature_gated
+      - desktop_singleton_ignores_data_profile_namespace
+      - release_bundle_declares_multiple_instances_prohibited
+
+  - id: APP-SINGLE-INSTANCE-IPC-02
+    scenarios:
+      - "owner listener 使用 nonblocking accept：accepted stream 仍完整读取首帧，不因 WouldBlock 提前关闭。"
+      - "第二启动携带目录 URL：owner 完整解帧并 ACK，第二进程以 0 退出。"
+      - "payload 超过协议上限：发送端或接收端显式拒绝，不分配无界内存。"
+      - "client 只发送部分 frame 后停顿：server 在 timeout 后拒绝该连接，继续接受后续健康启动 intent。"
+      - "JSON 非法或 UI queue 已关闭：server 返回 REJECTED 并记录具体协议阶段。"
+    required_tests:
+      - startup_ipc_nonblocking_listener_round_trips_one_framed_intent
+      - startup_ipc_rejects_oversized_frame
+
+  - id: LR-FILE-TRANSFER-SYMLINK-01
+    scenarios:
+      - "SFTP Browser 下载 symlink-to-file：显示不支持错误，不生成下载任务。"
+      - "SFTP Browser 上传本地 symlink：显示不支持错误，不读取 target 内容。"
+      - "上传覆盖远端 symlink-to-file：失败且 target 内容保持不变。"
+      - "规划后把 upload source 替换成 symlink：actual open 失败，不读取 target。"
+      - "download destination 或任一既有 ancestor 是 symlink：actual open 失败，不写入 target tree。"
+      - "conflict scan 后把 final path 替换成 symlink：promotion 再检查并失败。"
+      - "直接调用 daemon ReadFileChunk/WriteFileChunk 处理 symlink：返回显式 error result。"
+      - "symlink-to-directory 仍可导航；broken symlink 仍可选中、重命名、删除。"
+    required_tests:
+      - sftp_transfer_policy_rejects_symlink_entries
+      - sftp_backend_rejects_symlink_upload_and_download
+      - file_chunk_rpc_rejects_symlink_instead_of_reading_or_overwriting_target
+      - download_save_as_revalidates_stable_path_after_listing_reorder
+      - workspace_upload_execution_rejects_source_symlink_after_planning
+      - workspace_download_rejects_symlink_destination
+      - workspace_upload_promotion_rechecks_remote_symlink
+
+  - id: LR-FILE-TREE-ATOMIC-01
+    scenarios:
+      - "root listing 成功但任一 expanded child 失败：旧 rows 与 expanded set 完整保留。"
+      - "全部 root/child listing 成功：一次性提交新的完整 snapshot。"
+      - "失败 child 不得被解释为目录消失，也不得生成缺 subtree 的 Success。"
+    required_tests:
+      - file_browser_tree_reload_failure_preserves_previous_snapshot
+
+  - id: LR-REMOTE-REQUIRED-RESULT-01
+    scenarios:
+      - "WriteFile/RenameFile 返回空 result：操作显示失败，禁止假报成功。"
+      - "SaveBuffer 返回空 result：编辑器不得显示已保存。"
+      - "ResolvePath 返回空 result：不得伪装成路径不存在。"
+      - "CLI-agent mutation 返回空 result：不得假报删除完成。"
+      - "任意未来 oneof result response 未被 validator 覆盖：static check/contract test 失败。"
+    required_tests:
+      - required_result_response_names_match_proto_contract
+      - empty_required_result_is_rejected_at_transport_boundary
+      - write_and_rename_empty_response_are_not_false_success
+
+  - id: LR-REMOTE-RESOLVE-PATH-RESULT-02
+    scenarios:
+      - "目标不存在：helper 返回 typed NotFound，client 映射 None。"
+      - "目标 permission/I/O error：client 返回 Err，upload conflict scan 中止。"
+      - "result 缺失：transport 返回 ClientError::UnexpectedResponse。"
+      - "symlink path 存在：返回 Success(kind=Symlink)，不得映射 NotFound。"
+    required_tests:
+      - resolve_path_not_found_is_distinct_from_remote_error
+
+  - id: LR-PARITY-PRESUBMIT-CI-01
+    scenarios:
+      - "PR/push 修改本地/远程实现：CI 强制运行 format、parity static check、cargo check --locked。"
+      - "静态门禁失败：CI 失败，不能合并。"
+      - "仅 release workflow 存在但日常 CI 缺失：contract test 失败。"
+    required_tests:
+      - ci_workflow_runs_local_remote_parity_gate
+
+  - id: LR-PARITY-TRACKER-MATRIX-REF-01
+    scenarios:
+      - "tracker 新增 capability_matrix 引用但 CSV 漏行：static check 与 focused test 同时失败。"
+      - "matrix 出现重复 capability：门禁失败，禁止两个状态来源竞争。"
+      - "tracker 与 matrix 引用一一对应：门禁通过，状态仍分别按 fixed/verified 语义维护。"
+    required_tests:
+      - tracker_capability_matrix_references_are_complete
+
+  - id: LR-FILE-LIST-COMPLETE-01
+    scenarios:
+      - "目录中任一 read_dir entry 读取失败：远程返回显式 listing error，不显示静默缺项的成功列表。"
+      - "普通文件 lexical metadata 读取失败：listing 整体失败，不生成 kind/size 错误的 row。"
+      - "broken symlink：保留 link row，kind=Symlink、target_kind=Missing。"
+      - "symlink-to-file 的 size/modified 来自 lexical inode，不得偷换为 target metadata。"
+      - "完整 listing 成功后按 name 稳定排序。"
+      - "Terminal File Browser 任一 lexical symlink_metadata 失败：整体返回 listing error，不静默缺 row。"
+    required_tests:
+      - list_directory_entry_error_is_not_silently_dropped
+      - list_directory_broken_symlink_preserves_lexical_row
+      - list_directory_returns_sorted_metadata
+      - list_directory_modified_time_error_is_not_silently_dropped
+      - terminal_directory_listing_metadata_error_is_not_silently_dropped
+      - terminal_directory_listing_modified_time_error_is_not_silently_dropped
+      - terminal_directory_listing_is_sorted_by_name
+
+  - id: LR-FILE-SYMLINK-RENAME-01
+    scenarios:
+      - "broken symlink 重命名：旧 row 消失、新 lexical row 立即出现且 target_kind=Missing，无需重扫。"
+      - "新 broken symlink 路径收到 RenameMode::Any：归类为 added，不得因 target 不存在而归类为 deleted。"
+      - "旧路径收到 RenameMode::Any 且 lexical inode 已不存在：归类为 deleted。"
+      - "重命名后的 broken symlink 仍可选中、再次重命名和删除。"
+      - "directory symlink 重命名后，children 继续显示在新 lexical link namespace 下。"
+      - "symlink_metadata 返回非 NotFound 错误：该批显式失败，不产生 false delete。"
+    required_tests:
+      - rename_any_classifies_broken_symlink_destination_as_added
+      - rename_any_classifies_missing_source_as_deleted
+      - broken_symlink_rename_remains_visible_without_rescan
+
+  - id: SESSION-SOURCE-AUTHORITY-01
+    scenarios:
+      - "encoded source authority 与 snapshot authority 不一致：read/delete 均 fail-closed。"
+      - "同路径存在于两个 remote authority：mutation 只到 locator 所属 authority。"
+    required_tests: [remote_cli_agent_source_id_rejects_authority_mismatch, remote_cli_agent_source_delete_never_crosses_authority]
+
+  - id: SESSION-CODEX-CANONICAL-INGRESS-02
+    scenarios:
+      - "plugin/OSC 上报 msg_ id：model mutation 前拒绝。"
+      - "expected UUID 与 transcript session_meta UUID 不同：reader 返回 mismatch。"
+    required_tests: [codex_plugin_event_rejects_noncanonical_session_id_before_model_commit, codex_reader_rejects_expected_vs_transcript_session_id_mismatch]
+
+  - id: SESSION-REMOTE-SCAN-ATOMIC-03
+    scenarios:
+      - "一条 malformed remote record：整个 scan Error 且旧 cache 保留。"
+    required_tests: [environment_cli_agent_scan_rejects_malformed_record, remote_scan_malformed_record_preserves_cached_rows]
+
+  - id: SESSION-REMOTE-APPEND-04
+    scenarios:
+      - "provider 并发写 history 时 SessionBridge append 不覆盖已有或并发 bytes。"
+    required_tests: [remote_native_append_preserves_concurrent_provider_write, remote_native_append_does_not_rewrite_existing_file]
+
+  - id: SESSION-NATIVE-WRITER-PLAN-05
+    scenarios:
+      - "同一 IR 与同一 target context 的 local/remote plan 完全等价；host executor 只消费 plan 声明的 operation/backup paths。"
+    required_tests: [local_and_remote_native_write_plans_are_equivalent, remote_native_write_executor_consumes_only_declared_backup_paths]
+
+  - id: ENV-RUNTIME-RESTORE-DISPATCH-01
+    scenarios:
+      - "custom/container/WSL runtime 无 connection_ref：不得落入本地 terminal bootstrap。"
+    required_tests: [test_custom_runtime_restore_never_falls_back_to_terminal_bootstrap, test_virtual_session_restore_dispatches_by_authority_capability_not_connection_ref]
+
+  - id: ENV-RUNTIME-INTENT-RETRY-02
+    scenarios:
+      - "stale reconnect/bootstrap 失败：placeholder 和 pane-owned restore intent 可重试。"
+    required_tests: [test_stale_client_reconnect_failure_preserves_pane_owned_restore_intent, test_runtime_bootstrap_failure_preserves_all_authority_pending_intents]
+
+  - id: ENV-RUNTIME-RETIRING-LEASE-03
+    scenarios:
+      - "普通 permanent tab close：shutdown PTY，且 PTY exit 前仍禁止同 UUID resume。"
+      - "hidden undo close：保留 PTY 与 Retiring lease；restore 取消 lease，discard/expiry 才 shutdown。"
+    required_tests: [test_add_and_close_session, test_closed_nonfinal_tab_retains_durable_owner_until_terminal_exit, test_restored_closed_tab_returns_retiring_owner_to_live, test_discarded_closed_tab_shuts_down_retained_terminal, test_hidden_closed_pane_reserves_durable_owner_while_undoable, test_discarded_hidden_pane_shuts_down_retained_terminal, test_closed_window_tracks_every_duplicate_durable_terminal_owner_until_exit, test_transferred_tab_placeholder_is_permanently_shutdown_on_adoption]
+
+  - id: ENV-ENTRY-DELIVERY-HOME-04
+    scenarios:
+      - "plain terminal 与 restored conversation 的 local/runtime 路径调用同一 backend deliver。"
+    required_tests: [test_plain_terminal_entry_uses_shared_environment_backend_for_local_and_runtime, test_restored_conversation_new_tab_uses_shared_fork_delivery]
+
+  - id: ENV-AUTHORITY-CONSTRUCTION-05
+    scenarios:
+      - "saved SSH node runtime lookup 使用 typed constructor 且 connected-without-client 返回 None。"
+    required_tests: [saved_ssh_node_runtime_lookup_uses_shared_authority_identity, sftp_runtime_lookup_rejects_connected_target_without_client]
+
+  - id: ENV-RUNTIME-ERROR-RESELECT-06
+    scenarios:
+      - "SSH 首次连接失败进入 Error；网络恢复后用户切到 Local 再重新激活该 Environment：保留同一 runtime owner SessionId 并进入 Connecting，而不是永久停留 Error或替换 alias owner。"
+      - "仅发生 background render/restore/browser unavailable：Error 不自动循环重试。"
+      - "冷启动从 tab snapshot 恢复 Error：EnvironmentTable 仍为 Error，browser unavailable 不创建 transport generation。"
+    required_tests: [restored_runtime_error_snapshot_remains_error_until_explicit_reconnect, test_restored_error_environment_browser_unavailable_stays_error, test_restored_error_window_snapshot_does_not_implicitly_connect, test_reselect_failed_environment_runtime_tab_explicitly_reconnects, test_switch_environment_action_reconnects_failed_runtime, test_error_environment_runtime_does_not_implicitly_retry]
+
+  - id: ENV-RUNTIME-RECONNECT-OWNER-54
+    scenarios:
+      - "一个 retained Runtime Environment 拥有两个 bootstrapped terminal aliases；heartbeat 或显式 retry 后 owner SessionId 不变，两个 aliases 均继续解析同一 client/host。"
+      - "reconnect failure 与 late callback 不删除 canonical owner/alias graph；成功后 Project Explorer root operations 自动恢复。"
+      - "同 authority 的第二个独立 Environment owner 不得被合并或接管第一个 owner 的 aliases。"
+    required_tests: [test_environment_runtime_reconnect_preserves_owner_session_id, reconnect_preserves_owner_alias_execution_contexts, test_environment_runtime_reconnect_preserves_project_explorer_session_binding]
+
+  - id: ENV-RUNTIME-HEARTBEAT-LIVENESS-55
+    scenarios:
+      - "heartbeat target cwd 被删除，RunCommand 返回 execution failure：不 reconnect、不替换 owner、不清除 aliases/client/host。"
+      - "transport request 明确断开或 reader EOF：同一 owner 进入 reconnect generation。"
+      - "SESSION_NOT_FOUND 表示 execution carrier 缺失，保持 pending/显式失败语义，不得伪装成 transport reconnect。"
+    required_tests: [test_environment_runtime_heartbeat_execution_failure_does_not_reconnect, test_environment_runtime_heartbeat_transport_failure_reconnects_same_owner]
+
+  - id: ENV-RUNTIME-RECONNECT-REENTRY-56
+    scenarios:
+      - "显式 same-owner transport restart 释放旧 client/host 时，disconnect event 必须携带 typed cause；Workspace 只清理旧 binding，不得把该事件重新解释成第二次 reconnect。"
+      - "RemoteServerManager 已处于 Connecting/Initializing/Reconnecting/Connected 但 client 暂不可用时，Project Explorer、Session scan、Fork、Pin、terminal delivery 与 heartbeat 等自动调用方必须等待当前 generation，不得 bump generation 或重启 ControlMaster。"
+      - "只有用户显式 retry/reselect，或 manager 已进入 terminal Disconnected 且 retained policy 要求恢复时，才允许进入 force restart primitive。"
+    required_tests: [test_environment_runtime_explicit_transport_restart_does_not_reenter_reconnect, test_environment_runtime_automatic_reconnect_waits_for_active_generation, restart_transport_disconnect_event_has_typed_cause]
+
+  - id: TERMINAL-SESSION-BOOTSTRAP-QUERY-07
+    scenarios:
+      - "InitShell 已暴露 active session ID、但 Sessions 尚在 pending/bootstrapping：render-time launch-data 查询返回 unavailable，不记录缺失会话告警。"
+      - "session lifecycle 诊断只发生在初始化/完成事件边界；高频 UI getter 不得把正常异步间隙放大成重复告警。"
+    required_tests: [test_pending_session_launch_data_query_treats_bootstrap_as_unavailable]
+
+  - id: ENV-NAVIGATION-CONTAINER-MATERIALIZATION-08
+    scenarios:
+      - "Environment runtime registry 仍存在、但 UI tab 丢失：切换只重建并选中导航容器，不得把容器恢复解释为新建 terminal intent。"
+      - "删除某 Environment 最后一个 live session：可重建/保留其导航 placeholder，但不得自动生成替代终端。"
+      - "用户显式激活一个原本已存在的 dormant placeholder：仍可按产品入口语义排队默认 terminal intent。"
+    required_tests: [test_switch_to_runtime_registry_environment_without_tab_does_not_queue_terminal, test_switch_to_existing_environment_placeholder_queues_terminal_intent, test_deleting_only_live_environment_session_keeps_environment_selected]
+
+  - id: WORKFLOW-PATH-GENERATION-09
+    scenarios:
+      - "命令完成后 CWD projection 晚于 Workflow browser 打开：browser 必须在 active session path 落地后自动刷新到新 repo，而不是永久保留打开瞬间的旧路径快照。"
+      - "path A 加载晚于 path B：仅 path B 的最新 generation 可提交 workflows；path A 的迟到结果无状态副作用。"
+      - "切到无 current-app path 的环境：清空 project workflows，并使此前所有本地 path generation 失效。"
+    required_tests: [project_workflow_load_state_rejects_stale_path_and_generation, test_loading_project_workflows]
+
+  - id: SFTP-RECURSIVE-DELETE-IDENTITY-01
+    scenarios:
+      - "确认删除后 directory 被换为 symlink：拒绝且 target 内容不变。"
+    required_tests: [sftp_recursive_delete_rejects_directory_replaced_by_symlink_before_confirmation]
+
+  - id: SFTP-TRANSFER-HANDLE-02
+    scenarios:
+      - "chunk 间 path 被替换：read/write 仍只操作 begin-transfer 固定 inode。"
+    required_tests: [read_chunk_transfer_pins_inode_across_path_replacement, write_chunk_transfer_never_splices_inodes]
+
+  - id: SFTP-ACTUAL-OPEN-NOFOLLOW-03
+    scenarios:
+      - "SFTP source 检查后换 symlink 或 destination ancestor 是 symlink：actual-open 拒绝。"
+    required_tests: [sftp_upload_actual_open_rejects_source_symlink_swap, sftp_download_rejects_symlink_destination_ancestor]
+
+  - id: SFTP-ATOMIC-STAGING-04
+    scenarios:
+      - "transfer 失败保留旧 destination 与用户已有 .sftp_partial sibling。"
+    required_tests: [sftp_upload_failure_preserves_destination, sftp_download_preserves_preexisting_partial_sibling]
+
+  - id: WORKSPACE-PROMOTION-COMMIT-05
+    scenarios:
+      - "no-clobber race 不得假成功；多文件后段失败报告精确 partial commit。"
+    required_tests: [workspace_upload_no_clobber_race_is_not_success, workspace_upload_reports_partial_commit]
+
+  - id: REMOTE-RENAME-EXACT-TARGET-06
+    scenarios:
+      - "rename 到 existing directory：返回 conflict 而非移动到目录内部。"
+    required_tests: [workspace_remote_rename_to_existing_directory_does_not_move_inside]
+
+  - id: SFTP-LISTING-GENERATION-07
+    scenarios:
+      - "旧目录 refresh 晚返回：不得覆盖新目录 snapshot。"
+    required_tests: [sftp_refresh_out_of_order_preserves_latest_snapshot]
+
+  - id: APP-SINGLE-INSTANCE-CROSS-PLATFORM-04
+    scenarios:
+      - "Linux/FreeBSD owner 存在且 IPC 失败：第二进程显式退出且不初始化日志/SQLite。"
+      - "Windows owner 存在且 forwarding 失败：第二进程显式退出且不创建第二窗口。"
+      - "各桌面 OS 无 owner：claim 成功后才进入 init_common。"
+    required_tests: [desktop_singleton_arbitration_precedes_shared_initialization, desktop_singleton_errors_are_fail_closed]
+
+  - id: RELEASE-SETTINGS-SCHEMA-CHANNEL-01
+    scenarios:
+      - "oss bundle 生成 settings schema：只启用 RELEASE_FLAGS，与 stable 完全一致。"
+      - "local bundle 生成 settings schema：与 dev 使用相同的 release/preview/dogfood/debug flags。"
+      - "受支持 channel 必须显式匹配；禁止 oss 静默落入 unknown-channel 的 dev fallback。"
+    required_tests: [oss_settings_schema_uses_release_flags, local_settings_schema_uses_dev_flags]
+
+  - id: RELEASE-BUNDLE-OFFLINE-METADATA-02
+    scenarios:
+      - "完整 Cargo.lock graph 尚未获取：在显式 cargo fetch --locked 阶段失败。"
+      - "binary 已构建：cargo-bundle 在 offline + skip-build 下只装配现有产物，不再访问 registry。"
+    required_tests: [release_builds_are_reproducibly_locked]
+
+  - id: RELEASE-MACOS-DMG-STATE-03
+    scenarios:
+      - "Finder 尚未提交 layout 或 .DS_Store 尚未变化/稳定：继续按状态采样，禁止固定盲等后继续。"
+      - "最终 UDZO 只读重挂：window size=761×500、两个 icon 位置、backgroundType、Applications symlink 与 Ashide.app 全部复验；全局 window origin 可由 Finder 按显示器调整。"
+      - "writable volume 的 Finder window 仍被同 volume identity 复用：先关闭旧 window generation，再打开只读镜像验证持久化状态。"
+      - "最终只读复验失败：删除已压缩但未验证的 OUTPUT_DMG，禁止残留伪 release artifact。"
+      - "源 bundle 目录包含 staging dmg/：最终镜像顶层不得携带该目录。"
+    required_tests: [macos_dmg_is_repository_owned_state_driven_and_verified]
+
+  - id: RELEASE-LICENSE-FAIL-CLOSED-04
+    scenarios:
+      - "CI cache 中只有 cargo-about 0.8.4：强制安装带 cli feature 的 0.9.1，不得复用旧 binary。"
+      - "Cargo.lock 或 license expression 无法由冻结 workspace 解析：license generation 非零退出并中止 bundle。"
+      - "生成成功：THIRD_PARTY_LICENSES.txt 非空且不存在被 warning 掩盖的 GPL-2.0 parse error。"
+    required_tests: [third_party_license_generation_is_version_pinned_and_fail_closed]
+
+  - id: RELEASE-SOURCE-REF-PRODUCT-VERSION-14
+    scenarios:
+      - "workflow_dispatch 从 candidate/v0.3.0-<sha> checkout：产品 plist、installer、artifact 与 Release identity 仍使用 inputs.tag=v0.3.0。"
+      - "正式 v0.3.0 tag push：source ref 与产品 tag 同名，仍经同一前置 semver validation gate。"
+      - "workflow_dispatch 产品 tag 非 vMAJOR.MINOR.PATCH：三个平台开始长编译前统一失败。"
+    required_tests: [release_workflow_separates_source_ref_from_product_version]
+
+  - id: TEST-SIGNAL-TARGET-READINESS-15
+    scenarios:
+      - "full workspace / integration-only 并发负载下，Preexec 已到但 signal target 尚未 ready：不得提前发送 Ctrl-C。"
+      - "目标安装 SIGINT trap 并输出 readiness marker：Ctrl-C 后 active block 必须退出 Executing。"
+      - "禁止以 sleep、timeout、retry 或 serial test group 代替目标进程 readiness。"
+    required_tests: [test_ctrl_c, local_remote_parity_static_signal_readiness_guard]
+
+  - id: TEST-COMMAND-PALETTE-SELECTED-BINDING-16
+    scenarios:
+      - "命令面板跨 source 搜索且异步结果仍在提交：integration helper 不得把任意非空结果当成目标 action ready。"
+      - "输入 action 文本后，当前 selected result 必须是 AcceptBinding，且 binding description 与请求的 action 完全一致，才能发送 Enter。"
+      - "helper 输入是用户搜索文本：比较前必须走 BindingDescription 的同一 titlecase canonicalization，禁止把大小写规范化差异误判为错误 binding。"
+      - "selected result 仍是 Session/Conversation/File 等其他类型：assertion 返回 retryable Failure，禁止误执行后靠下游状态断言兜底。"
+      - "禁止用 sleep、timeout、retry、串行 test group 或单测内重复打开面板掩盖 selected-result ownership。"
+    required_tests: [test_pane_group_state_multi_pane, local_remote_parity_static_selected_binding_guard]
+
+  - id: RELEASE-MACOS-UNSIGNED-BUNDLE-SEAL-17
+    scenarios:
+      - "GitHub macOS runner 无签名 secrets：App 使用完整 ad-hoc bundle seal，codesign strict verify 通过后才创建 DMG。"
+      - "cargo/rustc 只给主 executable 留下 linker-signed adhoc signature：packaging gate 必须拒绝 Info.plist 未绑定、Resources 未 sealed 的半签名 App。"
+      - "Developer ID secrets 完整：正式签名/公证路径仍经过同一 bundle strict verify，不得被 unsigned 分支护栏绕过。"
+      - "secrets 部分配置：workflow 继续 fail closed，禁止降级成 ad-hoc release。"
+    required_tests: [macos_unsigned_release_bundle_is_ad_hoc_sealed_and_verified, local_remote_parity_static_unsigned_bundle_seal_guard]
+
+  - id: SESSION-CONTAINER-ALLOCATION-DELIVERY-18
+    scenarios:
+      - "Resume target 在 remote placeholder 分配时即提交 container UUID 与 provider/session binding；placeholder 替换成 materializing terminal、PTY bootstrap commit 前后都只投影同一 Navigator row。"
+      - "TerminalBootstrap 与 Runtime backend 消费同一 Environment entry intent；两者只允许同步/异步 delivery timing 不同，高层 action、snapshot 和 reducer 不得出现 local/remote 分叉。"
+      - "PlainTerminal、StartupCommand、AgentView、ForkedConversation、SessionRestore 全部复用 EnvironmentBackend、PendingMaterialization、PaneConfiguration 与 WorkspaceSessionSnapshot，不得引入第二套 binding registry。"
+      - "Provider picker 激活已有 Runtime Environment container 时不得额外创建 terminal；打开全新 Runtime Environment 并分配首个 placeholder 时必须创建 pane-owned entry intent：有 startup command 使用 StartupCommand，否则由共享 active-placeholder reconciliation 使用 PlainTerminal；禁止在 Connected/UI 层另补 bootstrap 分支。"
+      - "WindowSnapshot 不持久化 pending runtime queue；冷恢复必须保留 persisted pane tree/container UUID/无关 tabs，并调用 prepare_active_environment_after_activation(ColdRestore) 重建全部 placeholder 的 PlainTerminal owner，再 ensure transport 并尝试 delivery。显式导航使用 UserVisibleActivation，只有它允许重连 Error；禁止 startup 只连接 transport或重新分配 container。"
+      - "所有 Runtime materialization 调用方必须遵守 allocate placeholder/loading pane → queue pane-owned PendingMaterialization → ensure transport；provider、cold restore、terminal/agent/fork/startup split 与 spawn handler 由同一静态调用点清单审计，新增未分类调用点 fail closed。"
+      - "CLIAgentSessionsModel registration 只确认 runtime attachment；删除以 bootstrap finalize 作为 durable identity 首次创建时机的旧路径。"
+      - "静态护栏拒绝 live_workspace_sessions 或 Session Navigator 根据 pending remote materialization 后补 provider metadata、debounce 或 order freeze。"
+    required_tests: [test_environment_runtime_resume_never_projects_transient_generic_terminal_row, test_environment_entry_intents_share_container_allocation_delivery_contract, test_open_environment_runtime_provider_without_startup_queues_plain_terminal_intent, test_cold_restored_active_environment_placeholder_rebuilds_terminal_intent_before_transport, local_remote_parity_static_session_container_delivery_guard]
+
+  - id: AGENT-HARNESS-ARCHITECTURE-19
+    scenarios:
+      - "用户只描述 remote-only 闪烁或反复回归而未说 SessionBridge：agent 仍必须由 AGENTS 路由加载 parity/Session Navigator SPEC、tracker、backend/container 抽象，不依赖 feature 名称触发。"
+      - "SessionBridge、shared memory 等普通产品模块的当前设计只存在于代码/docs；project skill 只保存可复用 workflow，禁止 feature-memory skill。"
+      - "新增跨模块修复：先提交既有抽象复用表与将删除的平行路径，再执行 SPEC→CHECK→TEST→IMPLEMENTATION。"
+      - "presubmit 与 CI 缺少 architecture workflow skill、恢复禁用 feature skill 或 frontmatter/目录漂移时 fail closed。"
+    required_tests: [agent_harness_checks_pass, local_remote_parity_static_agent_harness_guard]
+
+  - id: SESSION-SOURCE-USER-STATE-BACKEND-20
+    scenarios:
+      - "Session Navigator 读取 alias/pin 与 indexed CLI sessions 时只按 Environment authority 查询统一 owner；不得在 Navigator 内选择 local sidecar 或 remote runtime cache。"
+      - "alias/pin mutation 只提交 stable_user_state_keys；local filesystem sidecar 与 runtime RPC 的 I/O 差异由现有 Environment backend 边界承担，optimistic state 与 rollback 语义共用。"
+      - "local indexed sessions 与 runtime indexed sessions 都进入 EnvironmentTable；禁止继续保留 Workspace.indexed_cli_agent_sessions 作为第二份 local-only cache。"
+      - "Refresh 只表达 scan 当前 Environment；backend 决定同步 local scan 或异步 runtime scan，高层不得按 uses_terminal_bootstrap/uses_runtime_environment 分叉。"
+    required_tests: [test_session_navigator_source_and_user_state_use_environment_backend, test_local_and_runtime_session_user_state_share_optimistic_commit_contract, local_remote_parity_static_session_source_user_state_guard]
+
+  - id: SESSION-ACTION-AUTHORITY-CANONICAL-21
+    scenarios:
+      - "local snapshot 缺省 authority：action target 在构造边界规范化为 TerminalBootstrap canonical authority，不把 None 传播到 Navigator。"
+      - "runtime snapshot：target 保留自己的完整 authority；相同 tab/leaf locator 不能跨 Environment 命中。"
+      - "action matching 不包含 legacy None-as-local、local/runtime discriminator 或 id-only wildcard fallback。"
+    required_tests: [test_workspace_session_action_target_always_carries_canonical_authority, local_remote_parity_static_action_authority_guard]
+
+  - id: ENV-NAVIGATION-BACKEND-22
+    scenarios:
+      - "删除目标 Environment 最后一行：行为层调用同一 activate_navigation_container；TerminalBootstrap/Runtime 只在 backend 内决定 terminal container 或 inert placeholder。"
+      - "SplitPane conversation restore：先通过同一 backend 激活目标 Environment，再执行共享 split delivery；Navigator/view 不判断 backend kind。"
+      - "local/runtime SplitPane restore 都保持目标 Environment tab 数不变并只增加一个 pane；runtime connecting 状态只排队 ForkedConversation，不得旁生 PlainTerminal。"
+      - "conversation restore snapshot 只来自 EnvironmentTable.entry_target_snapshot 并补充 conversation cwd；禁止手工 local/runtime snapshot reconstruction。"
+    required_tests: [test_environment_navigation_activation_uses_shared_backend_for_delete_and_split_restore, test_deleting_only_live_environment_session_keeps_environment_selected, test_restored_conversation_new_tab_uses_shared_fork_delivery, test_restored_conversation_split_pane_reuses_local_environment_container, test_restored_conversation_split_pane_reuses_runtime_environment_container_without_plain_terminal_intent, local_remote_parity_static_navigation_backend_guard]
+
+  - id: SESSION-BRIDGE-CONVERSATION-SOURCE-23
+    scenarios:
+      - "历史 Ashide conversation 带 TerminalBootstrap authority：无 live model 时从 app SQLite 加载编辑草稿。"
+      - "同一历史 conversation 带 runtime authority：读取同一 app SQLite transcript，不因 Environment 类型拒绝。"
+      - "live conversation：继续直接使用内存 IR，不做多余数据库读取。"
+      - "CLI Agent source：仍由 resolved SessionBridgeEnvironment 根据 CurrentApp/Environment roots 读取；Conversation 不进入该 roots context。"
+    required_tests: [test_remote_authority_historical_conversation_edit_reuses_shared_session_bridge_source_reader, local_remote_parity_static_session_bridge_conversation_source_guard]
+
+  - id: ENV-NAVIGATION-ACTIVATION-INTENT-24
+    scenarios:
+      - "Resume/Split restore 请求 EnsureTargetContainer：local/runtime 都保证目标 Environment container 存在并激活，高层不选择 carrier 类型。"
+      - "删除最后一行请求 AfterContainerClosed：TerminalBootstrap 有可见邻居时不创建空 tab，仅窗口已空才补 default container。"
+      - "删除 Runtime Environment 最后一行请求同一 AfterContainerClosed：backend 重建 inert placeholder 并保持该 Environment selected。"
+      - "所有 activation 调用点必须传 typed intent；禁止从调用栈、Option、backend kind 或额外 adapter 猜测语义。"
+    required_tests: [test_environment_navigation_activation_uses_shared_backend_for_delete_and_split_restore, test_deleting_active_current_app_session_with_neighbor_tab_does_not_create_empty_replacement, test_deleting_only_live_current_app_session_creates_replacement_before_close, test_deleting_only_live_environment_session_keeps_environment_selected, local_remote_parity_static_navigation_activation_intent_guard]
+
+  - id: ENV-SESSION-REFRESH-INTENT-25
+    scenarios:
+      - "Workspace configure、delete commit 与 source mutation 后的 PassiveProjection 只刷新已有 backend cache/target，不得隐式 reconnect。"
+      - "恢复 persisted runtime Error window 后被动 refresh 保持 Error；只有用户 Refresh 提交 UserInitiated generation 才获得 reconnect 权限。"
+      - "TerminalBootstrap 与 Runtime 共用 typed refresh intent、EnvironmentTable cache commit、selection/order projection；只允许 I/O timing 不同。"
+      - "禁止 refresh_generation: Option<u64> 兼任 intent；toast generation 只属于 UserInitiated。"
+    required_tests: [test_restored_error_window_snapshot_does_not_implicitly_connect, test_session_navigator_source_and_user_state_use_environment_backend, test_local_and_runtime_session_user_state_share_optimistic_commit_contract, local_remote_parity_static_session_refresh_intent_guard]
+
+  - id: SOURCELESS-RESTORE-CONTAINER-BINDING-26
+    scenarios:
+      - "CLI agent 没有 provider-native session ID：restore source id 不得写入 cli_agent_session_id，也不得在 live container 旁保留第二个 virtual row。"
+      - "PaneSessionBinding 携带 virtual stable source identities；PaneConfiguration.session_binding 是 live owner，allocation 后通过现有 reducer identity registry 与 container UUID 收敛到同一 RowId。"
+      - "Refresh 同一 RowId 的 virtual/live backing 只投影 live row，并合并 pinned lifecycle；alias/pin keys 继续包含 source identity。"
+      - "LeafSnapshot 是 snapshot owner；TerminalPaneSnapshot → EnvironmentRuntimePlaceholder 只改变 leaf contents，必须保留 LeafSnapshot.session_binding。"
+      - "pane_container_identities.session_binding_json 是 generic pane-container SQLite owner；TerminalPaneSnapshot/terminal_panes 的 cli_agent/source_identity_keys 双写必须删除。"
+      - "2026-07-20 真实远程 cold restore 回归证明旧 terminal-specific round-trip 不充分；收敛 generic pane-container owner 后，重建 App 连续两轮远程/本地 cold restore 均保持同一 PaneSessionBinding、container UUID、cwd 与 source identities。"
+      - "TerminalPane::snapshot 必须只读 committed binding；Started/SessionUpdated 在 projection/save 前显式刷新 owner。runtime cwd 暂不可读不得覆盖冷恢复 binding。"
+    required_tests: [test_environment_runtime_restored_first_class_cli_agents_queue_remote_startup_commands, test_environment_runtime_restore_tree_preserves_leaf_session_binding, test_sourceless_restore_binding_survives_leaf_snapshot_round_trip, test_runtime_placeholder_leaf_binding_survives_sqlite_round_trip, test_restored_runtime_placeholder_configuration_owns_leaf_session_binding, test_cold_restored_runtime_placeholder_materialization_preserves_pane_session_binding, test_materialized_sourceless_restore_does_not_apply_source_alias_and_preserves_pin, test_local_materialized_sourceless_restore_does_not_apply_source_alias_and_preserves_pin, test_session_navigator_refresh_collapses_materialized_alias_to_live_row, local_remote_parity_static_sourceless_restore_binding_guard]
+
+  - id: MATERIALIZED-SOURCE-USER-STATE-PROJECTION-27
+    scenarios:
+      - "用户对已 materialize 的远程会话执行 Pin 后，成功反馈与 Navigator pinned 标记/排序必须来自同一次 authority-scoped user-state commit；禁止只写 sidecar、不更新 live projection。"
+      - "用户在 local:<root> 历史会话上修改 Alias/Pin 时，mutation target 与当前 local render 必须共享 canonical navigation-key user state；authority alias 不得制造第二份 cache。"
+      - "indexed sessions、alias/pin user state 与 SessionNavigatorModel 都按同一个 Environment navigation key 分区；local、local:<root> 切换不得造成列表短暂缺项或状态不可见。"
+      - "live container 的 alias/pin lookup 与 mutation keys 必须统一包含 PaneSessionBinding.source_identity_keys；container UUID 继续拥有 live identity，source keys 只负责用户状态连续性。"
+      - "TerminalBootstrap 与 Runtime 共用 workspace_session_binding_source_identity_keys、workspace_session_pin_keys 与 alias projection；禁止新增 remote-only pin adapter 或 UI 补标记。"
+      - "Alias 必须在 SessionNavigatorReducer::Refresh 前进入 new_sessions，使 Environment-owned SessionNavigatorModel.sessions 成为唯一可见 carrier；禁止 reducer 后只改临时 render clone。"
+      - "无 provider-native session ID、冷启动仅剩 live container、virtual source 暂未重新扫描时，持久化 source key 上的 alias/pin 仍立即可见。"
+      - "merge_for_session_navigator 只收敛 backing identity/title/time，不读取、不保留、不重算 is_pinned；SessionNavigatorReducer::Refresh 是唯一 alias/pin projection owner。"
+    required_tests: [test_environment_projection_data_uses_canonical_navigation_key, test_session_navigator_alias_projection_uses_canonical_environment_navigation_key, test_materialized_sourceless_restore_does_not_apply_source_alias_and_preserves_pin, test_local_materialized_sourceless_restore_does_not_apply_source_alias_and_preserves_pin, test_sourceless_restore_binding_survives_leaf_snapshot_round_trip, test_runtime_placeholder_leaf_binding_survives_sqlite_round_trip, test_session_navigator_merge_does_not_project_or_preserve_pin_state, local_remote_parity_static_materialized_source_user_state_projection_guard]
+
+  - id: RESTORE-IN-FLIGHT-PROJECTION-OWNERSHIP-28
+    scenarios:
+      - "本地同步 Resume：RestoreStarted 后 provider/index source 即使在中间刷新暂时缺失，目标 RowId 仍由 reducer model 中的唯一 carrier 渲染，列表基数和无关 rows 不变。"
+      - "Runtime Resume：virtual source → placeholder → materializing terminal → bootstrapped live carrier 全阶段只替换同一 RowId，不新增或丢失行。"
+      - "成功、失败、取消与乱序 refresh：lifecycle 与 carrier 同属一个 Environment-scoped model；禁止 state 保留 restoring_row_ids 而 projection 从空列表重建。"
+      - "Resume 期间 pin、alias、selection、display order、搜索输入与无关 row identity 连续；backend 只允许 delivery timing 不同。"
+      - "代码评审必须覆盖 source missing、0/1/many 无关 rows、成功/失败/取消，不得只检查最终 materialized 形态。"
+    required_tests: [test_restore_refresh_preserves_target_carrier_and_unrelated_rows_for_local_and_runtime, test_restore_finished_removes_carrier_only_after_confirmed_source_absence, test_environment_runtime_resume_preserves_full_navigator_cardinality, test_local_resume_preserves_full_navigator_cardinality, local_remote_parity_static_restore_projection_ownership_guard]
+
+  - id: CODEX-NATIVE-FORK-SYSTEM-CONFIGURATION-29
+    scenarios:
+      - "本地 Codex 使用自定义 provider/model：Fork 从目标 CODEX_HOME/config.toml 读取 model_provider 写入 rollout bootstrap metadata，不把 model/reasoning/sandbox/approval 变成 Fork 参数。"
+      - "session_meta.cli_version 是 Codex discovery 必需字段：local/runtime 分别执行目标 codex --version 后写入；禁止省略、写 Ashide 标识或读取本机版本代填远端。"
+      - "Runtime Codex home 与本机配置不同：runtime backend 读取目标 CODEX_HOME/config.toml 并构造同一 NativeSessionTargetContext；不得复制本机配置。"
+      - "目标 config.toml 缺失或 model_provider 为空：在写任何 transcript/index 前明确失败，禁止 fallback 到 codex、空字符串或猜测默认 provider。"
+      - "SessionBridge 不直接写 Codex 私有 state_5.sqlite；首次真实 Resume 后由 Codex 自己维护 registry。"
+      - "真实 Codex CLI bootstrap 能加载派生会话；Ashide reader 自写自读通过不得代替该验证。"
+      - "真实 consumer 验证必须是仓库内可执行的 ignored Rust test，并由 static checker 按测试函数名 fail closed；文档里的 required_tests 名称或一次性手工命令不能冒充测试实现。"
+      - "审计并删除 SessionBridge writer 中 provider/model/effort/sandbox/approval 的硬编码所有权。"
+    required_tests: [codex_native_writer_reads_bootstrap_provider_from_target_system_configuration, codex_native_writer_without_model_provider_fails_before_writing, codex_native_context_without_target_cli_version_fails, local_and_remote_codex_native_plans_use_target_owned_configuration, codex_native_writer_does_not_mutate_codex_private_sqlite_registry, codex_native_fork_real_cli_resume_bootstrap, local_remote_parity_static_codex_native_system_configuration_guard]
+
+  - id: CLAUDE-NATIVE-FORK-TARGET-OWNERSHIP-30
+    scenarios:
+      - "Claude native store root 只认目标 installation 的 CLAUDE_CONFIG_DIR，未设置时才使用目标 home/.claude；禁止维护 Ashide 私有 CLAUDE_HOME 分支。"
+      - "Fork transcript 不伪造 Claude version、git branch、mode、permission mode 或 runtime model；这些字段能省略则省略，由真实 Claude Resume 使用目标安装和当前配置决定。"
+      - "导入的 assistant transcript 若原生 schema 必须提供 model，只使用真实 Claude 接受的 <synthetic> 协议标记，不冒充目标 runtime model。"
+      - "local/runtime 共用同一 native write plan；差异仅为 CLAUDE_CONFIG_DIR 的本地环境读取或 runtime transport 读取。"
+      - "真实 Claude native samples 与真实 CLI bootstrap 是外部兼容证据；Ashide writer/reader round-trip 不能替代。"
+    required_tests: [claude_native_writer_omits_target_owned_runtime_configuration, claude_native_writer_uses_claude_config_dir, local_and_remote_native_write_plans_are_equivalent, claude_native_fork_real_cli_resume_bootstrap, local_remote_parity_static_claude_native_target_ownership_guard]
+
+  - id: CLI-AGENT-STORE-ROOT-OPERATION-CONTEXT-31
+    scenarios:
+      - "未解析的 SessionBridgeEnvironment 不能执行 scan/read/mutate/native Fork；ResolvedSessionBridgeEnvironment 必须携带完整 CliAgentStoreRoots snapshot。"
+      - "本地 scan/read/delete/index source 与 native writer 必须共享一次操作解析出的 CliAgentStoreRoots；自定义 CODEX_HOME/CLAUDE_CONFIG_DIR 下不得出现看得见但读不了、删不了或写到另一目录。"
+      - "Runtime helper daemon 的进程环境不是目标终端配置权威；scan/read/mutate 请求必须显式携带由目标 Environment session 解析的 home/Codex/Claude roots，禁止 helper 再读自身 HOME/CODEX_HOME/CLAUDE_CONFIG_DIR 猜测。"
+      - "同一 source 的 scan → read → mutate 全链使用同一 target-root provenance；source allowlist 与 index resolution 必须从请求 roots 构造，缺失或空 roots 明确失败。"
+      - "同一 source/target execution context 通过 pair resolver 只解析一次 roots，并把同一 resolved environment 交给 reader、writer 与 delete；不得在各 consumer 内重新 probe。"
+      - "Fork writer 与 Navigator remote scan 复用同一 Environment root resolver；local/runtime 只在配置读取 transport 上不同，不维护 writer-only、scanner-only 或 daemon-only root resolver。Conversation/Ashide DB cold-read 不被 CLI roots 强耦合。"
+      - "目标 roots 改变后的下一次 operation 重新解析完整 snapshot；一次 operation 内禁止分别读取环境变量造成 TOCTOU 或跨目录混用。"
+    required_tests: [local_cli_agent_source_target_uses_shared_custom_codex_root, delete_codex_index_entry_uses_shared_custom_codex_root, delete_jsonl_uses_shared_custom_claude_root_allowlist, remote_cli_agent_operations_use_explicit_target_store_roots, environment_cli_agent_store_roots_are_shared_by_scan_read_mutate_and_fork, local_cli_agent_operation_reuses_one_store_root_snapshot_across_scan_read_mutate_and_fork, session_bridge_cli_agent_operations_require_resolved_store_root_context, local_remote_parity_static_cli_agent_store_root_context_guard]
+
+  - id: REMOTE-HELPER-PROTOCOL-REVISION-32
+    source: LR-123
+    capability: "remote helper explicit bidirectional protocol revision"
+    local: "客户端与当前 checkout/release helper 使用同一 REMOTE_SERVER_PROTOCOL_REVISION；Initialize 请求和响应都携带该 revision。"
+    remote: "helper 在写入 auth token 或执行任何请求前校验 client revision；客户端在接受 host_id 前校验 server revision。"
+    invariant: "缺失、旧版或未知 protocol revision 必须在 Initialize 阶段显式失败；protobuf unknown-field/default-value 兼容不得把不兼容 helper 伪装成成功连接。"
+    source_build_delivery: "source/dev helper 安装身份由 REMOTE_SERVER_PROTOCOL_REVISION 派生；当前 CLI-agent discovery outcome revision 使用 dev-pty-v5，禁止复用任何更低 revision helper。"
+    release_delivery: "tag release helper 安装身份必须同时包含 release version 与 REMOTE_SERVER_PROTOCOL_REVISION（当前例如 v0.3.0-pty-v5）；同一 tag 下 protocol revision 变化时不得复用旧 helper。Initialize revision 仍是最终 fail-closed 证明，不能只依赖文件名或 --version/help 探针。"
+    side_effect_order: "server revision 校验严格早于 auth_token mutation；失败连接不得改变 daemon credential 或进入业务 handler。"
+    negative_space: ["new client + old helper response missing revision", "old client + new helper request missing revision", "wrong nonzero revision", "matching revision", "auth token supplied on mismatch"]
+    verification_rule: "协议 round-trip、client rejection、server rejection/no-auth-mutation、source/dev slot、release version+protocol slot 与 static guard 必须同时覆盖。"
+
+  - id: REMOTE-CONNECTION-HANDSHAKE-OWNERSHIP-33
+    source: LR-124
+    capability: "per-connection handshake state owns business-message eligibility"
+    invariant: "每条 proxy connection 的 sender、Initialize phase 与 snapshot delivery state 由同一个 ConnectionState 原子持有；只有 Ready connection 可进入 Authenticate/SessionBootstrapped/Abort 和任何业务 RPC。"
+    lifecycle: "register=AwaitingInitialize；matching revision Initialize 原子转 Ready；mismatch 保持 Awaiting；deregister 删除完整 ConnectionState；重复 Initialize 明确失败。"
+    failure_rule: "未 Initialize、Initialize 失败或 connection 不存在时，业务请求返回 InvalidRequest 且不得创建 executor/PTY、读取或修改文件/session state；notification 也不得产生副作用。"
+    owner_rule: "禁止 sender map、initialized HashSet 与 snapshot roots map 三份平行状态；连接生命周期字段必须随 ConnectionState 一起注册/注销。"
+    negative_space: ["business request before Initialize", "Authenticate before Initialize", "wrong revision then business request", "successful Initialize then business request", "duplicate Initialize", "deregister then late message"]
+    verification_rule: "逐阶段断言 phase、auth 与业务副作用；只证明正常 client 总会先 Initialize 不算 server contract。"
+
+  - id: REMOTE-CONNECTION-RESOURCE-OWNERSHIP-34
+    source: LR-125
+    capability: "ConnectionState-owned command executors and in-flight requests"
+    invariant: "SessionBootstrapped executor 与 cancellable in-flight request 必须存放在对应 ConnectionState 内；SessionId/RequestId 只在 owner connection 内唯一，禁止作为 daemon-global key。"
+    lifecycle: "Ready connection 在自己的 ConnectionState 创建资源；相同 locator 可被不同 connection 独立使用；Abort/resolve 只能移除同一 connection 的 request；deregister/drop 原子删除 executor 并 abort 该连接全部 in-flight request。"
+    failure_rule: "跨连接 session_id/request_id 碰撞不得覆盖、拒绝或删除另一连接资源；旧 request 完成不得误删同 locator 的新连接 request；stale executor 禁止跨 reconnect 存活。"
+    negative_space: ["two connections reuse one SessionId", "two connections reuse one RequestId", "cross-connection Abort", "old request resolves after same locator is registered elsewhere", "disconnect with mixed owned/unowned requests"]
+    verification_rule: "至少用 owner + other + 两个无关资源逐阶段覆盖 locator collision、cross-connection Abort、resolve cleanup、disconnect executor cleanup 与 disconnect request abort。"
+
+  - id: REMOTE-PTY-CONNECTION-OWNERSHIP-35
+    source: LR-126
+    capability: "connection-owned remote PTY mutation and teardown"
+    invariant: "RemotePty registry 由对应 ConnectionState 持有；WritePty/ResizePty/ClosePty 必须先定位当前 connection，再定位其 PTY，PTY id 不是跨连接授权凭据。"
+    lifecycle: "CreatePty 只在 owner ConnectionState 注册；owner 可 write/resize/close；其他 connection 的同 id 操作无副作用；deregister/drop 关闭 owner 全部 PTY 并终止 child。"
+    failure_rule: "跨连接 WritePty/ResizePty/ClosePty 必须按 unknown resource 处理，不得写入、改变窗口尺寸、关闭或劫持另一连接终端。"
+    negative_space: ["foreign WritePty", "foreign ResizePty", "foreign ClosePty", "same numeric PTY locator in unrelated connection state", "disconnect owner while another connection remains"]
+    verification_rule: "用可观察 PTY ownership registry 行为测试证明 foreign close 不移除、owner close 移除、disconnect 只清理 owner；static check 禁止 mutation handler 丢弃 conn_id。"
+
+  - id: REMOTE-BUFFER-MUTATION-SERIALIZATION-36
+    source: LR-127
+    capability: "per-buffer async mutation queue and exact completion ownership"
+    invariant: "同一 FileId 的 SaveBuffer/ResolveConflict 必须由 ServerBufferTracker 的单一 active mutation + FIFO queue 持有；一个 FileSaved/FailedToSave 只能完成一个 active intent，禁止按 kind 批量取走全部请求。"
+    lifecycle: "handler 先 enqueue intent；idle queue 启动 head；完成/失败只 pop active 并启动下一项；queued intent 保留 request/connection/payload/order；active owner 断连只失去 response carrier，底层 mutation 完成前仍占据 serialization slot。"
+    ordering_rule: "同文件 mutation 严格按接收顺序启动，后一次 save/resolve 不得与前一次并发写盘，也不得因前一次事件提前收到成功或失败。不同 FileId 可并行。"
+    carrier_missing_rule: "queued request 的 connection 断开时可取消尚未开始的 intent；active mutation 不可伪装成已完成或直接释放 slot，必须等待真实 FileSaved/FailedToSave 后清理。"
+    negative_space: ["two SaveBuffer requests for one file", "Save then ResolveConflict", "ResolveConflict then Save", "first fails second succeeds", "active owner disconnects", "queued owner disconnects", "unrelated file mutation"]
+    verification_rule: "使用 active + 两个 queued + unrelated file 的集合测试逐阶段断言 cardinality/order；production ServerModel→ServerBufferTracker→GlobalBufferModel→FileModel→真实磁盘测试必须证明 ResolveConflict/SaveBuffer 按请求顺序响应、每次只完成一个 active head 并最终落盘。"
+
+  - id: REMOTE-FILE-TRANSFER-CONNECTION-OWNERSHIP-37
+    source: LR-128
+    capability: "ConnectionState-owned inode-pinned file transfers"
+    invariant: "read/write transfer handle map 必须由对应 ConnectionState 直接持有；ReadChunk/WriteChunk/Finish/Abort 先定位当前 connection namespace，再定位 opaque handle，禁止在 daemon-global map 的 value 中后补 owner。"
+    lifecycle: "Begin 在 owner ConnectionState 注册 descriptor；chunk/finish/abort 仅访问 owner map；finish/abort 删除单 handle；deregister/drop 删除全部 handles，write staging 由 FileTransferState::Drop 清理。"
+    failure_rule: "foreign handle 按 unknown resource 失败且无 descriptor/staging/final-path 副作用；两个 connection 即使复用同一 handle locator 也必须独立。"
+    negative_space: ["foreign read", "foreign write", "foreign finish", "foreign abort", "same handle locator in two connections", "disconnect during staged upload"]
+    verification_rule: "行为测试覆盖 foreign access、same-locator independence、disconnect staging cleanup；production dispatch 必须通过 Initialize gate、ClientMessage/ServerMessage wire envelope 和两条真实 connection 证明断开 A 不影响 B 的 descriptor/cursor/finish；static check 禁止 ServerModel global file_transfers 与 FileTransferState conn_id owner 字段。"
+
+  - id: REMOTE-FILE-TRANSFER-SNAPSHOT-INTEGRITY-38
+    source: LR-129
+    capability: "inode-pinned transfer size and cursor integrity"
+    invariant: "Read transfer 在 Begin 时固定 source inode 与 total_size；后续 chunk 只能返回该 snapshot size 范围内的字节。客户端必须以 begin total_size、chunk bytes 和 next_offset 共同验证连续游标，禁止只相信 eof 或单调递增。"
+    lifecycle: "Begin(Read) 返回必填 total_size；server 每次最多读取 remaining bytes，source 提前截断显式失败，source 增长不泄露 snapshot 之外字节；client 完成前验证 next_offset=previous+bytes.len 且 eof 当且仅当 next_offset=total_size。Write chunk 必须验证 next_offset=previous+submitted.len。"
+    failure_rule: "过大文件在读取首个 chunk 前拒绝并 Abort；截断、offset 跳跃、offset 回退、过早 eof、结束 size 不一致都必须失败并清理 transfer/staging，禁止把部分文件 commit 为成功。"
+    owner_rule: "完整性规则复用 Environment Runtime transfer response types 和 ConnectionState-owned transfer state；不得在 file browser、CLI-agent reader 等调用方各写一套宽松 cursor 判断。"
+    negative_space: ["source grows after Begin", "source truncates after Begin", "zero max_bytes before eof", "next_offset jumps beyond bytes", "premature eof", "begin total_size exceeds bounded reader limit", "listing size differs from pinned transfer size"]
+    verification_rule: "server 行为测试覆盖 grow/truncate/zero-budget；production dispatch 必须经 Initialize gate 与 wire envelope 在真实临时文件上证明 Begin 后增长受 snapshot cap、截断不会伪 eof；共享 cursor validator 测试覆盖 exact offset、premature eof、size mismatch 与 write jump；static check 禁止 read==0 被解释为 eof 和调用方继续使用 <=/monotonic-only 判断。"
+
+  - id: REMOTE-BUFFER-RESOLVE-TRANSACTION-39
+    source: LR-130
+    capability: "transactional remote conflict resolution"
+    invariant: "ResolveConflict 的 client content、SyncClock 与 base_content_version 必须作为一个 staged mutation 提交；FileSaved 前 canonical buffer 维持最后一次已落盘状态，FailedToSave 必须丢弃 staging 且不得留下 memory/disk divergence。"
+    lifecycle: "ServerBufferTracker 串行化 intent；GlobalBufferModel 验证 acknowledged version 后创建 staged resolve；FileModel save 成功事件原子 commit content/version/clock，失败事件只清 staging；随后 queue 才推进下一 intent。"
+    failure_rule: "save initiation failure、FailedToSave、owner disconnect、queued Save/Resolve 和无关 file event 都不得提前改变 canonical content/sync clock；失败后下一 mutation 必须从最后 committed state 开始。"
+    negative_space: ["resolve save fails", "resolve initiation fails", "save queued after failed resolve", "second resolve queued", "unrelated file save event", "buffer edit while resolve is staged"]
+    verification_rule: "单元测试逐阶段断言 pre-save canonical state、success commit、failure rollback-by-nonmutation 与 queue advancement；production runtime 测试必须制造真实异步 FileModel save failure，证明 committed content/clock 不变且 queued SaveBuffer 随后从 committed state 成功落盘；static check 禁止 resolve_conflict 在 FileSaved 前 replace_all/set_version/sync clock。"
+
+  - id: REMOTE-BUFFER-BINDING-OWNERSHIP-40
+    source: LR-131
+    capability: "stable transport binding and single-writer ownership for shared environment buffers"
+    invariant: "一个 app-global Environment buffer 必须绑定一个稳定 runtime session/connection，所有 Open/Edit/Save/Close 使用同一 binding；daemon 对同一 FileId 只允许一个 writer connection。多个 UI consumer 共享该 buffer 时，只有最后一个 consumer release 才发送 CloseBuffer。"
+    lifecycle: "首次 open 选择 session binding 并登记 consumer；重复 open 只增加 consumer lease，不重复 OpenBuffer；edit/save/close 按 stored session lookup 当前 reconnect client；最后 lease release 才 close；daemon disconnect/close 释放 writer owner后才允许其他 connection open。"
+    failure_rule: "禁止每次按 host 从 HashSet 任取 client；禁止一个窗口关闭共享 buffer 时让其他窗口失去 sync/save；foreign connection 不能 edit/save/close 未拥有的 buffer；binding session 缺失必须显式失败或重开，不得静默迁移。"
+    negative_space: ["two windows open same host/path", "one window closes while another remains", "two sessions share one host", "binding session reconnects", "binding session disappears while peer session remains", "second connection opens same server path", "foreign edit/save/close"]
+    verification_rule: "测试覆盖 consumer cardinality、last-release close、stable session routing、same-host session churn、daemon writer exclusion 与 disconnect handoff；static check 禁止 GlobalBufferModel client_for_host 和 unowned server buffer mutation。"
+
+  - id: SHARED-BUFFER-LOAD-EDITABILITY-41
+    source: LR-132
+    capability: "shared buffer loading state owns editability"
+    invariant: "GlobalBufferModel buffer 在初始内容 materialize 前必须为 non-editable/selectable；BufferLoaded 后所有 consumer 同步变为 editable。加载窗口内不得产生随后被 replace_all 覆盖的 user edit；Loaded 快路径缺 canonical content 或 SyncClock 时不得用默认值伪造成功。"
+    lifecycle: "open 创建 Loading canonical state；每个 editor consumer 从 model state 投影 InteractionState；BufferLoaded 原子安装 content/version/sync clock 后解锁；FailedToLoad 与 incomplete Loaded state 复用同一 owner cleanup，显式进入失败/可重试语义，不得伪装成已加载的远程新文件。"
+    failure_rule: "禁止依赖 ContentChanged handler 在 sync_clock=None 时静默 return；禁止先允许输入再用 OpenBufferResponse replace_all；多个 consumer 必须观察同一个 loading transition。"
+    negative_space: ["user types before OpenBufferResponse", "two consumers while loading", "open fails", "consumer closes during load", "late response after cleanup"]
+    verification_rule: "测试断言 loading editor 不可编辑、load success 后统一解锁、失败不保留伪编辑内容、late response 不复活已关闭 state；static check 禁止保留已承认的 load-window overwrite TODO。"
+
+  - id: REMOTE-TRANSPORT-SESSION-BINDING-42
+    source: LR-133
+    capability: "operation-scoped exact Environment Runtime transport binding"
+    invariant: "HostId 只表示 canonical host identity；任何由具体 terminal、AI action、file tab、diff、skill inventory 或 SFTP Environment target 发起的 transport operation 必须携带并使用该 owner 的 exact SessionId。"
+    lifecycle: "active session / EnvironmentRuntimeTarget 在入口确定 SessionId；CodeSource、FileBackend、SessionContext 与 inventory refresh args 保存 binding；delivery 时仅用 client_for_session 解析 reconnect 后的当前 client。可见 terminal SessionId 与 Environment owner SessionId 的等价判断必须复用 manager 的 session-alias canonicalization。"
+    failure_rule: "bound SessionId 无 client 时显式失败；禁止按 HostId 从 session pool 任取连接、静默切换同 host peer session、用裸 SessionId 相等比较拒绝合法 terminal alias，或在下游重新推断 binding。"
+    negative_space: ["two sessions share one host", "one session reconnects", "bound session disappears while peer remains", "terminal bootstrap SessionId aliases an Environment-owned control SessionId", "AI read/edit during peer connection churn", "SFTP browser and code diff opened from different windows", "remote file save after tab move"]
+    verification_rule: "static check 全仓禁止 client_for_host API/调用，并要求 Environment navigation 复用 shared alias binding matcher；行为测试覆盖 Environment target 返回 host+session、FileModel remote backend round-trip exact binding、terminal/AI inventory 使用 active session id，以及 terminal alias 不被误判为 stale navigation。"
+
+  - id: NATIVE-SESSION-TARGET-PROJECT-IDENTITY-43
+    source: LR-134
+    capability: "native CLI session target project identity"
+    invariant: "SessionBridge native write plan 的 project/cwd/store slug 必须来自目标 execution environment 对 source project path 的 canonical resolution；不得直接使用可含 symlink alias 的 source spelling。"
+    lifecycle: "local backend 在写 plan 前 canonicalize source project path（缺失时 canonicalize target home）；Environment backend 复用 resolve_environment_runtime_roots 在 exact SessionId 上执行 pwd -P；两者生成 NativeSessionProjectContext 后交给同一 plan builder。"
+    failure_rule: "目标路径无法 canonicalize 时显式失败且不得写入 history/transcript；禁止按本机 realpath 代填远端、禁止 planner 自行猜测或 fallback 到未验证 lexical path。"
+    negative_space: ["macOS /tmp to /private/tmp alias", "workspace opened through directory symlink", "remote symlink project root", "missing project path", "same source spelling resolves differently on local and remote", "Codex and Claude use the same target project context"]
+    verification_rule: "行为测试覆盖 local symlink canonicalization、remote exact-SessionId pwd -P target context、Claude store slug/cwd 使用 canonical path；本地与远端真实 Claude resume 都必须从 symlink cwd 加载 canonical store 中的生成会话，并把历史 context 与新 prompt 发送给真实 consumer。"
+
+  - id: REMOTE-CONTROL-MASTER-SESSION-OWNERSHIP-44
+    source: LR-135
+    capability: "environment-session-owned SSH ControlMaster resource"
+    invariant: "每个 Environment-owned SessionId 必须拥有独立 ControlMaster socket；authority 只参与可读的稳定散列，不得单独充当外部进程资源身份。两个窗口打开同一 authority 时必须保留两条并行 transport，任何一条 teardown 都不能向 sibling socket 发送 ssh -O exit。"
+    lifecycle: "Workspace 先从 app-global RemoteServerManager 分配 Environment-owned SessionId，再以 authority + SessionId 生成 control path；spawn/check/proxy/reconnect/deregister 全程携带同一路径；session teardown 只停止自己的 master。"
+    failure_rule: "禁止 authority-only control path、共享 socket 的先 exit 后重建、通过 UI 阻止第二窗口、连接断开后把旧 terminal alias 静默迁移到 peer session，或用 reconnect 遮挡 sibling preemption。"
+    negative_space: ["two windows open the same authority", "two sessions start concurrently", "one session disconnects while sibling remains", "one session deregisters and runs ssh -O exit", "same authority reconnect", "stale socket from a previous process", "different authorities with the same SessionId locator"]
+    verification_rule: "单元测试证明同 authority 不同 SessionId 路径不同、同 SessionId 路径稳定且长度受限；真实双窗口验证同时保持两条 proxy，分别执行唯一 PTY marker、Ctrl-C 与目录导航，且第一连接不出现 EOF/Broken pipe/host binding 丢失。"
+
+  - id: RESUME-CARRIER-BIRTH-BINDING-45
+    source: LR-136
+    capability: "session restore carrier identity at allocation"
+    invariant: "SessionRestore 分配出的 terminal/placeholder carrier 在第一次可能触发 sync/notify 前就必须持有 PaneSessionBinding；任何可见帧都不得出现未绑定 generic live row。"
+    lifecycle: "EnvironmentEntryIntent::SessionRestore 生成唯一 PaneSessionBinding；TerminalBootstrap 与 Runtime 都把该 binding 传入 add_tab_with_pane_layout_in_environment 的 initial_session_binding；delivery 返回后的 finalize 只校验 carrier、扩展 reducer RowId identity edge 并 Refresh，不再后补 pane binding。"
+    failure_rule: "source 无 semantic binding、carrier 未带预期 binding、container UUID/authority 不匹配时显式失败；禁止先创建可见 pane 再 restore_session_binding、用 reducer collapse 掩盖第一帧重复行、或增加 local/remote UI overlay。"
+    negative_space: ["local synchronous tab creation emits intermediate notify", "runtime placeholder before PTY materialization", "provider-native session id present", "sourceless restore", "two unrelated rows", "restore failure before bootstrap", "cold restored binding"]
+    verification_rule: "直接调用两个 backend 的 delivery 边界，断言 allocation 后 pane 已绑定且 Navigator cardinality 不增加；static check 禁止恢复 delivery 后补 binding；真实 GUI 逐帧覆盖 local/runtime Resume。"
+
+  - id: SESSION-NAVIGATOR-STABLE-RENDER-IDENTITY-46
+    source: LR-137
+    capability: "session navigator stable row render identity"
+    invariant: "同一 canonical RowId 的 virtual source、runtime placeholder 与 live pane 必须复用同一个 Vertical Tabs element identity；carrier 的 physical session.id 变化不得卸载重建该行。"
+    lifecycle: "Environment-scoped SessionNavigatorState 先把 observed identities 收敛到 RowId；SessionNavigatorRowIdentity 再统一携带 ParsedEnvironmentAuthority.navigation_key + RowId，供 Vertical Tabs 生成 element key、SavePosition id、mouse/drag state key 与 detail sidecar target；session.id 仅在用户触发 action 的当帧构造 locator。"
+    failure_rule: "禁止任何跨帧 UI 状态使用 source id、provider id、tab:leaf locator、EntityId 或列表 index；禁止用 animation、debounce、列表冻结或缓存 overlay 遮挡组件 identity 更换。"
+    negative_space: ["local synchronous source-to-live replacement", "runtime source-to-placeholder-to-live replacement", "hover remains active", "detail sidecar remains open", "drag state survives refresh", "two unrelated rows", "same RowId in two Environment navigation partitions"]
+    verification_rule: "组合测试证明 physical carrier id 改变而 navigation key + RowId 生成的所有 render keys 不变；static check 禁止 physical id 回流 element/position/detail target；真实 local/runtime 高频捕获证明行位置、hover 和 sidecar 不抖动。"
+
+  - id: SESSION-NAVIGATOR-STABLE-INLINE-EDIT-IDENTITY-47
+    source: LR-138
+    capability: "session navigator stable inline edit identity"
+    invariant: "同一 canonical RowId 从 virtual source 切换为 placeholder/live carrier 时，alias editor 的 owner、buffer 与 focus 必须保持；physical session.id 只能用于打开编辑器当帧定位。"
+    lifecycle: "WorkspaceSessionActionTarget 先解析当前 snapshot；随后 rename lifecycle 只保存 SessionNavigatorRowIdentity，并在 render/finish/clear 时通过当前 reducer registry 解析 carrier。"
+    failure_rule: "禁止把 physical source id 或 tab:leaf locator 保存为 renaming state；禁止 carrier replacement 静默退出编辑、清空 buffer、写错行，或增加 local/remote 分支修补。"
+    negative_space: ["local synchronous materialization", "runtime source-to-placeholder-to-live", "editor has unsaved text", "two unrelated rows", "same RowId in another Environment", "target source temporarily absent", "target confirmed deleted"]
+    verification_rule: "组合测试以不同 physical id 的 source/live carrier 证明同一 rename identity 持续命中且不会命中无关行；static check 禁止 renaming_workspace_session_target 与 physical id comparison；真实 GUI 在 materialize 期间保持 editor。"
+
+
+  - id: ENVIRONMENT-TARGET-HOME-MATERIALIZATION-48
+    source: LR-139
+    capability: "environment target HOME materialization refresh"
+    invariant: "Environment indexed-session scan 只能在 exact runtime SessionId 的 target HOME 成功 materialize 后开始；root/HOME transition 完成后必须通过 EnvironmentBackend::refresh_indexed_sessions(PassiveProjection) 投影历史 rows。"
+    lifecycle: "SessionConnected 只建立 runtime owner 并启动 root/HOME resolution，不提前扫描；finish_resolve_environment_runtime_root 校验 authority + SessionId，成功后原子提交 HOME/root，再调用统一 backend passive refresh；scan completion 再校验同一 authority + SessionId 后提交 EnvironmentTable cache。"
+    failure_rule: "root/HOME 解析失败必须保持 HOME unresolved、保留既有 indexed rows 并进入显式 runtime failure；禁止 fallback 到 /、禁止把首次未观察到解释为空集合、禁止 Navigator reopen/retry/timer/UI remote 分支补扫。"
+    negative_space: ["connection completes before HOME", "HOME resolution succeeds", "HOME resolution fails", "reconnect replaces SessionId", "stale root result", "stale scan result", "workspace root changes", "zero one many unrelated rows"]
+    verification_rule: "静态与行为测试证明 connected handler 不再提前 scan、成功 root transition 在 remember HOME 后调用 PassiveProjection、失败不写 / fallback、stale SessionId 不刷新；真实 remote connect 后历史 rows 首帧完整并在 Resume 期间保持 cardinality/order。"
+
+  - id: SESSION-NAVIGATOR-ATOMIC-RENDER-MODEL-49
+    source: LR-140
+    capability: "session navigator atomic render model"
+    invariant: "Vertical Tabs 每一帧必须消费同一个 SessionNavigatorModel 中的 sessions 与 state；禁止用刷新后的 rows 配刷新前的 RowId/selection/render state。"
+    lifecycle: "Environment-scoped reducer 一次 Refresh 同时产生 canonical sessions 与 SessionNavigatorState；render、detail sidecar 与 row identity 从该同一 model 快照读取，提交路径仍由 apply_session_navigator_reduction 原子写回。"
+    failure_rule: "禁止 UI 分别调用 session_navigator_sessions 与 snapshot_session_navigator_state；禁止 physical fallback key、额外 render cache、列表冻结、debounce 或动画遮挡非原子 projection。"
+    negative_space: ["new identity first appears during render refresh", "source temporarily missing while restoring", "source-to-placeholder-to-live", "two unrelated rows", "detail sidecar lookup", "local and runtime delivery timing"]
+    verification_rule: "测试在未提交 Refresh state 时引入新 observed identity，并证明 render model 的 row 与 row_id_by_identity 同帧一致；static check 强制 Vertical Tabs 只消费 SessionNavigatorModel；真实高帧率 Resume 不再重建或跳动行。"
+
+  - id: SESSION-NAVIGATOR-ATOMIC-ACTION-MODEL-50
+    source: LR-141
+    capability: "session navigator atomic action model"
+    invariant: "所有 Pin、Reorder、Activate、Restore lifecycle、Delete 等 reducer action 必须从同一个刷新后的 SessionNavigatorModel 解构 sessions 与 state；禁止先读旧 state 再单独刷新 sessions。"
+    lifecycle: "Workspace 先通过共享 session_navigator_model 得到 Environment-scoped canonical projection，再把该 model 原子交给 reducer action；reducer 输出继续由 apply_session_navigator_reduction 一次提交。"
+    failure_rule: "禁止 action 接入层分别调用 snapshot_session_navigator_state 与 session_navigator_sessions/raw_session_navigator_sessions；禁止在 action 前后补 sync、retry、list freeze 或 render overlay 掩盖半事务 model。"
+    negative_space: ["new identity appears immediately before Resume", "target plus two unrelated rows", "source temporarily missing", "local synchronous carrier", "runtime asynchronous placeholder", "failure and cancel cleanup"]
+    verification_rule: "测试在 source 已增加新 target/unrelated rows、owner state 尚未 Refresh 时发送 RestoreStarted，并证明提交后的 canonical model 已同时持有全部 rows 的 stable RowId/display order 与 target lifecycle；static check 禁止 raw split-read helper 和 action 层拆读。"
+
+  - id: ENVIRONMENT-INDEXED-SESSION-SCAN-TRANSACTION-51
+    source: LR-142
+    capability: "environment indexed-session scan transaction"
+    invariant: "EnvironmentTable 必须按 canonical navigation key 原子拥有 indexed-session scan generation 与 collection；同一 runtime SessionId 的旧扫描结果不得覆盖后启动扫描的 canonical collection。"
+    lifecycle: "EnvironmentBackend 在发起 scan 前向 EnvironmentTable 申请 generation token；completion 同时校验 navigation key、runtime SessionId 与 generation，只有当前 token 的完整成功快照才能替换 indexed rows，随后继续复用 SessionNavigatorModel + reducer Refresh 投影。"
+    failure_rule: "失败、取消、旧 SessionId 或旧 generation 必须保留上一份 collection；禁止旧成功子集 destructive replace、UI list freeze、overlay、debounce、retry 或在 reducer 永久保留所有缺失行。"
+    negative_space: ["target plus two unrelated indexed rows", "two scans complete out of order", "older success is a subset", "newer complete success", "scan failure", "reconnect changes SessionId", "local synchronous scan", "remote asynchronous scan"]
+    verification_rule: "红测先证明旧成功子集会把三行缩成两行；修复后旧 token commit 被拒绝且 cardinality/RowId/order 不变，当前 token 完整提交后仍由既有 atomic model 渲染。"
+
+
+  - id: SESSION-NAVIGATOR-COMMITTED-RENDER-PROJECTION-52
+    source: LR-143
+    capability: "session navigator committed render projection"
+    invariant: "Session Navigator render/detail lookup 只能消费 EnvironmentTable 已提交的 canonical SessionNavigatorModel；只读 UI 查询不得执行 Refresh、分配 RowId/display_order 或把尚未提交的 source/live carrier投影成可见行。"
+    lifecycle: "所有 source、live pane、provider binding 与 restore lifecycle mutation 先经既有 sync/action reducer path 原子提交 SessionNavigatorModel，再 notify；render 仅从 committed model 派生 focus decoration，不改变 membership/identity/order。"
+    failure_rule: "禁止 render-time speculative Refresh、未提交 row fallback、UI cache/freeze/debounce/动画遮挡或 local/remote render 分支；若 source mutation 尚未 sync，UI 必须保持上一份 canonical model而不是显示推演态。"
+    negative_space: ["target plus two unrelated rows", "indexed source committed before sync", "placeholder allocated before provider binding event", "provider title enrichment", "split/add/close AppStateChanged before render", "detail sidecar lookup", "local synchronous delivery", "runtime asynchronous delivery"]
+    verification_rule: "红测先证明只提交 indexed source、不执行 sync 时 render model 会凭空增加新行；修复后 render 保持旧 canonical cardinality/RowId/order，显式 sync 后一次性提交新 model；split/add/close 的 AppStateChanged 也必须在下一次 render 前经同一 reducer owner 提交 membership/focus；static check 禁止 session_navigator_model 调用 reduce_session_navigator_refresh。"
+
+  - id: SESSION-NAVIGATOR-COMMITTED-FOCUS-PROJECTION-59
+    source: LR-154
+    capability: "session navigator committed membership and focus projection"
+    invariant: "任何 canonical SessionNavigator sync 都必须在同一次 reducer transaction 中提交最新 membership 与当前物理 focus projection；PaneFocused 只写 is_active 展示态，不修改 Environment-owned selection，因此调用方不得选择 membership-only 提交分支。"
+    lifecycle: "source/live/persistence mutation 先 Refresh canonical collection，再用当前 focused pane logical identity 执行 PaneFocused projection，最后一次性替换 EnvironmentTable active SessionNavigatorModel；Delete、tab/pane close、Undo、Environment switch、split/materialize 与普通 source refresh 共用这一条 sync。"
+    failure_rule: "禁止 reduce_session_navigator_refresh 的 inject-focus 布尔开关、sync(..., false)、调用方先 focus/close 后 membership-only Refresh、或在 render 层 fallback active row；新增调用方只能使用 canonical sync/focus action model。"
+    negative_space: ["local same-Environment neighbor after Delete", "runtime same-Environment neighbor after Delete", "split pane direct fixture then Undo", "selection is None while a live pane is focused", "restoring placeholder maps focus to requested logical identity", "background source refresh", "tab reorder and close index shift"]
+    verification_rule: "红测必须证明物理 focus 已落到 sibling/restored pane 但 membership-only sync 会产生零 active rows；修复后同一 sync 原子提交 cardinality、RowId、order 与 exactly-one focused active row。static check 必须禁止可选 focus 注入分支。"
+
+  - id: TERMINAL-SESSION-EXECUTION-CONTEXT-53
+    source: LR-144
+    capability: "terminal session execution context ownership"
+    invariant: "每个 terminal SessionId 拥有自己的完整 bootstrap execution context；Environment synthetic transport owner 只能由第一个真实 bootstrapped terminal 一次性建立 canonical execution context，后续 terminal 不得覆盖。有效 context 必须同时包含非空 shell_path、cwd、HOME、PATH；CODEX_HOME/CLAUDE_CONFIG_DIR 可合法 unset；ASHIDE_SESSION_EXECUTION_CONTEXT 只能由完整 snapshot 校验成功后派生。helper daemon 的 cwd/env 不是任何 Environment session 的配置权威。"
+    lifecycle: "连接只建立 synthetic transport owner，不注册空 executor；首个 Environment terminal 以 target-config root 或目标 passwd home 启动，shell bootstrap 捕获 cwd/env 后，ModelEventDispatcher 必须先让 RemoteServerManager 原子提交 alias binding、exact terminal context，并以 insert-if-absent 方式建立 Environment owner context，然后才能调用 Sessions::initialize_bootstrapped_session 选择并固化该 terminal 的 CommandExecutor。依赖 RunCommand 的 heartbeat、roots/scan/read/mutate/Fork 只能由同一个 execution-carrier readiness gate 在 owner context 存在后释放；reconnect 通过同一 transport registry 重放 owner 以及仍存活的全部 alias contexts；alias 注销必须同时删除 manager record 与当前 helper ConnectionState executor，owner 注销必须删除 owner、全部 aliases 与整条 connection state。"
+    failure_rule: "禁止 synthetic owner 空 context、alias-only 半状态、先初始化 Session/选择 NoOpCommandExecutor 再事后注册 execution context、任意 terminal last-writer-wins 覆盖 owner、只重放 owner 而丢失 aliases、alias 注销后 helper 继续保留 executor、继承 daemon cwd/env、shell_path 缺失时裸 shell-name fallback、missing HOME→workspace root 或 UI/current-app fallback；manager 与 helper 两侧都必须独立拒绝 malformed SessionBootstrapped。transport Connected 不等于 command-ready，缺失 canonical carrier 时 heartbeat 不得启动，roots/version probe 必须等待或显式失败。"
+    negative_space: ["control session connected before any terminal bootstrap", "connected transport survives longer than one heartbeat interval without a carrier", "first matching execution context releases heartbeat and root resolution", "stale or unrelated execution context cannot release owner heartbeat", "incomplete marker-less snapshot", "marker present but cwd/HOME/PATH/shell_path missing", "custom absolute CODEX_HOME", "custom relative CODEX_HOME", "custom CLAUDE_CONFIG_DIR", "daemon has conflicting roots", "daemon has conflicting PATH", "owner plus terminal A and terminal B", "terminal B bootstraps after A", "owner reconnect replays all live aliases", "alias removed while current connection stays alive", "alias removed before reconnect", "owner teardown", "missing HOME", "per-command override does not mutate base context"]
+    verification_rule: "协议测试必须证明 alias+context 原子注册、helper fail-closed、同一连接的两个 SessionId 分别使用各自 cwd/env、daemon 冲突值不可见、真实 wire replay 恢复 owner+aliases、alias 注销即时删除 executor 且 reconnect 不复活；Workspace 测试必须证明 connected+no-context 不调度 command heartbeat、不重连，matching context 建立后才开始 heartbeat，stale/unrelated context 保持 inert；真实 remote runtime 以非默认 Codex/Claude roots 完成 scan→read→mutate→Fork，并由目标 PATH 执行 codex --version。"
+
+  - id: RELEASE-PRIVACY-TARGET-IDENTITY-60
+    source: LR-155
+    capability: "release privacy and fixture identity"
+    invariant: "任何可公开的 source、SPEC、matrix、tracker、Release notes 与解包后的发布资产都不得包含开发者真实 SSH target/alias；测试和运行时证据只能使用 remote-fixture-* 匿名身份。"
+    lifecycle: "提交前与 CI 扫描 git-tracked source；macOS packaging 与最终 upload job 再扫描发布目录和 ZIP/TAR/DMG 解包内容；Release create/update 始终用当前提交中的受检 notes 覆盖旧 body。"
+    failure_rule: "发现本机 private token、未审查 ssh:ssh-config fixture、缺少版本化 Release notes 或资产无法解包验证时必须 fail closed，禁止仅改展示文字、保留旧 Release body 或把真实 target 写入 denylist 源码。"
+    negative_space: ["private alias in Rust fixture", "private alias in tracker evidence", "stale existing Release body", "compressed ZIP/TAR payload", "mounted DMG payload", "new non-generic ssh-config alias", "local-only denylist absent in CI"]
+    verification_rule: "script/check_release_privacy 必须同时有当前仓库零命中证明、local-only private token 负向探针、non-generic authority 负向探针，并在 CI、presubmit、release source validation、macOS packaging 与 final upload 复用。"
+
+  - id: RELEASE-MACOS-DIRECT-DMG-61
+    source: LR-156
+    capability: "canonical macOS user-facing release artifact"
+    invariant: "macOS Release 的用户安装入口必须是直接可下载的 Ashide-macos.dmg；不得把 DMG 再包进 ZIP，也不得在 DMG 缺失时回退发布裸 .app。"
+    lifecycle: "script/macos/bundle 先生成并验证 sealed App 与 DMG；script/make_release_artifacts 再验证 App identity、codesign seal 与 hdiutil image，然后复制为 target/release-artifacts/Ashide-macos.dmg；workflow 上传 DMG 与独立 checksum。"
+    failure_rule: "DMG 缺失、hdiutil verify 失败、App seal/版本身份失败、workflow 仍引用 Ashide-macos.zip 时必须停止发布。"
+    negative_space: ["valid App but missing DMG", "corrupt DMG", "zip-wrapped DMG", "bare App fallback", "stale zip checksum", "GitHub artifact list omits DMG"]
+    verification_rule: "静态 contract test 锁定 direct DMG 输出、hdiutil verify、无 zip/裸 App fallback 与 workflow DMG upload；真实 release artifact 必须通过 image verify、checksum 和隐私解包扫描。"
+
+  - id: TEST-HARNESS-SSH-FIXTURE-HERMETICITY-62
+    source: LR-157
+    capability: "Workspace Environment test fixture hermeticity"
+    invariant: "Workspace Environment lifecycle/reconnect 测试必须从隔离 SQLite 中读取显式 saved-provider fixture；共享 fixture 禁止使用 ssh-config: connection ref，也不得读取开发者 ~/.ssh/config 才能通过。"
+    lifecycle: "initialize_app 先迁移测试专用 SSH manager 数据库并幂等注册 remote-fixture-primary saved server；所有共享 Environment 测试通过同一个 saved-provider node id 构建 runtime transport descriptor。"
+    failure_rule: "共享 helper 出现 ssh-config:、fixture 未注册、测试通过依赖 load_candidates() 或开发者机器 alias 时必须 fail closed；禁止给失败测试逐条注入 fallback。"
+    negative_space: ["empty user SSH config", "unrelated user SSH aliases", "parallel workspace tests", "repeated initialize_app", "saved fixture already exists", "config-provider parser-specific tests"]
+    verification_rule: "static checker 必须锁定共享 helper 的 saved-provider connection ref 和初始化注册点；focused test 必须证明 descriptor 来自隔离 SQLite，并让全部受影响 lifecycle/reconnect 测试在不依赖用户 SSH config 的情况下通过。"
+
+  - id: RELEASE-PRIVACY-BINARY-TEXT-BOUNDARY-63
+    source: LR-158
+    capability: "release privacy scanner binary/text ownership"
+    invariant: "本机 private denylist 必须逐字节扫描源码、二进制和压缩载荷；通用 ssh-config/root-target 语法规则只解释 git 文本与解包后的结构化文本，禁止把编译二进制中的相邻字符串误判为一个 fixture。"
+    lifecycle: "release privacy checker 先扫描 tracked text 与 private token bytes；对 ZIP/TAR/DMG 解包或挂载后，按 MIME 分类文本做通用 fixture 校验，同时继续对全部文件做 private token byte scan。"
+    failure_rule: "二进制字符串相邻不得阻塞发布；压缩包内文本 target、挂载 DMG 文本 target 或任意载荷中的本机 private token 必须 fail closed。"
+    negative_space: ["adjacent compiled string constants", "ELF helper", "Mach-O app", "raw DMG bytes", "archived text leak", "mounted DMG text leak", "private token embedded in binary"]
+    verification_rule: "contract test 必须同时证明 binary adjacency 通过、bare ssh-config/root target 失败、archive text target 失败；真实 DMG 与 helper artifacts 必须通过扫描。"
+
+  - id: RELEASE-ARTIFACT-FORMAT-MIGRATION-CHECKSUM-64
+    source: LR-159
+    capability: "release artifact format migration cleanup"
+    invariant: "同一逻辑发布物从 ZIP 切换为 DMG 时，producer 必须原子删除旧文件、旧 sidecar 与 SHA256SUMS 旧 basename；最终 checksum manifest 只能引用实际存在的产物。"
+    lifecycle: "make_release_artifacts 确定 current 与 obsolete 扩展，先删除 obsolete artifact/sidecar，再从 SHA256SUMS 同时移除 current/obsolete 行，最后写入新产物 checksum。"
+    failure_rule: "checksum manifest 引用不存在文件、同一 logical name 同时保留 ZIP/DMG 行或格式迁移依赖人工清理时必须停止发布。"
+    negative_space: ["old ZIP file absent but checksum remains", "old ZIP sidecar remains", "idempotent DMG rebuild", "CLI ZIP rebuild", "shared SHA256SUMS with helper artifacts"]
+    verification_rule: "contract test 锁定 obsolete file/sidecar 与双 basename checksum cleanup；真实 SHA256SUMS 必须逐项 shasum -c 零失败且无 Ashide-macos.zip 条目。"
+
+  - id: RELEASE-NOTES-VERSIONED-SOURCE-OF-TRUTH-65
+    source: LR-160
+    capability: "versioned GitHub Release notes ownership"
+    invariant: "GitHub Release body 必须由当前 tag checkout 中的 docs/releases/<tag>.md 唯一生成；已有 Release 也必须用受检 notes 覆盖，禁止保留人工旧 body 或自动占位文本。"
+    lifecycle: "validate job 要求 versioned notes 存在；upload job 对 existing Release 执行 gh release edit --notes-file，对新 Release 执行 gh release create --notes-file --draft；全部 producer、隐私扫描、完整 checksum manifest 校验和资产上传成功后，同一 canonical job 执行 gh release edit --draft=false --latest。"
+    failure_rule: "notes 文件缺失、已有 Release 不覆盖 body、新 Release 使用 inline placeholder、producer/checksum/upload 未完成即公开，或 tag workflow 成功后仍遗留 Draft 时必须 fail closed。"
+    negative_space: ["existing draft release", "existing public release rerun", "missing notes file", "stale manual body", "new release before assets", "tag retarget"]
+    verification_rule: "release privacy contract 与 static checker 必须锁定 versioned path、existing edit、new draft create、notes-file 和 upload 后唯一 --draft=false transition；远端验证必须确认 Release 非 Draft、body 等于 versioned notes、target commit 等于 tag 且资产 digest/manifest 完整。"
+
+  - id: RELEASE-MACOS-DMG-OPTIONAL-SIGNING-66
+    source: LR-161
+    capability: "direct macOS DMG with optional Developer ID signing"
+    invariant: "macOS Release 必须直接产出可下载的 Ashide-macos.dmg；零签名凭据使用完整 ad-hoc seal，六项目标 Developer ID/notarization 配置齐全时自动升级为签名、公证和 Gatekeeper 验证，上传意图不得强制改变签名模式。"
+    lifecycle: "shared resolver 仅按 0/6/partial 配置解析 adhoc/signed/error；bundle 与 packager 使用同一模式。两种模式都验证 App strict seal、版本身份、DMG hdiutil 与 checksum；signed 模式额外执行 Developer ID、hardened runtime、notarization、stapling 和 App/DMG Gatekeeper postcondition。"
+    failure_rule: "缺 DMG、部分 secrets、硬编码 Team ID、模式在 bundle/packager 间漂移必须阻断；signed 模式缺 identity/runtime/notary ticket 或任一 spctl 拒绝也必须阻断，但零 secrets 不得阻断直接 DMG 发布。"
+    negative_space: ["zero signing secrets", "partially configured secrets", "six complete secrets", "upload enabled without signing", "ad-hoc strict seal failure", "Developer ID without hardened runtime", "notarized but unstapled DMG", "rerun existing Draft"]
+    verification_rule: "static checker 必须锁定上传意图与签名模式解耦、0/6/partial resolver、无硬编码 Team ID 和两种 bundle/packager 路径；contract test 必须原生解析所有 release Bash，并执行 adhoc/signed/partial 负空间；最终 runtime 证据必须来自远程直接 Ashide-macos.dmg、checksum 与 hdiutil 验证。"
+
+  - id: RELEASE-MACOS-INDEPENDENT-ARTIFACT-JOBS-67
+    source: LR-162
+    capability: "independent macOS App/DMG and remote-helper artifact jobs"
+    invariant: "macOS App/DMG 与 remote helper 是独立发布物，必须在独立 job/timeout domain 中并行构建并分别上传 workflow artifact；最终 Release upload 只负责在全部 producer 成功后汇合，helper 延迟不得吞掉已完成 DMG 的取证能力。"
+    lifecycle: "build-macos-app 独占 App bundle、direct DMG、checksum、privacy 与 release-macos-app upload；build-macos-helpers 以 x86_64/aarch64 matrix 为每个架构建立独立 runner、timeout 与 release-macos-helper-<arch> upload。两类 producer 直接依赖 validate-release-identity，upload-release 同时依赖 matrix 聚合结果及其他平台 producer。"
+    failure_rule: "禁止把 App/DMG 与 helper 串入同一 job、在 helper 完成后才上传 DMG、让任一 producer 绕过 identity gate，或由 upload-release 在 producer 未成功时发布不完整资产。增加 timeout 不能替代独立所有权。"
+    negative_space: ["App succeeds while helper is slow", "one helper architecture is slow", "one helper architecture fails", "helper fails after DMG packaging", "App fails while helpers succeed", "workflow cancellation", "missing App upload", "missing helper upload", "upload-release missing one producer dependency", "ZIP or bare App fallback"]
+    verification_rule: "static checker 与 Rust workflow contract 必须锁定两个 job 的 owner、步骤互斥、独立 upload、直接 identity dependency、独立 timeout 和 upload-release 汇合依赖；远程验证必须证明 App 与 helper jobs 并行运行并分别产生可下载 artifact。"
+
+  - id: WINDOWS-WSL-EXPLICIT-SHELL-STARTUP-68
+    source: LR-163
+    capability: "Windows explicit WSL distribution terminal startup"
+    invariant: "用户明确选择 WSL distribution 后，ShellStarter resolution、WSL command construction、ConPTY spawn 与 bootstrap 必须保持同一个 selected distribution identity；任一阶段失败都必须在该 terminal carrier 上显式呈现，禁止降级到 PowerShell、其他 Windows shell 或另一 distribution。"
+    lifecycle: "AvailableShell 持有 selected distribution name；WslShellStarter 通过唯一共享 command contract 查询目标 installation 的 shell/HOME 并构造 spawn argv；TerminalManager 原样传播 resolution failure；Windows PTY 只消费已解析 starter 并启动 wsl.exe，成功后 Session 保存相同 ShellLaunchData::WSL identity。"
+    failure_rule: "发行版探测命令失败、目标 shell 为空/不支持、wsl.exe 不可用、ConPTY CreateProcessW 失败或 bootstrap 失败时必须保留 WSL 选择上下文并显示原始阶段错误；禁止 Option 丢错、compute_fallback_shell、未文档化参数分叉或探测与 spawn 各写一套 argv。"
+    negative_space: ["Debian 13 selected explicitly", "distribution name contains spaces", "wsl.exe missing", "WSL CLI rejects an option", "empty SHELL", "unsupported target login shell", "ConPTY spawn failure", "unrelated Windows default shell available"]
+    verification_rule: "跨平台 focused tests 必须锁定共享、仅使用稳定 WSL CLI 参数的 discovery/spawn argv，以及显式选择失败不 fallback；Windows cargo check/build 必须通过；最终 verified 必须来自真实 Windows + WSL2 Debian 13 的 terminal bootstrap 与 persisted ShellLaunchData 证据。"
+
+  - id: WINDOWS-SSH-CONFIG-SHARED-CATALOG-69
+    source: LR-164
+    capability: "Windows-safe SSH config source and committed candidate catalog"
+    invariant: "SSH config 默认路径解析、文件读取、候选集合与 open target 必须由底层 source + 单一 app-global catalog 原子持有；Workspace picker、SSH Manager、candidate open 与 ssh-config runtime reconnect 只消费同一 committed snapshot。UI 禁止展开 ~、读取 HOME/USERPROFILE、拼接 .ssh/config、执行文件 IO 或按操作系统/环境分支。"
+    lifecycle: "warp_ssh_manager 解析当前 installation 的默认 config source 并完成一次读取；SshTargetCatalog 在启动、显式 refresh action 或 saved-server mutation invalidation 时，把 config source 与 SQLite saved servers 作为一个 generation 原子提交，并保留 path/open target/outcome/candidates/include metadata；所有 UI render 与 runtime lookup 只读该 generation 的 committed snapshot。"
+    failure_rule: "home/source 不可用时必须提交明确 unavailable/error 状态且 open target 为空；NotFound、IO error、empty 与 loaded 必须保持互斥。禁止 UI 编造 ~/.ssh/config、render 时同步 load、Workspace/SSH Manager 各自缓存、或 reconnect 再次直接读取磁盘。"
+    negative_space: ["Windows home path with drive letter", "home unavailable", "config not found", "permission error", "empty config", "multiple candidates", "refresh changes candidate order", "picker renders repeatedly", "SSH Manager and Workspace open simultaneously", "ssh-config reconnect after refresh"]
+    verification_rule: "static checker 必须锁定 app 生产源码中唯一 load_candidates owner、UI 禁用 dirs/home/.ssh literal/std::fs、所有 config alias lookup 消费 catalog snapshot；focused tests 覆盖 Windows 路径原样 open、unavailable 不编造路径、共享 snapshot 与 refresh 原子替换；cargo check 与 Windows xwin check 必须通过，最终 verified 需真实 Windows 打开 config 与连接别名证据。"
+  - id: TERMINAL-IN-BAND-GENERATOR-CANCEL-70
+    source: LR-166
+    capability: "terminal in-band generator protocol completion versus command cancellation"
+    invariant: "TerminalModel::IsReceivingInBandCommandOutput 是生成器 payload lifecycle 唯一 owner；ANSI OSC Start/End 是协议 transition，PtyController command execution 是 ownership cancellation。只有真实 OSC End 可以校验、decode 并发送 ExecutedInBandCommand。"
+    lifecycle: "用户、AI、共享会话或 EnvVarCollection command 开始时幂等取消 receiver 并丢弃 partial payload；local TTY 与 network-backed PTY 共用 TerminalModel transition，差异只在 PTY output transport timing。"
+    failure_rule: "禁止从 write_command 伪造 End、在 command takeover 时 decode partial payload、为 transport 复制 receiver state，或只屏蔽重复告警而不修 transition。"
+    negative_space: ["idle receiver", "partial payload", "valid OSC End", "duplicate real End", "user command", "AI command", "network-backed PTY"]
+    verification_rule: "static checker 必须扫描全生产 Rust 树并输出 End/cancel/takeover 的 path:line:enclosing-function inventory，锁定 ANSI parser 是 End 唯一 owner、take_command_output_ownership 是 cancel 唯一 wrapper、write_command 是 takeover 唯一 caller，并以非法直接 End、非法 wrapper、新生产文件三类负向 probe 证明 fail closed；write_command 级 focused tests 必须覆盖 idle no-op、partial discard、零 terminal error event；真实本机 PTY 必须分别执行 user 与 AI command，保存原始日志并证明 End 相关 warning/error 计数为零。"
+
+  - id: UI-MENU-DEFERRED-ACTION-DISPATCH-71
+    source: LR-167
+    capability: "Menu deferred responder action ownership"
+    invariant: "Menu 只拥有 selection 与 Close lifecycle；pointer 与 keyboard Enter 必须进入唯一 activate_selected_item primitive。该 primitive 先同步提交 Close intent，再把可选 item action 交给 pending effect；item action 只能在当前 Menu update 把 view 放回 window registry 后进入 responder chain。"
+    lifecycle: "pointer 先以 MenuAction::Activate 选择目标，keyboard Enter 使用当前 active submenu selection，二者随后共用 activate_selected_item；有 action 时先 emit Close(via_select_item=true)，再登记 deferred action，view registry 恢复后 flush action。关闭订阅者可以销毁或重建 parent/menu，且 action 观察到的必须是已关闭状态。无 action 时不产生 Close、ItemSelected 或 responder action。without_item_action_dispatch 模式则依次 emit ItemSelected、Close，不登记 responder effect。"
+    failure_rule: "禁止 render closure 直接分发 item action、pointer/Enter 各自实现 close/action 顺序、在 Menu update 栈内同步调用 parent action、action 先于 Close、consumer-specific circular-update workaround、捕获 Circular view update panic或增加 macOS-only 分支。"
+    negative_space: ["keyboard Enter", "pointer select", "parent rebuilds same menu", "parent closes menu", "nested submenu", "item without action", "without_item_action_dispatch"]
+    verification_rule: "static checker 必须扫描全生产源码树并打印 path:line/enclosing-function owner inventory，锁定 MenuAction::Activate 只从 pointer render 进入、deferred item action 只由 activate_selected_item 登记，并用直接调用、wrapper 与新文件绕过探针 fail closed；focused tests 覆盖 pointer/keyboard、Close-before-action、parent rebuild/close、nested submenu、无 action 与 without_item_action_dispatch。"
+
+  - id: ENVIRONMENT-USER-STATE-MUTATION-GENERATION-72
+    source: LR-168
+    capability: "Environment session user-state optimistic mutation generation"
+    invariant: "EnvironmentTable 必须按 canonical navigation key 原子持有 alias/pin projection 与 mutation generation；只有当前 generation 的 backend completion 可以提交成功或回滚失败。"
+    lifecycle: "共享 UI 先在 EnvironmentTable 开始 generation 并提交 optimistic projection，再把 generation 交给 local/runtime backend；同步 local completion 立即提交，runtime callback 仅在 generation 仍当前时提交或回滚。"
+    failure_rule: "禁止旧 success/failure 覆盖新 mutation、整份 previous_state 无 generation 回滚、Pending 立即显示成功、或 callback 绕过 EnvironmentTable 直接替换 projection。"
+    negative_space: ["two runtime mutations complete out of order", "old failure after new success", "old success after new optimistic state", "canonical authority aliases", "synchronous local failure", "workspace owner dropped"]
+    verification_rule: "focused tests 必须证明 stale success/failure 都被拒绝且较新 projection 保留；static checker 锁定 generation 从 begin 到 runtime completion 的唯一链路。"
+
+  - id: REMOTE-HELPER-SSH-STDIN-UPLOAD-73
+    source: LR-169
+    capability: "remote helper dependency-free upload transport"
+    invariant: "remote helper 上传只依赖已经建立的 SSH ControlMaster 与远端 POSIX shell；远端缺少 rsync 或 SFTP/SCP subsystem 时，必须通过 SSH stdin 把本地产物写入唯一临时文件，再由 installer 原子 promote 到最终路径。"
+    lifecycle: "installer 先交叉编译当前 checkout 对应的 Linux musl helper，创建远端目录与唯一 temp path；可用时 rsync 增量上传，否则 canonical ssh_upload_file_for_target 流式写 temp；成功后 chmod、mv、stamp、停止旧 daemon 并执行协议/版本校验。"
+    failure_rule: "禁止把 scp 当作 rsync fallback、直接覆盖正在执行的最终 binary、失败后回退 release helper、吞掉 SSH stdin/write/remote cat 错误，或在未 promote 前报告安装成功。"
+    negative_space: ["remote has no rsync", "sshd has no SFTP subsystem", "large helper exceeds memory", "path contains shell metacharacters", "stdin write fails", "remote disk full", "concurrent reconnect", "protocol mismatch"]
+    verification_rule: "static checker 锁定唯一 SSH stdin upload primitive 并禁止 helper installer 调用 scp；unit/contract tests 覆盖 shell quoting、无 rsync 分支和 temp→promote 顺序；修改后运行 cargo check、x86_64-unknown-linux-musl helper build 与 release workflow contract。"
+
+  - id: TERMINAL-INTERACTION-OWNER-74
+    source: LR-170
+    capability: "terminal focus, IME composition and block-filter edit-session ownership"
+    invariant: "pane focus 由 exact PaneFocusHandle 直接提交 PaneId 到 PaneGroupFocusState；IME composition 由 TerminalModel 固定 set 时的 screen/block carrier；block filter target 与 generation 由 BlockFilterEditor edit session 唯一持有。三者都不得依赖瞬时 responder ancestry 或关闭后的父 view 镜像。"
+    lifecycle: "focus handle commit 触发 FocusChanged，由 PaneGroup 唯一更新 history 与 PaneFocused；SetMarkedText 建立 carrier，ClearMarkedText 幂等清理同一 carrier后结束 lifecycle；filter open 建立 {block_index,generation}，UpdateFilter 携 token，close 先结束 session再 reset，父层只接受 current token。"
+    failure_rule: "禁止 HandleFocusChange child→ancestor action、扫描所有 pane 猜 focus、clear marked text 查询当前 active block、identity-less UpdateFilter、或 TerminalView 保留平行 active_filter_editor_block_index。"
+    negative_space: ["focus before presenter attachment", "hidden/remounted pane", "same pane refocus", "split pane", "IME clear after command finish", "screen switch after IME set", "filter close with queued update", "rapid filter switch A to B"]
+    verification_rule: "static checker 禁止三类旧 owner；focused tests 覆盖 exact focus commit、late/idempotent composition clear、stale filter generation rejection与A/B隔离；cargo check 必须通过。"
+
+  - id: AGENT-LAYERED-CAPABILITY-REGISTRY-75
+    source: LR-171
+    capability: "single layered Agent capability registry"
+    invariant: "每个 Agent identity 只能有一个 registry record，分别声明 detect/live binding、index/list/cold restore、resume/attach、SessionBridge IR read、fork/edit preview、native write/derived launch；产品入口、Navigator、scanner、runtime 与 SessionBridge 禁止维护第二套 capability bool 或 provider match table。"
+    lifecycle: "registry 是静态语义 owner；installation/connection readiness 是独立动态状态。UI 只展示 registry capability 与当前 context/readiness 的交集，不得把未接线能力声明为可执行。"
+    failure_rule: "新增或删除 Agent 时任何生产 consumer 未穷尽、任一 capability 没有实现 owner、或同一能力在第二 registry 重复声明，必须在编译或 static check 阶段失败。"
+    negative_space: ["detected but not indexable", "indexable but not resumable", "read-only bridge source", "fork target without native writer", "unknown custom agent", "local unavailable", "runtime unavailable"]
+    verification_rule: "static checker 扫描整个生产树并锁定唯一 registry type、全部直接 consumer 与禁止类型；focused tests 逐 Agent 验证 menu/index/resume/bridge projection。"
+
+  - id: AGENT-ACTION-SIDECAR-IA-76
+    source: LR-172
+    capability: "capability-driven hierarchical Agent actions"
+    invariant: "Environment Strip 的 Agent 入口与 session context actions 共用同一 action projection；顶层不得按 provider × action 平铺。选择 Agent 或 action intent 后，sidecar 只展示当前 context 可执行的 New、Resume、Attach、Fork、Edit、Write-back。"
+    lifecycle: "打开 sidecar 不产生 session/process/persistence 副作用；确认 action 后才提交 typed intent。failure/cancel 保留 source session、selection、order 与 target publication state。"
+    failure_rule: "禁止依赖 deprecated generic submenu、为每个 provider 添加顶层 Fork/New item、或点击 unsupported action 后静默 return。"
+    negative_space: ["zero installed agents", "one agent", "many agents", "keyboard navigation", "pointer navigation", "source disappears while sidecar is open", "target becomes unavailable", "cancel", "conversion failure"]
+    verification_rule: "static checker 输出全生产树 path:line inventory，并锁定 project_agent_actions 唯一消费 owner、两个一级域构造 owner、Edit intent target 到 shared dialog 的显式透传，以及旧 provider 顶层 New/Fork/Edit、source-derived Edit target、生产硬编码 readiness 零命中；领域模型 tests 覆盖 capability/context filtering、顶层 cardinality 与 cancel/failure 零副作用；hermetic UI tests 覆盖 zero-installed 一级域、Claude/Codex New 与 Fork/Edit 二级投影、pointer/keyboard 共事件链、tab/pane/Navigator source 和 remote Connected authority；dialog test 用不同 source/intent target 证明 intent target 被预选；cargo check 与 lib test no-run 必须通过。"
+
+  - id: GEMINI-CLI-HARD-CUT-77
+    source: LR-173
+    capability: "remove Gemini CLI integration while preserving Gemini model providers"
+    invariant: "Gemini CLI provider identity、harness/plugin/assets、detection、menu/settings、listener/index/resume、persistence parsing、SessionBridge 与文档测试必须零残留；Gemini 模型/API provider 和通用模型推理能力必须保持。"
+    lifecycle: "本仓库未发布且无历史用户，removed Gemini CLI serialized identity 直接拒绝，不保留 alias、migration、fallback、hidden adapter 或 no-op branch。"
+    failure_rule: "生产树出现 CLIAgent::Gemini、Gemini CLI command/asset/setting，或误删 Gemini model/API provider，均阻断。"
+    negative_space: ["persisted removed CLI identity", "gemini command typed manually", "Gemini API model selection", "generic genai Gemini backend", "unknown custom CLI named similarly"]
+    verification_rule: "static checker 分别证明 CLI integration 零命中和 model/API owner 正向存在；focused tests 证明 removed identity 被拒绝且 Gemini model 仍可选。"
+
+  - id: AGENT-SESSION-DISCOVERY-OWNER-78
+    source: LR-174
+    capability: "shared Agent session discovery plan with transport-only local/runtime split"
+    invariant: "统一 registry 生成 discovery plan，共享 parser 生成 stable identity 与 metadata；EnvironmentTable 原子持有 scan generation 与 canonical collection。local filesystem/native client 与 runtime RPC 只负责执行同一 plan，不拥有 provider policy、排序或删除语义。"
+    lifecycle: "scan start 保留 committed collection；每个 provider 必须返回带 provider identity 的 Complete/SourceMissing/PermanentlyDeleted/Failed/Cancelled outcome。只有 current generation 的全 provider complete success 原子替换；任一 provider source 暂失、parse failure、cancel 与 stale completion保留完整旧 collection，PermanentlyDeleted 只删除该 provider 且保持其余 identity/order。"
+    failure_rule: "禁止 local/remote 各自枚举 provider、使用 global observed_source 让一个 provider 掩盖另一个 provider missing、用未观察到解释永久删除、提交部分 record、或 transport adapter 重排业务结果。"
+    negative_space: ["zero sessions", "target plus two unrelated sessions", "source temporarily missing", "source permanently deleted", "malformed one of many records", "out-of-order completions", "cancel", "provider removed"]
+    verification_rule: "集合测试至少包含目标 provider 与两个无关 provider 并逐阶段检查 cardinality/identity/order；Jcode Stage A 只调用公开 session list CLI，测试用 provider-scoped plan/fixture hermetic 执行且不依赖本机 jcode 版本；static inventory 扫描全生产源码树，打印 path:line/enclosing-function，并锁定 plan execute、provider scan、local/runtime adapter 的 canonical owner 与负向 wrapper/new-file probe。"
+
+  - id: SESSION-BRIDGE-TYPED-INTENT-PROVENANCE-79
+    source: LR-175
+    capability: "typed SessionBridge intent, provenance and atomic publication"
+    invariant: "Resume、Attach、Fork、Edit copy 与 Write-back 是互斥 typed intent。source 永不因转换被改写；Fork/Edit 生成新 target identity并保留 source provenance；Attach 不创建；Write-back 只允许 capability 明确且 native identity 匹配的 target。"
+    lifecycle: "Prepare 固定 source provenance、source revision/CAS token 与唯一 target identity → Preview → Confirmed → native Written（仅 staging 可见）→ Launched（carrier 成功）→ Published（canonical projection 一次性原子可见）；任一步 failure/cancel 清理 staging/native 临时数据且不改变 source、target registry、selection 或 order。"
+    failure_rule: "禁止 provider-specific action 绕过 preview/capability、复用 source identity 作为 derived target、由 writer 再生成第二 UUID、在 launch 成功前发布半成品、carrier missing 静默 return、revision/provenance/CAS mismatch fallback，或由 Ashide 默认填充 target-owned provider/model/profile/permission 字段。"
+    negative_space: ["source disappears", "source revision conflict", "provenance mismatch", "target config missing", "writer failure", "launch failure after native write", "carrier missing", "cancel before confirm", "cancel during write", "identity mismatch"]
+    verification_rule: "逐阶段状态空间测试检查 source、staging 与 publication cardinality；成功、write failure、launch failure、cancel、revision conflict、carrier missing 均有断言；全生产树 static inventory 打印 primitive caller path:line 与 enclosing function 并用非法 wrapper 负向探针 fail closed；外部原生格式字段逐项标注 provenance并由真实 target consumer 验证。"
+
+  - id: SESSION-CANONICAL-PANE-BINDING-80
+    source: LR-176
+    capability: "pane-owned Agent session binding projection"
+    invariant: "live 与 materializing pane 的 provider metadata 唯一来自 PaneConfiguration.session_binding 及其 LeafSnapshot/SQLite round-trip；Started/SessionUpdated 更新同一 owner并触发 App State save；Navigator 只投影，不查询 CLIAgentSessionsModel 后补 binding 或重建 placeholder metadata。"
+    lifecycle: "Allocated binding → Persisted binding → Runtime attached → Updated binding；carrier replacement 不改变 container UUID 或 binding owner。"
+    failure_rule: "is_live_container 或 Agent-bound placeholder 缺 canonical binding 时 fail closed，禁止用 source/tab locator、runtime session model、command string 或 render overlay 补齐。"
+    negative_space: ["binding known before runtime", "native id arrives after start", "placeholder replacement", "cold restore", "layout reorder", "carrier missing", "save failure"]
+    verification_rule: "static checker 禁止 Navigator 查询 session model enrichment；focused tests覆盖事件保存、placeholder/live相同投影和缺 binding fail closed。"
+
+  - id: SESSION-RESTORE-TYPED-FINALIZE-81
+    source: LR-177
+    capability: "shared typed restore finalize and rollback"
+    invariant: "EnvironmentTable 原子持有 pending projection 与 monotonic generation；local/runtime 共用 Allocated → Delivering → Live/Retryable/Cancelled 状态机。success 原子替换 carrier，failure 回到 retryable carrier，显式 cancel 移除并 cleanup，carrier missing 独立 fail closed且不消费 canonical owner。"
+    lifecycle: "EnvironmentBackend 只封装 delivery timing；finalize transition 必须包含 exact pane identity、generation 与 Success/RetryableFailure/Cancelled/CarrierMissing/ModelBroken outcome，旧 completion 不得提交且 caller 禁止静默 return。"
+    failure_rule: "禁止 log-and-return、false 表达多种失败、authority-wide drain、silent carrier missing 或 backend-specific rollback。"
+    negative_space: ["local synchronous success", "runtime async success", "delivery failure", "cancel", "stale success", "stale failure", "carrier closed", "unrelated pending carriers"]
+    verification_rule: "状态空间测试逐阶段检查 carrier、pending cardinality、selection 与 order；static checker锁定全部 finalize callers 和禁止静默 return。"
+
+  - id: PANE-SNAPSHOT-FAIL-CLOSED-82
+    source: LR-178
+    capability: "pane snapshot invariant before identity allocation"
+    invariant: "Pane snapshot 必须在任何 runtime identity 或 persistence 副作用前验证 content invariant；missing content 立即失败。terminal UUID 只属于真实 Terminal runtime，不得作为 generic pane 或错误 fallback identity。"
+    lifecycle: "Validate pane content → project typed snapshot → persist；validation failure 无 UUID、无 snapshot、无 SQLite mutation。"
+    failure_rule: "禁止 impossible branch 先生成 UUID 再 expect/panic，或让非 Terminal pane 获得 Terminal runtime identity。"
+    negative_space: ["missing content", "Welcome pane", "runtime placeholder", "read-only transcript", "terminal pane", "nested persistable branch collapse"]
+    verification_rule: "focused tests证明 missing content 零身份分配，static checker禁止错误分支 UUID constructor。"
+
+  - id: JCODE-PHASED-CONTROL-PLANE-83
+    source: LR-179
+    capability: "Jcode/Omp read-only native metadata discovery and native resume"
+    invariant: "Jcode 与 Omp 的 discovery 只读取各自原生会话 store 中完成 resume 所需的最小 metadata：Jcode 为 ~/.jcode/sessions/session_*.json，Omp 为 ~/.omp/agent/sessions/*/*.jsonl 的 metadata prefix。Jcode 在 Navigator 与 New Session 入口使用随应用分发的官方图标；默认可见性在 provider reader 内按其原生 picker 的关键语义处理：`is_debug=true` 的 self-dev/swarm worker 会话不投影，缺失或空 `messages` 数组的 session 不投影，且这些隐藏 candidate 不得消耗 provider 的 recency limit；`parent_id` 不是可见性条件，非 debug 且有结构化 messages 的 parent session 仍可发现。此判定只读取 root `is_debug` 与 `messages` 数组存在性/长度，不读取 message content。它不是 SessionBridge、不是历史修改接口，也不从第三方 store 推导 provider-owned 配置、消息正文或可写状态。每条 record 必须通过 native id 与 filename 的对应校验；Jcode 仅接受 root id 与 session_*.json 一致，Omp 仅接受 header id 与 <timestamp>_<id>.jsonl 一致。`agents.third_party.history_enabled_agents` 是 local/runtime discovery plan 的唯一选择 authority：默认开启所有同时支持 index 与 resume 的 provider；禁用 provider 不读取其 store、不投影其历史 virtual row，并移除其 New Session 入口，但绝不影响手工 terminal command detection 或直接 native Resume。runtime RPC 必须显式接收 desktop 端的 enabled_agents，daemon 不得读取或猜测 desktop settings。local 与 runtime 必须执行同一个 AgentSessionDiscoveryPlan，并从目标 HOME 派生 CliAgentStoreRoots；Resume 只执行各 Agent 的原生命令（`jcode --resume <id>` / `omp --resume <id>`），不得依赖 discovery、扫描结果或任何 daemon handshake。realtime attach/input/cancel、Fork/Edit/Write-back 与 native history write 不属于当前产品能力，保持 capability=false 且无 Ashide 入口。"
+    lifecycle: "Discovery：读取唯一设置 authority → Build shared plan → scan each enabled provider 的只读 metadata → validate Jcode filename/id and default visibility before applying the provider recency limit → commit canonical virtual rows → Cold restore emits native resume command。设置变更必须刷新所有 authority，disabled provider 的 canonical rows 在 Navigator redraw 前移除。某个 provider store 未 provision / 暂时不存在时产生成功空集合，绝不阻断其它 provider 已提交 collection；永久删除只移除该 provider rows；parse/IO failure、cancel 与 stale completion 保留已提交 collection。New Session：从同一 enabled 集合投影已安装 provider；0 个不显示 Coding Agents，1–2 个直接显示一级项，3 个及以上显示 Coding Agents sidecar。Resume：已知 native id → emit exact quoted native argv → terminal/pane binding。"
+    failure_rule: "禁止把 discovery 当作 Resume 的前置条件，禁止因 Jcode/Omp store 缺失而报全局 scan failure，禁止递归扫描 Omp tool logs，禁止接受 filename/id 不匹配或把 malformed metadata 投影成可恢复 row。禁止在 Navigator/UI 层另行过滤 Jcode debug/empty session、让它们消耗底层 recency limit，或以 `parent_id` 推断 subagent 并误隐藏非 debug 会话。禁止从 discovery writer、SessionBridge 或 UI 层修改原生文件，禁止为文件格式补齐 provider/model/profile/approval 等目标工具拥有的字段，禁止用 PTY/TUI 文本或常驻 CLI process exit 推断 turn 完成。禁止为未纳入范围的 realtime control 增加 daemon、ACP、private wire 或隐藏入口。"
+    negative_space: ["Jcode executable absent", "Omp executable absent", "Jcode store missing", "Omp store missing", "zero enabled providers", "one enabled provider", "two enabled providers", "three enabled providers", "disabled provider with existing rows", "unknown or duplicate configured provider", "target plus two unrelated sessions", "Jcode cache or .bak file", "Jcode filename/id mismatch", "Jcode debug/self-dev worker", "Jcode empty messages", "Jcode non-debug parent session", "Omp nested tool log", "Omp filename/id mismatch", "malformed metadata", "local scan failure", "runtime scan failure", "cancel", "stale completion", "Resume without discovery", "realtime unsupported", "Fork unsupported", "Edit unsupported", "Write-back unsupported"]
+    verification_rule: "fixtures 覆盖 Jcode/Omp canonical metadata、Jcode debug/empty filtering before recency limiting、non-debug parent session discovery、id/filename validation、mtime/updated_at、target-home roots、missing store success-empty 与 Navigator virtual-row identity；settings/plan tests 覆盖默认集合、unknown/duplicate filtering 和 enabled-only scan；Workspace tests 覆盖设置变更刷新与 New Session 0/1/2/3+ 投影；runtime tests 覆盖 RPC 显式 enabled_agents。static checker 锁定同一 shared plan 的 local/runtime owners、唯一 file-backed metadata reader、设置到 scan/RPC/menu 的 ownership、Jcode/Omp registry capability 与 SessionBridge 无写入路径，并证明 realtime/Fork/Edit/Write-back/native history write 均不暴露 capability 或产品入口。"
+
+  - id: FILE-BROWSER-HIDDEN-FILES-TOGGLE-84
+    source: LR-180
+    capability: "discoverable one-action hidden-files visibility toggle"
+    invariant: "Project Explorer 上层 capability owner 唯一持有隐藏文件 visibility；本地 FileTreeView 与 Environment ServerFileBrowserView 消费同一 preference/action。内容头部必须用完整可点击命中区提供明确 toggle；tooltip、accessibility label、键盘 action 与 on/off selected treatment 表达下一动作和当前状态，不能只显示无状态 Eye 图标。"
+    lifecycle: "Toggle action 原子更新共享 visibility preference、通知 active backend view 重建 canonical entries projection、保留 current path/expanded directories，并把隐藏后消失的 selection 调整到最近稳定可见项；backend 只负责 listing transport。"
+    failure_rule: "禁止 view-local preference、local/runtime 不同 toggle/hidden 语义、hover-only 语义、点击后无反馈、隐藏 selected row 后越界、把过滤后无可见项显示成真正空目录，或为切换增加多级菜单。"
+    negative_space: ["hidden files absent", "only hidden files present", "selected hidden file becomes invisible", "expanded hidden directory", "pointer", "keyboard", "screen reader", "local FileTreeView", "runtime ServerFileBrowserView", "view replacement", "narrow toolbar"]
+    verification_rule: "static checker 锁定唯一 owner/action 与两侧 projection consumer；UI tests 锁定 label/tooltip/selected state/完整命中区；projection tests 覆盖 selection/expansion、empty/filtered-empty 和 local/runtime 同义；真实 GUI 验证可发现性和两次切换反馈。"
+
+  - id: PROJECT-EXPLORER-ACCESSIBLE-HEADER-ACTIONS-85
+    source: LR-181
+    capability: "shared accessible Project Explorer header actions and overflow"
+    invariant: "local、runtime 与 unavailable Project Explorer carrier 共用有明确 label、tooltip、Button role 和 typed keyboard action 的 header action model；hidden toggle 还必须表达当前 selected state。窄宽度只能把同一组 action 移入可访问 overflow，禁止删除或降级为仅图标语义。"
+    lifecycle: "Pointer、keyboard 与 screen-reader activation 提交同一 typed action；carrier 或宽度变化只改变 action 的可见载体，不改变 action identity、顺序、可达性或 enabled state。"
+    failure_rule: "禁止裸图标 make_btn、hover-only tooltip、unavailable carrier 缺 ProjectExplorer role、窄宽度静默裁掉 action，或为 overflow 复制第二套 action handler。"
+    negative_space: ["local carrier", "runtime carrier", "unavailable environment", "pointer", "keyboard", "screen reader", "wide toolbar", "narrow toolbar", "transfer unsupported"]
+    verification_rule: "static checker 锁定共享 semantic action owner、全部 toolbar consumer 与禁止裸图标 helper；UI/model tests逐项断言 label、tooltip、role、keyboard action、selected state和窄宽 overflow action cardinality。"
+
+  - id: HIDDEN-ENTRY-SHARED-TYPED-POLICY-86
+    source: LR-182
+    capability: "single typed hidden-entry classification and consumer policy"
+    invariant: "repo_metadata::HiddenEntryPolicy 是 dotfile、platform-hidden、ignored 与 internal metadata 分类的唯一 owner；FileTreeView、ServerFileBrowserView 与 DirectoryFetcher 必须显式选择 consumer policy。Project Explorer toggle 只放行 user-hidden 类别，永不暴露 internal metadata；context chip 始终隐藏全部隐藏类别。"
+    lifecycle: "listing metadata 进入共享 classifier 后按 consumer policy 投影；visibility 切换只替换 Project Explorer projection并保留 path、expansion 与稳定 selection，不改写 source metadata。"
+    failure_rule: "禁止 consumer 自行 starts_with('.')、is_hidden hard filter、重复解释 .git/internal metadata，或用 show-hidden 暴露 internal metadata。"
+    negative_space: ["dotfile", "platform hidden", "ignored", "internal metadata", "visible", "only hidden entries", "mixed entries", "local listing", "runtime listing", "context chip"]
+    verification_rule: "repo_metadata 单测穷尽分类优先级和 policy truth table；static checker打印全部 classifier/policy consumer inventory并锁定 enclosing owner，同时拒绝生产 consumer 的平行字符串过滤。"
+
+  - id: ENVIRONMENT-SSH-TARGET-CATALOG-85
+    source: LR-183
+    capability: "Environment SSH target catalog atomic refresh"
+    invariant: "Environment Strip SSH target picker 只能消费唯一 Environment SSH target catalog owner。owner 原子聚合已成功提交的 ~/.ssh/config Host candidates 与 SQLite saved servers；config identity 为 config:<alias>，saved identity 为 saved:<node_id>，两种来源不得因相同 alias、name 或 host 合并。saved targets 按 SQLite tree display order 排在 config targets 之前，各来源内保持 canonical source order。"
+    lifecycle: "ExplicitRefresh 与 SshTreeChangedEvent 都转换为 SshTargetCatalogRefreshIntent 并由 owner 分配单调 generation；refresh 开始只设置 loading 且保留 committed collection，只有 current generation 的 config + SQLite 完整成功结果才能原子替换 collection、path 与 source status，较旧 completion 不得提交。"
+    failure_rule: "任一 source IO、parse 或 SQLite error 必须结束 current loading、呈现可重试 error，并保留上一 committed collection；禁止 error/NotObserved frame 清空列表、UI cache/overlay/freeze/debounce/retry，禁止重复点击产生乱序覆盖。永久删除只由 current generation 的完整成功 snapshot 反映。"
+    negative_space: ["zero targets", "one target", "target plus two unrelated targets", "saved/config display-name conflict", "same host in both sources", "config not found with saved targets", "SQLite error", "config parse error", "two refreshes complete out of order", "saved target permanently deleted", "picker closed during refresh"]
+    verification_rule: "Environment Strip picker header 必须提供完整命中区的显式 Refresh，具备 tooltip、accessibility label、keyboard typed action、loading 与 retained-collection error 语义；failing tests 先证明 Manager mutation 不更新 picker 和 stale/error completion 会破坏集合，再覆盖 save/add/delete/rename/import、0/1/many cardinality/identity/order。static check 锁定唯一 owner、两类 typed refresh caller 与生产树 source-read inventory。"
+
+  - id: TOAST-TYPED-LIFECYCLE-86
+    source: LR-184
+    capability: "typed bounded Toast lifecycle and stable visible carrier"
+    invariant: "DismissibleToastStack 是 Toast identity、policy、generation、pending collection 与 visible projection 的唯一 owner。调用方通过 ToastPolicy 与 ToastIdentity 显式提交 source、可选 stable key 和 Transient/ActionRequired 意图；相同 source/stable key 原位更新并重置 transient timer，不得创建第二 carrier。无 stable key 的通知按 source/category 合并，local/runtime 只允许事件到达时序不同。"
+    lifecycle: "Submit → Upsert same carrier/new carrier → Schedule current generation timer or retain ActionRequired → bounded visible projection；旧 timer 只能携带 uuid + generation，stale completion 不得删除 replacement。Transient success/info/error 自动消失；只有显式 keyed ActionRequired 可持续存在且必须可关闭。"
+    failure_rule: "禁止默认 persistent、无 identity 的 persistent error、每条事件随机 UUID 无限增长、render 全量 pending collection、重复事件第二 carrier、旧 timer 删除新内容、达到可见上限后静默丢弃关键信息，或由各调用方自行决定 timeout。"
+    negative_space: ["same key repeated", "same source unkeyed error burst", "different sources same category", "timer replacement race", "stale timer completion", "only action-required", "action-required plus transient overflow", "more pending than visible limit", "manual dismiss", "zero notifications"]
+    verification_rule: "focused state tests 覆盖 same-key replacement、timer reset/stale generation、burst bounded、ActionRequired stays/dismissable、different-source independence、bounded overflow summary 与 keyed action accessibility contract；static checker 扫描完整生产 Rust 树，输出所有 toast API 的 path:line/enclosing-function inventory，并 fail closed 禁止 caller-selected lifetime、旧 wrapper、新文件或新包装绕路。"
+
+  - id: SESSION-NAVIGATOR-LIVE-AGENT-ACTIVITY-87
+    source: LR-185
+    capability: "live CLI agent activity indicator projected onto the Session Navigator icon"
+    invariant: "Session Navigator 的 Agent 活动态只读取当前 live TerminalView 对应的 CLIAgentSessionsModel structured status；稳定 container UUID 是从 Navigator live row 定位 runtime carrier 的唯一身份。InProgress 显示 running，Blocked 显示 attention，Success 和无可信 structured status 均为 quiet/idle。历史 virtual row、普通 terminal、command-only detection 和 stale/missing runtime carrier 不得猜测 running 或 attention。local 与 Environment runtime 使用同一 TerminalView/CLIAgentSessionsModel 投影，差异只允许事件抵达时序。"
+    lifecycle: "PaneConfiguration container UUID → current PaneGroup terminal carrier → CLIAgentSessionsModel structured status → render-only icon indicator。Started/StatusChanged/Ended/SessionUpdated 已经驱动同一 Workspace refresh/notify；状态从 InProgress/Blocked 变为 Success、session 删除、container replacement 或 runtime carrier 缺失时，下一帧移除活动 indicator，不写入 WorkspaceSessionSnapshot、SQLite、alias、selection 或 order。Resume spinner 优先于 activity indicator。"
+    failure_rule: "禁止从 tab/leaf locator、native history metadata、命令文本、PTY 输出、常驻进程 exit 或扫描时间戳推断 agent activity；禁止把 runtime status 写入 PaneConfiguration/SQLite 或把 virtual history row 标成 idle/running；禁止为 local/runtime 新建两套 status registry、UI cache 或 polling loop。"
+    negative_space: ["historical virtual row", "plain terminal", "command-only detection", "unknown agent", "Success idle", "Blocked attention", "container UUID lookup miss", "matching container with agent mismatch", "remote event late arrival", "terminal replacement", "resume spinner", "two unrelated live agent panes"]
+    verification_rule: "focused tests 覆盖 status mapping、idle/virtual no-badge、container UUID-only runtime resolution、agent mismatch rejection 与 resume spinner precedence；static checker 锁定唯一 runtime lookup helper、禁止 activity resolver 使用 locator parser，并要求 Workspace CLI session event handler 继续观察 StatusChanged。"
