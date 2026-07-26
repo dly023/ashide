@@ -1,6 +1,6 @@
 use std::cell::OnceCell;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::{fmt, vec};
 
 use crate::safe_triangle::SafeTriangle;
@@ -10,16 +10,15 @@ use crate::{appearance::Appearance, ui_components::icons};
 use chrono::{DateTime, Local};
 use pathfinder_color::ColorU;
 use pathfinder_geometry::rect::RectF;
-use pathfinder_geometry::vector::{Vector2F, vec2f};
+use pathfinder_geometry::vector::{vec2f, Vector2F};
 use warp_core::ui::color::blend::Blend;
-use warpui::WindowId;
 use warpui::elements::{
     ChildAnchor, ClippedScrollStateHandle, ClippedScrollable, DropShadow, OffsetPositioning,
     ParentAnchor, ParentOffsetBounds, PositionedElementAnchor, PositionedElementOffsetBounds,
     ScrollTarget, ScrollToPositionMode, ScrollbarWidth, Stack,
 };
+use warpui::WindowId;
 use warpui::{
-    Action, AppContext, Entity, SingletonEntity, TypedActionView, View, ViewContext,
     accessibility::{AccessibilityContent, ActionAccessibilityContent, WarpA11yRole},
     elements::{
         Align, Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Dismiss,
@@ -31,6 +30,7 @@ use warpui::{
     keymap::FixedBinding,
     platform::Cursor,
     ui_components::components::UiComponent,
+    Action, AppContext, Entity, SingletonEntity, TypedActionView, View, ViewContext,
 };
 
 pub const CHEVRON_RIGHT_ALIGN_SVG_PATH: &str = "bundled/svg/chevron-right-align.svg";

@@ -22,7 +22,7 @@ use std::fmt;
 #[cfg(feature = "local_fs")]
 use std::fs;
 #[cfg(feature = "local_fs")]
-use std::io::{self, Read};
+use std::io::{self, BufRead, BufReader, Read};
 #[cfg(feature = "local_fs")]
 use std::path::{Path, PathBuf};
 #[cfg(feature = "local_fs")]
@@ -302,23 +302,35 @@ fn scan_agent_session_provider(
     logical_limit: usize,
 ) -> Result<Vec<AgentSessionDiscoveryRecord>, CliAgentSessionScanError> {
     match provider {
-        AgentSessionDiscoveryProvider::Claude => {
-            recent_jsonl_files(&roots.claude_projects(), logical_limit)?
-                .into_iter()
-                .map(|file| parse_claude_discovery_record(file, roots))
-                .collect()
-        }
+        AgentSessionDiscoveryProvider::Claude => recent_jsonl_files(
+            &roots.claude_projects(),
+            logical_limit,
+            Some(crate::app_state::WORKSPACE_SESSION_NAVIGATOR_PHYSICAL_SOURCE_LIMIT_PER_PROVIDER),
+        )?
+        .into_iter()
+        .map(|file| parse_claude_discovery_record(file, roots))
+        .collect(),
         AgentSessionDiscoveryProvider::Codex => {
-            let mut records = recent_jsonl_files(&roots.codex_sessions(), logical_limit)?
-                .into_iter()
-                .map(|file| parse_codex_discovery_record(file, roots))
-                .collect::<Result<Vec<_>, _>>()?;
-            records.extend(parse_codex_discovery_index(&roots.codex_index(), roots)?);
+            let physical_limit =
+                crate::app_state::WORKSPACE_SESSION_NAVIGATOR_PHYSICAL_SOURCE_LIMIT_PER_PROVIDER;
+            let mut records =
+                recent_jsonl_files(&roots.codex_sessions(), logical_limit, Some(physical_limit))?
+                    .into_iter()
+                    .map(|file| parse_codex_discovery_record(file, roots))
+                    .collect::<Result<Vec<_>, _>>()?;
+            records.extend(parse_codex_discovery_index(
+                &roots.codex_index(),
+                roots,
+                physical_limit,
+            )?);
             Ok(records)
         }
         AgentSessionDiscoveryProvider::Jcode => {
             let mut records = Vec::new();
-            for file in recent_jcode_session_files(&roots.jcode_sessions())? {
+            for file in recent_jcode_session_files(
+                &roots.jcode_sessions(),
+                crate::app_state::WORKSPACE_SESSION_NAVIGATOR_PHYSICAL_SOURCE_LIMIT_PER_PROVIDER,
+            )? {
                 if records.len() == logical_limit {
                     break;
                 }
@@ -328,12 +340,14 @@ fn scan_agent_session_provider(
             }
             Ok(records)
         }
-        AgentSessionDiscoveryProvider::Omp => {
-            recent_omp_session_files(&roots.omp_sessions(), logical_limit)?
-                .into_iter()
-                .map(|file| parse_omp_discovery_record(file, roots))
-                .collect()
-        }
+        AgentSessionDiscoveryProvider::Omp => recent_omp_session_files(
+            &roots.omp_sessions(),
+            logical_limit,
+            crate::app_state::WORKSPACE_SESSION_NAVIGATOR_PHYSICAL_SOURCE_LIMIT_PER_PROVIDER,
+        )?
+        .into_iter()
+        .map(|file| parse_omp_discovery_record(file, roots))
+        .collect(),
     }
 }
 
@@ -549,6 +563,7 @@ fn invalid_session_record(path: &Path, message: &'static str) -> CliAgentSession
 fn parse_codex_discovery_index(
     path: &Path,
     roots: &CliAgentStoreRoots,
+    physical_limit: usize,
 ) -> Result<Vec<AgentSessionDiscoveryRecord>, CliAgentSessionScanError> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
@@ -572,23 +587,27 @@ fn parse_codex_discovery_index(
         CliAgentSessionScanError::io(path, "读取 Codex session index mtime", error)
     })?;
     let fallback_modified = system_time_to_epoch_millis(modified);
-    Ok(read_jsonl_values_from_path(path, None)?
-        .into_iter()
-        .filter_map(|value| {
-            let record = codex_session_index_record(&value)?;
-            Some(AgentSessionDiscoveryRecord {
-                agent: CLIAgent::Codex,
-                provider_session_id: record.session_id.clone(),
-                source: AgentSessionDiscoverySource::CodexIndexEntry {
-                    path: path.to_path_buf(),
-                    provider_session_id: record.session_id,
-                },
-                label: record.title,
-                cwd: normalize_cli_agent_session_cwd(record.cwd.as_deref(), roots),
-                modified_epoch_millis: record.updated_at_epoch_millis.unwrap_or(fallback_modified),
+    Ok(
+        read_jsonl_values_from_path_with_physical_line_limit(path, physical_limit)?
+            .into_iter()
+            .filter_map(|value| {
+                let record = codex_session_index_record(&value)?;
+                Some(AgentSessionDiscoveryRecord {
+                    agent: CLIAgent::Codex,
+                    provider_session_id: record.session_id.clone(),
+                    source: AgentSessionDiscoverySource::CodexIndexEntry {
+                        path: path.to_path_buf(),
+                        provider_session_id: record.session_id,
+                    },
+                    label: record.title,
+                    cwd: normalize_cli_agent_session_cwd(record.cwd.as_deref(), roots),
+                    modified_epoch_millis: record
+                        .updated_at_epoch_millis
+                        .unwrap_or(fallback_modified),
+                })
             })
-        })
-        .collect())
+            .collect(),
+    )
 }
 
 /// Returns the canonical Codex provider session UUID carried by a transcript,
@@ -657,6 +676,16 @@ impl CliAgentSessionScanError {
             path: Some(path.to_path_buf()),
             operation: "读取 CLI-agent 会话目录",
             message: "路径存在但不是目录".to_owned(),
+        }
+    }
+
+    fn discovery_candidate_limit(path: &Path, limit: usize) -> Self {
+        Self {
+            path: Some(path.to_path_buf()),
+            operation: "扫描 CLI-agent 会话候选项",
+            message: format!(
+                "候选会话超过安全上限 {limit}；已保留当前会话列表，缩小 provider store 后再刷新"
+            ),
         }
     }
 
@@ -931,13 +960,6 @@ pub(crate) struct RecentJsonlFile {
     pub(crate) modified: SystemTime,
 }
 
-#[cfg(feature = "local_fs")]
-fn collect_complete_scan_entries<T, E>(
-    entries: impl IntoIterator<Item = Result<T, E>>,
-) -> Result<Vec<T>, E> {
-    entries.into_iter().collect()
-}
-
 /// 完整发现 `root` 下最近的普通 JSONL 文件。
 ///
 /// 不存在的 provider store 是合法空集；store 一旦存在，任何遍历、metadata
@@ -946,6 +968,7 @@ fn collect_complete_scan_entries<T, E>(
 pub(crate) fn recent_jsonl_files(
     root: &Path,
     limit: usize,
+    physical_limit: Option<usize>,
 ) -> Result<Vec<RecentJsonlFile>, CliAgentSessionScanError> {
     let root_metadata = match fs::symlink_metadata(root) {
         Ok(metadata) => metadata,
@@ -962,14 +985,10 @@ pub(crate) fn recent_jsonl_files(
         return Err(CliAgentSessionScanError::expected_directory(root));
     }
 
-    let entries = collect_complete_scan_entries(
-        walkdir::WalkDir::new(root)
-            .follow_links(false)
-            .into_iter()
-            .map(|entry| entry.map_err(|error| CliAgentSessionScanError::walk(root, error))),
-    )?;
     let mut files = Vec::new();
-    for entry in entries {
+    let mut candidate_count = 0;
+    for entry in walkdir::WalkDir::new(root).follow_links(false) {
+        let entry = entry.map_err(|error| CliAgentSessionScanError::walk(root, error))?;
         if !entry.file_type().is_file()
             || !entry
                 .path()
@@ -978,6 +997,7 @@ pub(crate) fn recent_jsonl_files(
         {
             continue;
         }
+        reserve_discovery_candidate(root, &mut candidate_count, physical_limit)?;
         let metadata = fs::metadata(entry.path()).map_err(|error| {
             CliAgentSessionScanError::io(entry.path(), "读取 CLI-agent 会话文件 metadata", error)
         })?;
@@ -1007,6 +1027,7 @@ pub(crate) fn recent_jsonl_files(
 #[cfg(feature = "local_fs")]
 fn recent_jcode_session_files(
     root: &Path,
+    physical_limit: usize,
 ) -> Result<Vec<RecentJsonlFile>, CliAgentSessionScanError> {
     match fs::symlink_metadata(root) {
         Ok(_) => {}
@@ -1019,17 +1040,18 @@ fn recent_jcode_session_files(
             ));
         }
     }
-    let entries = direct_regular_files(root, "读取 Jcode session 目录")?;
-    let mut files = entries
-        .into_iter()
-        .filter(|entry| {
-            entry
-                .path
-                .file_name()
+    let mut candidate_count = 0;
+    let mut files = direct_regular_files(
+        root,
+        "读取 Jcode session 目录",
+        physical_limit,
+        &mut candidate_count,
+        |path| {
+            path.file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with("session_") && name.ends_with(".json"))
-        })
-        .collect::<Vec<_>>();
+        },
+    )?;
     sort_recent_files(&mut files);
     Ok(files)
 }
@@ -1042,6 +1064,7 @@ fn recent_jcode_session_files(
 fn recent_omp_session_files(
     root: &Path,
     limit: usize,
+    physical_limit: usize,
 ) -> Result<Vec<RecentJsonlFile>, CliAgentSessionScanError> {
     let root_metadata = match fs::symlink_metadata(root) {
         Ok(metadata) => metadata,
@@ -1058,17 +1081,13 @@ fn recent_omp_session_files(
         return Err(CliAgentSessionScanError::expected_directory(root));
     }
 
-    let project_entries = collect_complete_scan_entries(
-        fs::read_dir(root)
-            .map_err(|error| CliAgentSessionScanError::io(root, "读取 Omp session 目录", error))?
-            .map(|entry| {
-                entry.map_err(|error| {
-                    CliAgentSessionScanError::io(root, "遍历 Omp session 目录", error)
-                })
-            }),
-    )?;
     let mut files = Vec::new();
+    let mut candidate_count = 0;
+    let project_entries = fs::read_dir(root)
+        .map_err(|error| CliAgentSessionScanError::io(root, "读取 Omp session 目录", error))?;
     for project_entry in project_entries {
+        let project_entry = project_entry
+            .map_err(|error| CliAgentSessionScanError::io(root, "遍历 Omp session 目录", error))?;
         let file_type = project_entry.file_type().map_err(|error| {
             CliAgentSessionScanError::io(
                 &project_entry.path(),
@@ -1079,16 +1098,16 @@ fn recent_omp_session_files(
         if !file_type.is_dir() {
             continue;
         }
-        files.extend(
-            direct_regular_files(&project_entry.path(), "读取 Omp project session 目录")?
-                .into_iter()
-                .filter(|entry| {
-                    entry
-                        .path
-                        .extension()
-                        .is_some_and(|extension| extension == "jsonl")
-                }),
-        );
+        files.extend(direct_regular_files(
+            &project_entry.path(),
+            "读取 Omp project session 目录",
+            physical_limit,
+            &mut candidate_count,
+            |path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "jsonl")
+            },
+        )?);
     }
     sort_and_limit_recent_files(&mut files, limit);
     Ok(files)
@@ -1098,39 +1117,53 @@ fn recent_omp_session_files(
 fn direct_regular_files(
     root: &Path,
     operation: &'static str,
+    physical_limit: usize,
+    candidate_count: &mut usize,
+    mut is_candidate: impl FnMut(&Path) -> bool,
 ) -> Result<Vec<RecentJsonlFile>, CliAgentSessionScanError> {
     let root_metadata = fs::symlink_metadata(root)
         .map_err(|error| CliAgentSessionScanError::io(root, operation, error))?;
     if !root_metadata.file_type().is_dir() {
         return Err(CliAgentSessionScanError::expected_directory(root));
     }
-    let entries = collect_complete_scan_entries(
-        fs::read_dir(root)
-            .map_err(|error| CliAgentSessionScanError::io(root, operation, error))?
-            .map(|entry| {
-                entry.map_err(|error| CliAgentSessionScanError::io(root, operation, error))
-            }),
-    )?;
     let mut files = Vec::new();
+    let entries =
+        fs::read_dir(root).map_err(|error| CliAgentSessionScanError::io(root, operation, error))?;
     for entry in entries {
+        let entry = entry.map_err(|error| CliAgentSessionScanError::io(root, operation, error))?;
         let file_type = entry.file_type().map_err(|error| {
             CliAgentSessionScanError::io(&entry.path(), "读取 CLI-agent 会话文件类型", error)
         })?;
-        if !file_type.is_file() {
+        let path = entry.path();
+        if !file_type.is_file() || !is_candidate(&path) {
             continue;
         }
+        reserve_discovery_candidate(root, candidate_count, Some(physical_limit))?;
         let metadata = entry.metadata().map_err(|error| {
             CliAgentSessionScanError::io(&entry.path(), "读取 CLI-agent 会话文件 metadata", error)
         })?;
         let modified = metadata.modified().map_err(|error| {
             CliAgentSessionScanError::io(&entry.path(), "读取 CLI-agent 会话文件 mtime", error)
         })?;
-        files.push(RecentJsonlFile {
-            path: entry.path(),
-            modified,
-        });
+        files.push(RecentJsonlFile { path, modified });
     }
     Ok(files)
+}
+
+#[cfg(feature = "local_fs")]
+fn reserve_discovery_candidate(
+    root: &Path,
+    candidate_count: &mut usize,
+    physical_limit: Option<usize>,
+) -> Result<(), CliAgentSessionScanError> {
+    *candidate_count += 1;
+    if physical_limit.is_some_and(|limit| *candidate_count > limit) {
+        return Err(CliAgentSessionScanError::discovery_candidate_limit(
+            root,
+            physical_limit.expect("physical limit was checked above"),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "local_fs")]
@@ -1169,9 +1202,76 @@ pub(crate) fn read_jsonl_values_from_path(
     path: &Path,
     limit: Option<usize>,
 ) -> Result<Vec<Value>, CliAgentSessionScanError> {
-    let bytes = fs::read(path)
+    let file = fs::File::open(path)
         .map_err(|error| CliAgentSessionScanError::io(path, "读取 CLI-agent 会话文件", error))?;
-    Ok(parse_jsonl_values(&String::from_utf8_lossy(&bytes), limit))
+    match limit {
+        Some(limit) => read_jsonl_values_from_reader(BufReader::new(file), Some(limit), path),
+        None => {
+            let mut reader = BufReader::new(file);
+            let mut text = String::new();
+            reader.read_to_string(&mut text).map_err(|error| {
+                CliAgentSessionScanError::io(path, "读取 CLI-agent 会话文件", error)
+            })?;
+            Ok(parse_jsonl_values(&text, None))
+        }
+    }
+}
+
+#[cfg(feature = "local_fs")]
+fn read_jsonl_values_from_path_with_physical_line_limit(
+    path: &Path,
+    physical_limit: usize,
+) -> Result<Vec<Value>, CliAgentSessionScanError> {
+    let file = fs::File::open(path)
+        .map_err(|error| CliAgentSessionScanError::io(path, "读取 Codex session index", error))?;
+    let mut values = Vec::new();
+    for (line_number, line) in BufReader::new(file).lines().enumerate() {
+        if line_number >= physical_limit {
+            return Err(CliAgentSessionScanError::discovery_candidate_limit(
+                path,
+                physical_limit,
+            ));
+        }
+        let line = line.map_err(|error| {
+            CliAgentSessionScanError::io(path, "读取 Codex session index", error)
+        })?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(line) {
+            values.push(value);
+        }
+    }
+    Ok(values)
+}
+
+#[cfg(feature = "local_fs")]
+fn read_jsonl_values_from_reader(
+    reader: impl BufRead,
+    limit: Option<usize>,
+    path: &Path,
+) -> Result<Vec<Value>, CliAgentSessionScanError> {
+    let mut values = Vec::new();
+    let mut consumed = 0;
+    let mut lines = reader.lines();
+    while !limit.is_some_and(|limit| consumed >= limit) {
+        let Some(line) = lines.next() else {
+            break;
+        };
+        consumed += 1;
+        let line = line.map_err(|error| {
+            CliAgentSessionScanError::io(path, "读取 CLI-agent 会话文件", error)
+        })?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(line) {
+            values.push(value);
+        }
+    }
+    Ok(values)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1741,12 +1841,74 @@ mod tests {
 
     #[cfg(feature = "local_fs")]
     #[test]
+    fn discovery_candidate_gate_rejects_partial_jsonl_scan() {
+        let root = tempfile::tempdir().expect("create JSONL discovery root");
+        fs::write(root.path().join("first.jsonl"), "{}\n").expect("write first JSONL session");
+        fs::write(root.path().join("second.jsonl"), "{}\n").expect("write second JSONL session");
+
+        let error = recent_jsonl_files(root.path(), 10, Some(1))
+            .expect_err("physical candidate gate must reject a partial scan");
+
+        assert_eq!(error.operation, "扫描 CLI-agent 会话候选项");
+        assert!(error.message.contains("安全上限 1"));
+    }
+
+    #[cfg(feature = "local_fs")]
+    #[test]
     fn recent_jsonl_scan_error_is_not_silently_dropped() {
-        let entries = [Ok("first"), Err("traversal failed"), Ok("last")];
+        let root = tempfile::tempdir().expect("create JSONL failure root");
+        fs::write(root.path().join("first.jsonl"), "{}\n").expect("write first JSONL session");
+        fs::write(root.path().join("second.jsonl"), "{}\n").expect("write second JSONL session");
 
-        let result = collect_complete_scan_entries(entries);
+        assert!(
+            recent_jsonl_files(root.path(), 10, Some(1)).is_err(),
+            "an over-limit scan must fail instead of returning the first directory-order subset"
+        );
+    }
 
-        assert_eq!(result, Err("traversal failed"));
+    #[cfg(feature = "local_fs")]
+    #[test]
+    fn discovery_candidate_gate_rejects_jcode_and_omp_across_buckets() {
+        let home = tempfile::tempdir().expect("create discovery home");
+        let jcode_sessions = home.path().join(".jcode/sessions");
+        fs::create_dir_all(&jcode_sessions).expect("create Jcode sessions");
+        fs::write(jcode_sessions.join("session_first.json"), "{}")
+            .expect("write first Jcode session");
+        fs::write(jcode_sessions.join("session_second.json"), "{}")
+            .expect("write second Jcode session");
+        assert!(recent_jcode_session_files(&jcode_sessions, 1).is_err());
+
+        let omp_sessions = home.path().join(".omp/agent/sessions");
+        for bucket in ["first", "second"] {
+            let bucket = omp_sessions.join(bucket);
+            fs::create_dir_all(&bucket).expect("create Omp bucket");
+            fs::write(bucket.join("session.jsonl"), "{}\n").expect("write Omp session");
+        }
+        assert!(recent_omp_session_files(&omp_sessions, 10, 1).is_err());
+    }
+
+    #[cfg(feature = "local_fs")]
+    #[test]
+    fn discovery_candidate_gate_rejects_codex_index_before_partial_projection() {
+        let home = tempfile::tempdir().expect("create Codex home");
+        let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+        let index = roots.codex_index();
+        fs::create_dir_all(index.parent().expect("Codex index parent"))
+            .expect("create Codex index parent");
+        fs::write(
+            &index,
+            concat!(
+                "{\"session_id\":\"019f5629-5daf-7381-b33e-00d8efba617f\"}\n",
+                "{\"session_id\":\"019f5629-5daf-7381-b33e-00d8efba617e\"}\n"
+            ),
+        )
+        .expect("write Codex index");
+
+        let error = parse_codex_discovery_index(&index, &roots, 1)
+            .expect_err("physical index gate must reject a partial projection");
+
+        assert_eq!(error.operation, "扫描 CLI-agent 会话候选项");
+        assert!(error.message.contains("安全上限 1"));
     }
 
     #[cfg(feature = "local_fs")]

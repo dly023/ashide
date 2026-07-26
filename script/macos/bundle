@@ -128,21 +128,37 @@ function seal_and_verify_app_bundle() {
   codesign --verify --deep --strict --verbose=4 "$app_bundle"
 }
 
+function ensure_framework_rpath() {
+  local binary_path="$1"
+  local framework_rpath="@executable_path/../Frameworks"
+
+  if otool -l "$binary_path" | awk -v expected="$framework_rpath" '
+    $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
+    in_rpath && $1 == "path" {
+      if ($2 == expected) found = 1
+      in_rpath = 0
+    }
+    END { exit(found ? 0 : 1) }
+  '; then
+    echo "Framework rpath already exists in $binary_path"
+  else
+    install_name_tool -add_rpath "$framework_rpath" "$binary_path"
+  fi
+}
+
 function normalize_cargo_bundle_app() {
   local cargo_bundle_app_name="Ashide"
   local expected_bundle="$BUNDLE_DIR/$ASHIDE_APP_NAME.app"
   local cargo_bundle="$BUNDLE_DIR/$cargo_bundle_app_name.app"
   local plist_path="$expected_bundle/Contents/Info.plist"
 
-  if [[ ! -d "$expected_bundle" ]]; then
-    if [[ -d "$cargo_bundle" ]]; then
-      echo "Renaming cargo-bundle output $cargo_bundle to $expected_bundle"
-      rm -rf "$expected_bundle"
-      mv "$cargo_bundle" "$expected_bundle"
-    else
-      echo "Expected app bundle at $expected_bundle or $cargo_bundle" >&2
-      exit 1
-    fi
+  if [[ -d "$cargo_bundle" ]]; then
+    echo "Normalizing cargo-bundle output $cargo_bundle to $expected_bundle"
+    rm -rf "$expected_bundle"
+    mv "$cargo_bundle" "$expected_bundle"
+  elif [[ ! -d "$expected_bundle" ]]; then
+    echo "Expected app bundle at $expected_bundle or $cargo_bundle" >&2
+    exit 1
   fi
 
   if [[ ! -f "$plist_path" ]]; then
@@ -502,8 +518,8 @@ if [[ "$ARTIFACT" == "app" ]]; then
   popd > /dev/null
   normalize_cargo_bundle_app
 
-  echo "Adding rpath to support mac frameworks"
-  install_name_tool -add_rpath "@executable_path/../Frameworks" "$BUNDLE_DIR/$ASHIDE_APP_NAME.app/Contents/MacOS/$ASHIDE_BIN"
+  echo "Ensuring rpath support for mac frameworks"
+  ensure_framework_rpath "$BUNDLE_DIR/$ASHIDE_APP_NAME.app/Contents/MacOS/$ASHIDE_BIN"
 
   export ASHIDE_SCHEME_NAME
   export ASHIDE_PLIST_PATH="$BUNDLE_DIR/$ASHIDE_APP_NAME.app/Contents/Info.plist"
@@ -576,9 +592,9 @@ if [[ "$ARTIFACT" == "app" ]]; then
 
       tmp_bundle_dir=$(mktemp -d -t ci-XXXXXXXXXX)
 
-      echo "Adding rpath to both binaries for universal executable"
-      install_name_tool -add_rpath "@executable_path/../Frameworks" "target/$INTEL_TARGET/$TARGET_PROFILE_DIR/$ASHIDE_BIN"
-      install_name_tool -add_rpath "@executable_path/../Frameworks"  "target/$ARM_TARGET/$TARGET_PROFILE_DIR/$ASHIDE_BIN"
+      echo "Ensuring rpath support for both binaries in universal executable"
+      ensure_framework_rpath "target/$INTEL_TARGET/$TARGET_PROFILE_DIR/$ASHIDE_BIN"
+      ensure_framework_rpath "target/$ARM_TARGET/$TARGET_PROFILE_DIR/$ASHIDE_BIN"
 
       echo "Building universal binary using lipo."
       lipo -create -output "$tmp_bundle_dir/$ASHIDE_BIN" \

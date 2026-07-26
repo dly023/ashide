@@ -115,12 +115,12 @@ async fn reconnect_replays_session_execution_context() {
             "/reconnected/claude".to_owned(),
         ),
     ]);
-    let info = SessionBootstrapInfo::from_context(
-        "fish",
-        Some("/usr/bin/fish"),
-        Some("/workspace/reconnected"),
-        &environment_variables,
-    )
+    let info = SessionBootstrapInfo::from_context(&SessionExecutionContextInput {
+        shell_type: "fish",
+        shell_path: Some("/usr/bin/fish"),
+        working_directory: Some("/workspace/reconnected"),
+        environment_variables: &environment_variables,
+    })
     .unwrap();
     let mut registry = SessionExecutionRegistry::default();
     registry.register(session_id, session_id, info);
@@ -154,11 +154,11 @@ async fn reconnect_replays_session_execution_context() {
 }
 
 fn test_bootstrap_info(home: &str, cwd: &str) -> SessionBootstrapInfo {
-    SessionBootstrapInfo::from_context(
-        "bash",
-        Some("/bin/bash"),
-        Some(cwd),
-        &HashMap::from([
+    SessionBootstrapInfo::from_context(&SessionExecutionContextInput {
+        shell_type: "bash",
+        shell_path: Some("/bin/bash"),
+        working_directory: Some(cwd),
+        environment_variables: &HashMap::from([
             (
                 "ASHIDE_SESSION_EXECUTION_CONTEXT".to_owned(),
                 "1".to_owned(),
@@ -166,14 +166,20 @@ fn test_bootstrap_info(home: &str, cwd: &str) -> SessionBootstrapInfo {
             ("HOME".to_owned(), home.to_owned()),
             ("PATH".to_owned(), format!("{home}/bin")),
         ]),
-    )
+    })
     .expect("test execution context must be complete")
 }
 
 #[test]
 fn environment_runtime_control_session_rejects_missing_execution_context() {
     assert!(
-        SessionBootstrapInfo::from_context("bash", None, None, &HashMap::new()).is_none(),
+        SessionBootstrapInfo::from_context(&SessionExecutionContextInput {
+            shell_type: "bash",
+            shell_path: None,
+            working_directory: None,
+            environment_variables: &HashMap::new(),
+        })
+        .is_none(),
         "a connected synthetic owner without a terminal bootstrap must not fabricate an executor"
     );
 }

@@ -504,11 +504,11 @@ release_regression_checks:
       - initialize_rejects_wrong_client_protocol_revision_before_auth_mutation
       - protocol_round_trip_preserves_revision
       - release_remote_server_slot_includes_protocol_revision
-      - oss_source_build_remote_server_binary_uses_dev_protocol_slot_v5
+      - oss_source_build_remote_server_binary_uses_dev_protocol_slot_v6
       - local_remote_parity_static_remote_protocol_revision_guard
-      - real_remote_helper_v5_initialize_pty_and_server_file_browser
+      - real_remote_helper_current_revision_initialize_pty_and_server_file_browser
       - full_workspace_nextest
-    focused_evidence: "2026-07-25 `cargo test -p remote_server --lib --no-fail-fast` 94/94 通过 v5 Initialize/slot/fail-closed gates；随后用 active AshideDev 的显式 ControlMaster 运行 `environment_runtime_transport::ssh_transport::tests::real_remote_helper_v5_initialize_pty_and_server_file_browser -- --ignored --exact`，production SshTransport 使用 `~/.ashide-dev/remote-server/ashide-dev-pty-v5`，真实 daemon 返回 v5 Initialize，并完成只读 ListDirectory(/) 与 CreatePty/ClosePty。v4 runtime 日志只保留历史用途。"
+    focused_evidence: "2026-07-26 `cargo test -p remote_server --lib --no-fail-fast` 94/94 通过 v6 Initialize/slot/fail-closed gates；当前 checkout 的 AshideDev 强制 source helper 后使用 `~/.ashide-dev/remote-server/ashide-dev-pty-v6`，remote proxy connected 并完成 ScanCliAgentSessions，Environment Session Navigator 在授权远端 authority 下发现 45 个会话。旧 revision runtime 日志不作为 v6 证据。"
     result: verified
 
 

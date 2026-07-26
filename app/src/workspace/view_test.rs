@@ -2693,7 +2693,7 @@ fn test_unified_new_session_menu_uses_new_worktree_config_label_and_order() {
 }
 
 #[test]
-fn test_unified_new_session_menu_has_one_coding_agent_domain_not_provider_rows() {
+fn test_unified_new_session_menu_lists_each_coding_agent_directly() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
         let workspace = mock_workspace(&mut app);
@@ -2706,64 +2706,57 @@ fn test_unified_new_session_menu_has_one_coding_agent_domain_not_provider_rows()
                         CLIAgent::Claude,
                         CLIAgent::Codex,
                         CLIAgent::Jcode,
+                        CLIAgent::Omp,
                     ]);
                 },
             );
+            crate::settings::AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.cli_agent_history_enabled_agents.set_value(
+                    vec![
+                        CLIAgent::Claude.to_serialized_name(),
+                        CLIAgent::Codex.to_serialized_name(),
+                        CLIAgent::Jcode.to_serialized_name(),
+                        CLIAgent::Omp.to_serialized_name(),
+                    ],
+                    ctx,
+                ));
+            });
+
             let menu_items = workspace.unified_new_session_menu_items(ctx);
             let labels = menu_items
                 .iter()
                 .map(new_session_menu_label)
                 .collect::<Vec<_>>();
-            assert_eq!(
-                labels
-                    .iter()
-                    .filter(|label| **label == crate::t!("workspace-coding-agent-actions"))
-                    .count(),
-                1
-            );
-            for agent in enum_iterator::all::<CLIAgent>() {
-                if !matches!(agent, CLIAgent::Unknown) {
-                    assert!(!labels.iter().any(|label| label == agent.display_name()));
-                }
-            }
 
-            let domain_index = labels
+            assert!(!labels
                 .iter()
-                .position(|label| *label == crate::t!("workspace-coding-agent-actions"))
-                .expect("Coding Agents domain must exist");
-            workspace
-                .new_session_dropdown_menu
-                .update(ctx, |menu, ctx| {
-                    menu.set_items(menu_items, ctx);
-                    menu.set_selected_by_index(domain_index, ctx);
-                });
-
-            let expected = vec![
-                (CLIAgent::Jcode, AgentActionIntent::New),
-                (CLIAgent::Claude, AgentActionIntent::New),
-                (CLIAgent::Codex, AgentActionIntent::New),
-            ];
-            for event in [MenuEvent::ItemHovered, MenuEvent::ItemSelected] {
-                workspace.handle_new_session_menu_event(&event, ctx);
-                let projected = workspace.new_session_sidecar_menu.read(ctx, |menu, _| {
-                    menu.items()
-                        .iter()
-                        .filter_map(|item| match item.item_on_select_action() {
-                            Some(NewSessionSidecarSelection::AgentAction {
-                                agent,
-                                intent,
-                                source: AgentActionSidecarSource::NewSession,
-                            }) => Some((*agent, *intent)),
-                            Some(NewSessionSidecarSelection::AgentAction {
-                                source: AgentActionSidecarSource::SessionBridge(_),
-                                ..
-                            })
-                            | None => None,
-                        })
-                        .collect::<Vec<_>>()
-                });
-                assert_eq!(projected, expected);
+                .any(|label| *label == crate::t!("workspace-coding-agent-actions")));
+            for agent in [
+                CLIAgent::Claude,
+                CLIAgent::Codex,
+                CLIAgent::Jcode,
+                CLIAgent::Omp,
+            ] {
+                let expected_label = format!("New {} session", agent.display_name());
+                assert!(labels.iter().any(|label| label == &expected_label));
             }
+
+            let direct_agents = menu_items
+                .iter()
+                .filter_map(|item| match item.item_on_select_action() {
+                    Some(WorkspaceAction::AddSpecificAgentTab(agent)) => Some(*agent),
+                    Some(_) | None => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                direct_agents,
+                vec![
+                    CLIAgent::Claude,
+                    CLIAgent::Codex,
+                    CLIAgent::Jcode,
+                    CLIAgent::Omp
+                ]
+            );
         });
     });
 }
@@ -2797,8 +2790,8 @@ fn test_unified_new_session_menu_projects_history_discovery_selection() {
                 ),
                 (
                     vec![CLIAgent::Claude, CLIAgent::Codex, CLIAgent::Jcode],
-                    Vec::new(),
-                    true,
+                    vec![CLIAgent::Claude, CLIAgent::Codex, CLIAgent::Jcode],
+                    false,
                 ),
             ] {
                 crate::settings::AISettings::handle(ctx).update(ctx, |settings, ctx| {
@@ -2828,6 +2821,74 @@ fn test_unified_new_session_menu_projects_history_discovery_selection() {
                         .filter(|label| **label == crate::t!("workspace-coding-agent-actions"))
                         .count(),
                     usize::from(expects_domain),
+                );
+            }
+        });
+    });
+}
+
+#[test]
+fn test_unified_new_session_menu_has_one_coding_agent_domain_not_provider_rows() {
+    // LR-172 (AGENT-ACTION-SIDECAR-IA-76): 当多个 coding agent 折叠成领域入口时,
+    // 统一 New Session 菜单必须呈现「唯一一个」coding-agent 领域行,而不是每个
+    // provider 各占一行,也不是 provider × action 的笛卡尔菜单。
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            crate::terminal::cli_agent::CLIAgentInstallModel::handle(ctx).update(
+                ctx,
+                |model, _| {
+                    model.set_installed_agents_for_test([
+                        CLIAgent::Claude,
+                        CLIAgent::Codex,
+                        CLIAgent::Jcode,
+                        CLIAgent::Omp,
+                    ]);
+                },
+            );
+            crate::settings::AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.cli_agent_history_enabled_agents.set_value(
+                    vec![
+                        CLIAgent::Claude.to_serialized_name(),
+                        CLIAgent::Codex.to_serialized_name(),
+                        CLIAgent::Jcode.to_serialized_name(),
+                        CLIAgent::Omp.to_serialized_name(),
+                    ],
+                    ctx,
+                ));
+            });
+
+            let menu_items = workspace.unified_new_session_menu_items(ctx);
+
+            // LR-172 契约:coding agent 以「每个 agent 一行直连创建」呈现,而不是
+            // provider × action 的笛卡尔菜单。每个启用 agent 恰好产生一个
+            // AddSpecificAgentTab 顶层行,顺序与启用顺序一致。
+            let direct_agents = menu_items
+                .iter()
+                .filter_map(|item| match item.item_on_select_action() {
+                    Some(WorkspaceAction::AddSpecificAgentTab(agent)) => Some(*agent),
+                    Some(_) | None => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                direct_agents,
+                vec![
+                    CLIAgent::Claude,
+                    CLIAgent::Codex,
+                    CLIAgent::Jcode,
+                    CLIAgent::Omp
+                ],
+                "each enabled coding agent must contribute exactly one direct row, not a provider×action grid"
+            );
+
+            // 不得出现 provider 重复行:同一 agent 只能有一个顶层直连入口。
+            let mut seen = std::collections::HashSet::new();
+            for agent in &direct_agents {
+                assert!(
+                    seen.insert(*agent),
+                    "coding agent {agent:?} appears in more than one top-level row"
                 );
             }
         });
@@ -15700,6 +15761,122 @@ fn test_environment_runtime_live_placeholder_keeps_registered_cli_agent_session_
 }
 
 #[test]
+fn test_remote_runtime_agent_row_stays_live_when_active_block_is_non_runtime_subshell() {
+    // 回归用户报告:远程 Environment 里有一个正在运行的 CLI-agent 终端。agent 在
+    // 子 shell 里跑,active block 因此切到一个未登记为 Environment Runtime 的
+    // session。旧实现用易失的 active_session_uses_environment_runtime 判断 liveness,
+    // 会把这行 live 远程行丢掉 → 退化成 virtual "历史" 行 → 丢失激活高亮、丢失活动
+    // 点、rename 走远程 alias RPC(又丑又不生效)。liveness 必须由稳定的 runtime
+    // transport 身份决定。
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let server = test_ssh_server_for_environment_tests();
+            let environment = crate::workspace::environment_provider::source_saved_ssh::runtime_transport_snapshot(
+                "remote-fixture-primary".to_string(),
+                &server,
+                Some("/root/project".to_string()),
+                EnvironmentLifecycleState::Connected,
+            );
+            let authority = environment.authority_key.clone();
+            let terminal_options = test_environment_runtime_pty_options(CoreSessionId::from(9105), ctx);
+            workspace.add_tab_with_pane_layout(
+                PanesLayout::SingleTerminal(Box::new(terminal_options)),
+                Arc::new(HashMap::new()),
+                Some("root@remote-fixture-primary".to_string()),
+                ctx,
+            );
+            workspace.apply_active_tab_environment(environment, ctx);
+            let terminal_view = workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .active_session_view(ctx)
+                .expect("environment runtime terminal should be active");
+
+            // Bootstrap the runtime session, then move the active block onto a
+            // *different*, non-runtime session id — exactly what happens when a
+            // CLI agent runs inside a subshell. This flips the volatile
+            // active-block runtime check to false.
+            terminal_view.update(ctx, |view, _| {
+                use crate::terminal::model::ansi::Handler;
+                let mut model = view.model.lock();
+                model.init_shell(crate::terminal::model::ansi::InitShellValue {
+                    session_id: CoreSessionId::from(9105),
+                    shell: "bash".to_owned(),
+                    ..Default::default()
+                });
+                model.bootstrapped(crate::terminal::model::ansi::BootstrappedValue {
+                    shell: "bash".to_owned(),
+                    ..Default::default()
+                });
+                model.start_command_execution();
+                let blocks = model.block_list_mut();
+                blocks
+                    .active_block_for_test()
+                    .set_session_id(CoreSessionId::from(7777));
+                assert!(
+                    !model.active_block_uses_environment_runtime(),
+                    "precondition: the active block must resolve to a non-runtime session"
+                );
+                assert!(
+                    model.is_environment_runtime_transport(),
+                    "precondition: the terminal must still be a runtime transport"
+                );
+            });
+
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                sessions.set_session(
+                    terminal_view.id(),
+                    CLIAgentSession {
+                        agent: CLIAgent::Codex,
+                        status: CLIAgentSessionStatus::InProgress,
+                        session_context: CLIAgentSessionContext {
+                            cwd: Some("/root/project".to_string()),
+                            session_id: Some("codex-remote-live-session".to_string()),
+                            fallback_title: Some("Remote Codex".to_string()),
+                            ..Default::default()
+                        },
+                        input_state: CLIAgentInputState::Closed,
+                        should_auto_toggle_input: false,
+                        listener: None,
+                        plugin_version: None,
+                        environment_host_key: Some("root@remote-fixture-primary".to_string()),
+                        draft_text: None,
+                        custom_command_prefix: Some("codex".to_string()),
+                    },
+                    ctx,
+                );
+            });
+
+            workspace.sync_session_navigator_sessions(ctx);
+            workspace.notify_session_navigator_focus_changed(ctx);
+
+            let rows = workspace.session_navigator_sessions();
+            let remote_rows: Vec<_> = rows
+                .iter()
+                .filter(|s| s.environment_authority_key.as_deref() == Some(authority.as_str()))
+                .collect();
+            assert_eq!(
+                remote_rows.len(),
+                1,
+                "the running remote agent must surface as exactly one row; rows={rows:#?}"
+            );
+            let row = remote_rows[0];
+            assert!(
+                row.is_live_container(),
+                "the row must be a live container so it shows the activity dot and renames the pane title; row={row:#?}"
+            );
+            assert!(
+                row.is_active,
+                "the focused running remote agent row must project is_active for the Navigator highlight; row={row:#?}"
+            );
+        });
+    });
+}
+
+#[test]
 fn test_environment_runtime_live_placeholder_does_not_apply_durable_alias() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
@@ -18146,4 +18323,45 @@ fn session_bridge_cli_agent_operations_require_resolved_store_root_context() {
         .expect("source/target pair resolver 必须位于 source locator 之前");
     assert!(pair_resolver.contains("source.has_same_execution_context(&target)"));
     assert!(pair_resolver.contains("Ok((resolved.clone(), resolved))"));
+}
+
+#[test]
+fn local_cli_agent_session_refresh_runs_blocking_scan_off_ui_thread() {
+    const VIEW_RS: &str = include_str!("view.rs");
+    const NAVIGATOR_RS: &str = include_str!("view/session_navigator.rs");
+
+    let local_backend = VIEW_RS
+        .split_once("impl EnvironmentBackend for TerminalBootstrapEnvironmentBackend")
+        .expect("local Environment backend must exist")
+        .1
+        .split_once("impl EnvironmentBackend for RuntimeEnvironmentBackend")
+        .expect("runtime Environment backend must delimit the local implementation")
+        .0;
+    let refresh = local_backend
+        .split_once("fn refresh_indexed_sessions(")
+        .expect("local backend must own Session Navigator refresh")
+        .1;
+    let blocking_scan = refresh
+        .find("tokio::task::spawn_blocking(move ||")
+        .expect("local provider-store scan must run on a blocking worker");
+    let scan = refresh
+        .find("Workspace::try_scan_terminal_cli_agent_session_discovery(")
+        .expect("local refresh must reuse the shared discovery projection");
+
+    assert!(
+        blocking_scan < scan,
+        "local provider-store discovery must not start before the worker boundary"
+    );
+    assert!(refresh.contains("ctx.spawn("));
+    assert!(refresh.contains("commit_indexed_environment_cli_agent_session_discovery"));
+    assert!(refresh.contains("if refresh_generation.is_some() {\n                    workspace.prune_restored_workspace_sessions_with_missing_cli_sources();\n                }"));
+    assert!(refresh.contains("finish_workspace_sessions_refresh_if_current"));
+    assert!(refresh.contains("fail_workspace_sessions_refresh_if_current"));
+    assert!(refresh.contains("Ok(true)"));
+    assert!(
+        NAVIGATOR_RS.contains(
+            "enabled_agents: Vec<crate::terminal::CLIAgent>,\n        previously_observed_agents"
+        ),
+        "the blocking scan helper must consume captured data rather than an AppContext"
+    );
 }

@@ -65,6 +65,34 @@ fn macos_unsigned_release_bundle_is_ad_hoc_sealed_and_verified() {
 }
 
 #[test]
+fn macos_bundle_adds_framework_rpath_idempotently() {
+    let macos_bundle = include_str!("../macos/bundle");
+
+    assert!(macos_bundle.contains("function normalize_cargo_bundle_app()"));
+    assert!(macos_bundle.contains("if [[ -d \"$cargo_bundle\" ]]; then"));
+    assert!(macos_bundle.contains("rm -rf \"$expected_bundle\""));
+    assert!(macos_bundle.contains("mv \"$cargo_bundle\" \"$expected_bundle\""));
+    assert!(!macos_bundle.contains("if [[ ! -d \"$expected_bundle\" ]]; then
+    if [[ -d \"$cargo_bundle\" ]]; then"));
+    assert!(macos_bundle.contains("function ensure_framework_rpath()"));
+    assert!(macos_bundle.contains("otool -l \"$binary_path\""));
+    assert!(macos_bundle.contains("Framework rpath already exists in $binary_path"));
+    assert!(macos_bundle.contains("install_name_tool -add_rpath \"$framework_rpath\" \"$binary_path\""));
+    assert!(macos_bundle.contains(
+        "ensure_framework_rpath \"$BUNDLE_DIR/$ASHIDE_APP_NAME.app/Contents/MacOS/$ASHIDE_BIN\""
+    ));
+    assert!(macos_bundle.contains(
+        "ensure_framework_rpath \"target/$INTEL_TARGET/$TARGET_PROFILE_DIR/$ASHIDE_BIN\""
+    ));
+    assert!(macos_bundle.contains(
+        "ensure_framework_rpath \"target/$ARM_TARGET/$TARGET_PROFILE_DIR/$ASHIDE_BIN\""
+    ));
+    assert!(!macos_bundle.contains(
+        "install_name_tool -add_rpath \"@executable_path/../Frameworks\" \"$BUNDLE_DIR"
+    ));
+}
+
+#[test]
 fn macos_release_publishes_direct_verified_dmg_instead_of_zip() {
     let workflow = include_str!("../../.github/workflows/release.yml");
     let artifact_script = include_str!("../make_release_artifacts");

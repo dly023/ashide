@@ -263,6 +263,11 @@ pub struct WorkspaceSessionSnapshot {
 /// 会话上限。配额只计算合并后的逻辑会话，不计算同一会话的 backing sources。
 pub const WORKSPACE_SESSION_NAVIGATOR_LOGICAL_LIMIT: usize = 80;
 
+/// Session Navigator 单个 provider 在一次 discovery 中允许枚举的物理 session
+/// source 上限。该门禁位于 provider store scanner，而不是 UI 投影层：超过上限
+/// 必须失败并保留既有 collection，不能依赖目录顺序静默展示 partial result。
+pub const WORKSPACE_SESSION_NAVIGATOR_PHYSICAL_SOURCE_LIMIT_PER_PROVIDER: usize = 1_600;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum WorkspaceSessionLabelQuality {
     Missing,

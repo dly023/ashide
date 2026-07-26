@@ -2,8 +2,8 @@ use super::{Event, Menu, MenuAction, MenuItem, MenuItemFields, SelectAction, Sub
 
 use warp_core::ui::appearance::Appearance;
 use warpui::{
-    App, Element, Entity, TypedActionView, View, ViewContext, ViewHandle, elements::ChildView,
-    platform::WindowStyle,
+    elements::ChildView, platform::WindowStyle, App, Element, Entity, TypedActionView, View,
+    ViewContext, ViewHandle,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,11 +25,9 @@ impl MenuRebuildingParent {
         let menu = ctx.add_typed_action_view(|ctx| {
             let mut menu = Menu::new();
             menu.set_items(
-                vec![
-                    MenuItemFields::new("root")
-                        .with_on_select_action(TestAction::Root)
-                        .into_item(),
-                ],
+                vec![MenuItemFields::new("root")
+                    .with_on_select_action(TestAction::Root)
+                    .into_item()],
                 ctx,
             );
             menu
@@ -105,19 +103,15 @@ fn two_submenu_items() -> Vec<MenuItem<TestAction>> {
     vec![
         MenuItem::Submenu {
             fields: MenuItemFields::new_submenu("first submenu"),
-            menu: SubMenu::new(vec![
-                MenuItemFields::new("first child")
-                    .with_on_select_action(TestAction::ChildOne)
-                    .into_item(),
-            ]),
+            menu: SubMenu::new(vec![MenuItemFields::new("first child")
+                .with_on_select_action(TestAction::ChildOne)
+                .into_item()]),
         },
         MenuItem::Submenu {
             fields: MenuItemFields::new_submenu("second submenu"),
-            menu: SubMenu::new(vec![
-                MenuItemFields::new("second child")
-                    .with_on_select_action(TestAction::ChildTwo)
-                    .into_item(),
-            ]),
+            menu: SubMenu::new(vec![MenuItemFields::new("second child")
+                .with_on_select_action(TestAction::ChildTwo)
+                .into_item()]),
         },
     ]
 }
@@ -125,12 +119,10 @@ fn two_submenu_items() -> Vec<MenuItem<TestAction>> {
 #[test]
 fn test_menu_item_selectable() {
     assert!(MenuItemFields::<()>::new("normal").into_item().selectable());
-    assert!(
-        !MenuItemFields::<()>::new("disabled")
-            .with_disabled(true)
-            .into_item()
-            .selectable()
-    );
+    assert!(!MenuItemFields::<()>::new("disabled")
+        .with_disabled(true)
+        .into_item()
+        .selectable());
     assert!(!MenuItem::<()>::Separator.selectable());
 }
 
@@ -572,11 +564,9 @@ fn two_submenu_context_menu_items() -> Vec<MenuItem<TestAction>> {
     vec![
         MenuItem::Submenu {
             fields: MenuItemFields::new_submenu("upload"),
-            menu: SubMenu::new(vec![
-                MenuItemFields::new("upload file")
-                    .with_on_select_action(TestAction::ChildOne)
-                    .into_item(),
-            ]),
+            menu: SubMenu::new(vec![MenuItemFields::new("upload file")
+                .with_on_select_action(TestAction::ChildOne)
+                .into_item()]),
         },
         MenuItem::Submenu {
             fields: MenuItemFields::new_submenu("other"),

@@ -12388,26 +12388,13 @@ impl Workspace {
             .into_iter()
             .filter(|agent| CLIAgentInstallModel::as_ref(ctx).is_cli_agent_installed(*agent))
             .collect::<Vec<_>>();
-        match enabled_coding_agents.as_slice() {
-            [] => {}
-            [agent] | [agent, ..] if enabled_coding_agents.len() <= 2 => {
-                for agent in enabled_coding_agents {
-                    menu_items.push(
-                        MenuItemFields::new(Self::agent_action_label(
-                            agent,
-                            AgentActionIntent::New,
-                        ))
-                        .with_on_select_action(WorkspaceAction::AddSpecificAgentTab(agent))
-                        .with_icon(agent.icon().unwrap_or(icons::Icon::LayoutAlt01))
-                        .into_item(),
-                    );
-                }
-            }
-            _ => menu_items.push(
-                MenuItemFields::new_submenu(crate::t!("workspace-coding-agent-actions"))
-                    .with_icon(icons::Icon::LayoutAlt01)
+        for agent in enabled_coding_agents {
+            menu_items.push(
+                MenuItemFields::new(Self::agent_action_label(agent, AgentActionIntent::New))
+                    .with_on_select_action(WorkspaceAction::AddSpecificAgentTab(agent))
+                    .with_icon(agent.icon().unwrap_or(icons::Icon::LayoutAlt01))
                     .into_item(),
-            ),
+            );
         }
 
         // 6. Separator — 仅当 Docker 启用时显示
@@ -32315,32 +32302,85 @@ impl EnvironmentBackend for TerminalBootstrapEnvironmentBackend {
         &self,
         ws: &mut Workspace,
         authority: &str,
-        _intent: EnvironmentSessionRefreshIntent,
+        intent: EnvironmentSessionRefreshIntent,
         ctx: &mut ViewContext<Workspace>,
     ) -> Result<bool, String> {
-        let scan_token = ws
-            .environments
-            .begin_indexed_cli_agent_session_scan(authority, None);
-        let outcome = Workspace::try_scan_terminal_cli_agent_session_discovery(
-            ctx,
-            scan_token.observed_agents(),
-        )
-        .map_err(|error| error.to_string())?;
-        let committed = ws
-            .environments
-            .commit_indexed_cli_agent_session_discovery(scan_token, Ok::<_, String>(outcome))?;
-        debug_assert!(
-            committed,
-            "synchronous local scan token must remain current"
-        );
-        ws.environments.set_cli_agent_session_user_state(
-            authority.to_owned(),
-            crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserState {
-                aliases: Workspace::local_cli_agent_session_aliases(),
-                pinned: Workspace::pinned_cli_agent_session_ids(),
+        let scan_token = ws.begin_indexed_environment_cli_agent_session_scan(authority, None);
+        let previously_observed_agents = scan_token.observed_agents().clone();
+        let enabled_agents = AISettings::as_ref(ctx).cli_agent_history_enabled_agents();
+        let authority = authority.to_owned();
+        let refresh_generation = match intent {
+            EnvironmentSessionRefreshIntent::PassiveProjection => None,
+            EnvironmentSessionRefreshIntent::UserInitiated { generation } => Some(generation),
+        };
+
+        ctx.spawn(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    Workspace::try_scan_terminal_cli_agent_session_discovery(
+                        enabled_agents,
+                        &previously_observed_agents,
+                    )
+                })
+                .await
+                .map_err(|error| format!("local CLI-agent session scan task failed: {error}"))?
+            },
+            move |workspace, result, ctx| {
+                let (outcome, user_state) = match result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let preserved = workspace
+                            .commit_indexed_environment_cli_agent_session_discovery(
+                                scan_token,
+                                Err(error.clone()),
+                            )
+                            .expect_err("failed local scan must not commit indexed rows");
+                        log::warn!("Local Session Navigator scan failed: {error}");
+                        debug_assert_eq!(preserved, error);
+                        if let Some(refresh_generation) = refresh_generation {
+                            workspace.fail_workspace_sessions_refresh_if_current(
+                                refresh_generation,
+                                format!("刷新会话列表失败：{error}"),
+                                ctx,
+                            );
+                        }
+                        return;
+                    }
+                };
+                let committed = workspace
+                    .commit_indexed_environment_cli_agent_session_discovery(scan_token, Ok(outcome))
+                    .expect("complete local session scan commit cannot fail");
+                if !committed {
+                    log::info!("Local Session Navigator scan ignored stale generation");
+                    if let Some(refresh_generation) = refresh_generation {
+                        workspace.finish_workspace_sessions_refresh_if_current(
+                            refresh_generation,
+                            "已有更新的会话扫描，忽略旧结果".to_owned(),
+                            ctx,
+                        );
+                    }
+                    return;
+                }
+                workspace.remember_indexed_environment_cli_agent_session_user_state(
+                    authority, user_state,
+                );
+                if refresh_generation.is_some() {
+                    workspace.prune_restored_workspace_sessions_with_missing_cli_sources();
+                }
+                workspace.sync_session_navigator_sessions(ctx);
+                if let Some(refresh_generation) = refresh_generation {
+                    let session_count = workspace.session_navigator_sessions().len();
+                    workspace.finish_workspace_sessions_refresh_if_current(
+                        refresh_generation,
+                        format!("已刷新会话列表：{session_count} 个会话"),
+                        ctx,
+                    );
+                    return;
+                }
+                ctx.notify();
             },
         );
-        Ok(false)
+        Ok(true)
     }
 }
 

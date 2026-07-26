@@ -5919,6 +5919,16 @@ impl TerminalView {
         Some(self.model.lock().active_block_uses_environment_runtime())
     }
 
+    /// Whether this terminal is backed by a native Environment Runtime transport.
+    ///
+    /// Stable across the terminal's lifetime, unlike
+    /// [`active_session_uses_environment_runtime`], which tracks the active
+    /// block's session and flips when a CLI agent runs inside a subshell. Use
+    /// this for Session Navigator liveness/ownership decisions.
+    pub fn is_environment_runtime_transport(&self) -> bool {
+        self.model.lock().is_environment_runtime_transport()
+    }
+
     /// Returns the active session's launch shell, if it is specified.
     /// Returns None if there is no active session or if the current session does not
     /// have a launch shell.

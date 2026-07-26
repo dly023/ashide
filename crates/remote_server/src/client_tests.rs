@@ -757,7 +757,7 @@ async fn empty_required_result_is_rejected_at_transport_boundary() {
         let Some(client_message::Message::ScanCliAgentSessions(request)) = &message.message else {
             panic!("Expected ScanCliAgentSessions, got {:?}", message.message);
         };
-        assert_eq!(request.enabled_agents, ["jcode", "omp"]);
+        assert_eq!(request.enabled_agents, ["Jcode", "Omp"]);
         assert!(request.previously_observed_agents.is_empty());
         server_message::Message::ScanCliAgentSessionsResponse(
             crate::proto::ScanCliAgentSessionsResponse { result: None },
@@ -773,7 +773,7 @@ async fn empty_required_result_is_rejected_at_transport_boundary() {
                     claude_config_dir: "/home/test/.claude".to_owned(),
                     codex_home: "/home/test/.codex".to_owned(),
                 },
-                vec!["jcode".to_owned(), "omp".to_owned()],
+                vec!["Jcode".to_owned(), "Omp".to_owned()],
                 Vec::new(),
             )
             .await,

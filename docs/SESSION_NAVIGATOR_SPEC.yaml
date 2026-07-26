@@ -329,6 +329,8 @@ state_model:
     passive_rule: "启动、delete/source mutation 后的被动 cache projection 不得推进 runtime transport lifecycle；target/client 不可用时保留 cache 与 persisted Error/Disconnected 状态并返回同步未刷新"
     explicit_rule: "只有 UserInitiated 才可按用户意图请求 reconnect，并由同一 generation 完成成功/失败反馈；local 同步 scan 仍消费相同 intent"
     ownership_rule: "backend 只负责 I/O timing 与 transport side effect；EnvironmentTable cache、Navigator reducer、selection/order projection 继续共用"
+    wire_identity_rule: "ScanCliAgentSessions 的 request 与 records.agent、observed_agents、source_missing_agent 都必须使用 CLIAgent::to_serialized_name 的协议值；remote scanner 只产出 typed CLIAgent，server_model 是唯一 typed→wire 投影点，desktop 与 helper 都只从该格式解码，禁止 command_prefix / display name 穿过 transport。任何 protobuf 仍可解码的语义变更必须递增 REMOTE_SERVER_PROTOCOL_REVISION，使旧 helper 在 Initialize 时 fail-closed 且落入新安装 slot。"
+    wire_outcome_rule: "source_missing_agent 与 records/observed_agents 互斥；Complete 的每条 record.agent 必须存在于 observed_agents。desktop 必须在 mutation authority-scoped cache 之前一次性验证整帧，任一违反均拒绝整帧、保留上一 committed collection，绝不部分提交、更不回写 local。"
     forbidden_parallel_paths: ["Option refresh generation intent", "configure-time implicit reconnect", "remote-only refresh wrapper", "passive refresh lifecycle mutation"]
 
   sourceless_restore_container_binding:
@@ -432,6 +434,15 @@ state_model:
     caller_rule: "Delete/close/Undo/split/materialize/Environment switch 与 background source mutation 都只调用同一个 sync；调用方禁止记忆并补第二次 focus refresh。"
     forbidden_parallel_paths: ["inject_focused_live bool", "reduce_session_navigator_refresh(ctx, false)", "post-close membership-only refresh", "active-row fallback", "local/remote focus branch"]
     invariant: "每个已提交 SessionNavigatorModel 的 membership 与 is_active 必须属于同一物理布局时点；有 focused visible carrier 时不得提交零 active rows。"
+
+  runtime_live_row_stable_liveness:
+    id: "SN-RUNTIME-LIVE-ROW-STABLE-LIVENESS-64"
+    existing_abstractions: ["TerminalModel.force_environment_runtime_session_type", "TerminalModel.environment_runtime_transport_session_id", "TerminalView::is_environment_runtime_transport", "Workspace::live_workspace_sessions"]
+    liveness_rule: "runtime Environment tab 里某个 terminal pane 是否投影为 live Session Navigator 行，只由该 terminal 的稳定 runtime transport 身份（构造时固定的 force_environment_runtime_session_type / environment_runtime_transport_session_id）决定；禁止使用 active_session_uses_environment_runtime 等依赖当前 active block session 的易失判据。"
+    rationale: "CLI agent 在子 shell 内运行会把 active block 切到非 runtime session，易失判据随之翻转 false，会把正在运行的远程 agent live 行降级成 virtual 历史行，连带丢失 is_active 高亮、活动点，并把 rename 误路由到远程 alias RPC。"
+    parity_rule: "local 与 runtime 共用同一 live-row 语义；差异只允许在 backend delivery 时机。本地 tab 不进入 runtime 过滤分支，runtime tab 只用稳定 transport 身份区分真正的 runtime pane 与误放进来的 current-app terminal。"
+    forbidden_parallel_paths: ["active-block runtime classification for liveness", "pending/force fallback as liveness signal", "history-row-only projection for a live runtime agent", "remote-only rename via alias RPC when a live container exists"]
+    invariant: "只要 runtime terminal pane 存在，其 Session Navigator 行就是 live container：is_live_container=true、可投影 is_active、可显示 structured activity 点、rename 编辑 PaneConfiguration 容器标题；agent 是否占据 active block 不改变以上任何一项。"
 
   stable_inline_edit_identity:
     id: "SN-SESSION-NAVIGATOR-STABLE-INLINE-EDIT-IDENTITY-47"
@@ -641,6 +652,7 @@ state_model:
     loading: "外置 metadata 必须在初次 scan/Refresh 时按 durable session identity 与实体 source 聚合；Activate/Resume/materialize 不得作为加载前置条件"
     budgeting: "limit/pagination 按逻辑会话计算；同一会话的 rollout/index/user-state 等 backing source 不互相竞争配额"
     discovery_limit: "local initial scan、local Refresh、remote scan 共用 WORKSPACE_SESSION_NAVIGATOR_LOGICAL_LIMIT；禁止各调用点写独立魔法数字"
+    physical_source_gate: "每个 provider store 扫描共用 WORKSPACE_SESSION_NAVIGATOR_PHYSICAL_SOURCE_LIMIT_PER_PROVIDER=1600；目录/JSONL/index 超限必须显式失败并保留当前 canonical rows，禁止按枚举顺序截断 partial result。仅 discovery 使用该 gate；SessionBridge 的用户显式全文读取不受此会话列表 discovery 配额限制。"
     isolation: "metadata 只能 enrich 同 EnvironmentKey + durable identity 的 row，不得跨环境串写"
     failure_boundary: "metadata/user-state 读取失败不得丢弃已成功扫描的实体 rows；保留该 Environment 已缓存 enrichment 并允许后续 Refresh 重试"
     binding_persistence: "cli_agent/command/origin/provider session id/source identities 必须由 PaneConfiguration live owner → LeafSnapshot snapshot owner → pane_container_identities.session_binding_json generic SQLite owner 落盘并在冷启动恢复；TerminalPaneSnapshot/terminal_panes 双写必须删除；Started/SessionUpdated 必须触发 app-state save，禁止把 Resume 当成 identity 恢复机制"
@@ -1941,6 +1953,17 @@ label_resolution:
     initial_visibility: "Codex session_index.thread_name、Claude history title、Ashide user alias 必须在列表首次 scan/Refresh 即可见"
     lifecycle_independence: "Resume/Activate 只能改变 selection/lifecycle/physical binding，禁止承担 label metadata 加载"
     source_quota: "实体 source 与 sidecar metadata 先按 durable identity 聚合，再按逻辑会话数量应用 limit"
+
+# ─────────────────────────────────────────────────────────
+# 11.1 刷新交付与 UI 线程边界 (Refresh Delivery)
+# ─────────────────────────────────────────────────────────
+refresh_delivery:
+  id: "SESSION-NAVIGATOR-REFRESH-ASYNC-01"
+  canonical_owner: "EnvironmentTable 的 authority-scoped IndexedCliAgentSessionScanToken + Workspace refresh generation"
+  local: "UI action 只捕获 enabled_agents / observed_agents 并开始 token；provider store 的目录、JSON/JSONL 读取必须经 spawn_blocking 在 worker 执行。完成回调只能提交 current token 的 typed outcome。"
+  runtime: "UI action 只开始 token；RPC 由 async transport 执行。完成回调遵守与 local 相同的 current-token atomic commit 与 refresh-generation feedback 规则。"
+  forbidden: ["在 WarpUI action/render/main callback 内同步扫描 provider store", "用 debounce/sleep 掩盖卡顿", "stale completion 覆盖 rows 或 refresh feedback", "source-missing/failure/cancel 清空 canonical rows"]
+  visible_semantics: "扫描期间旧会话列表保持可交互；成功后只重绘一次 committed projection；失败、取消或 source-missing 保留已提交 collection。"
 
 # ─────────────────────────────────────────────────────────
 # 12. 测试约束 (Test Constraints)

@@ -597,7 +597,13 @@ fn validate_mutable_session_path_location(
     }
 
     let canonical_path = canonical_cli_agent_session_path(path)?;
-    let allowed_roots = [roots.claude_projects(), roots.codex_sessions()];
+    let allowed_roots = [
+        roots.claude_projects(),
+        roots.codex_sessions(),
+        roots.jcode_sessions(),
+        roots.omp_sessions(),
+    ];
+
     let is_under_allowed_root = allowed_roots.iter().any(|root| {
         root.canonicalize()
             .ok()

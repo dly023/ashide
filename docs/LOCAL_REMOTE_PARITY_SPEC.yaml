@@ -1141,8 +1141,8 @@ ux_matrix:
     local: "客户端与当前 checkout/release helper 使用同一 REMOTE_SERVER_PROTOCOL_REVISION；Initialize 请求和响应都携带该 revision。"
     remote: "helper 在写入 auth token 或执行任何请求前校验 client revision；客户端在接受 host_id 前校验 server revision。"
     invariant: "缺失、旧版或未知 protocol revision 必须在 Initialize 阶段显式失败；protobuf unknown-field/default-value 兼容不得把不兼容 helper 伪装成成功连接。"
-    source_build_delivery: "source/dev helper 安装身份由 REMOTE_SERVER_PROTOCOL_REVISION 派生；当前 CLI-agent discovery outcome revision 使用 dev-pty-v5，禁止复用任何更低 revision helper。"
-    release_delivery: "tag release helper 安装身份必须同时包含 release version 与 REMOTE_SERVER_PROTOCOL_REVISION（当前例如 v0.3.0-pty-v5）；同一 tag 下 protocol revision 变化时不得复用旧 helper。Initialize revision 仍是最终 fail-closed 证明，不能只依赖文件名或 --version/help 探针。"
+    source_build_delivery: "source/dev helper 安装身份由 REMOTE_SERVER_PROTOCOL_REVISION 派生；当前 CLI-agent discovery outcome revision 使用 dev-pty-v6，禁止复用任何更低 revision helper。"
+    release_delivery: "tag release helper 安装身份必须同时包含 release version 与 REMOTE_SERVER_PROTOCOL_REVISION（当前例如 v0.3.0-pty-v6）；同一 tag 下 protocol revision 变化时不得复用旧 helper。Initialize revision 仍是最终 fail-closed 证明，不能只依赖文件名或 --version/help 探针。"
     side_effect_order: "server revision 校验严格早于 auth_token mutation；失败连接不得改变 daemon credential 或进入业务 handler。"
     negative_space: ["new client + old helper response missing revision", "old client + new helper request missing revision", "wrong nonzero revision", "matching revision", "auth token supplied on mismatch"]
     verification_rule: "协议 round-trip、client rejection、server rejection/no-auth-mutation、source/dev slot、release version+protocol slot 与 static guard 必须同时覆盖。"

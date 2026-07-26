@@ -515,17 +515,27 @@ impl Workspace {
     }
 
     pub(super) fn try_scan_terminal_cli_agent_session_discovery(
-        ctx: &AppContext,
+        enabled_agents: Vec<crate::terminal::CLIAgent>,
         previously_observed_agents: &std::collections::HashSet<crate::terminal::CLIAgent>,
     ) -> Result<
-        crate::workspace::environment_table::IndexedCliAgentSessionScanOutcome,
-        crate::cli_agent_jsonl::CliAgentSessionScanError,
+        (
+            crate::workspace::environment_table::IndexedCliAgentSessionScanOutcome,
+            crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserState,
+        ),
+        String,
     > {
-        crate::terminal::cli_agent_session_index::try_scan_current_app_cli_agent_session_discovery(
+        let outcome = crate::terminal::cli_agent_session_index::try_scan_current_app_cli_agent_session_discovery(
             crate::app_state::WORKSPACE_SESSION_NAVIGATOR_LOGICAL_LIMIT,
-            crate::settings::AISettings::as_ref(ctx).cli_agent_history_enabled_agents(),
+            enabled_agents,
             previously_observed_agents,
         )
+        .map_err(|error| error.to_string())?;
+        let user_state =
+            crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserState {
+                aliases: crate::terminal::cli_agent_session_index::session_aliases(),
+                pinned: crate::terminal::cli_agent_session_index::pinned_session_ids(),
+            };
+        Ok((outcome, user_state))
     }
 
     pub(super) fn backing_sessions_for_workspace_session(
@@ -551,6 +561,10 @@ impl Workspace {
         sessions
     }
 
+    pub(super) fn pinned_cli_agent_session_ids() -> HashSet<String> {
+        crate::terminal::cli_agent_session_index::pinned_session_ids()
+    }
+
     pub(super) fn cli_agent_history_source_session_for_workspace_session(
         &self,
         session: &WorkspaceSessionSnapshot,
@@ -566,10 +580,6 @@ impl Workspace {
     ) -> bool {
         self.cli_agent_history_source_session_for_workspace_session(session)
             .is_some()
-    }
-
-    pub(super) fn pinned_cli_agent_session_ids() -> HashSet<String> {
-        crate::terminal::cli_agent_session_index::pinned_session_ids()
     }
 
     pub(super) fn mutate_workspace_session_user_state_for_authority(
@@ -1213,10 +1223,13 @@ impl Workspace {
                         let pane_uses_runtime = pane_group
                             .pane_id_from_index(pane_index)
                             .and_then(|pane_id| pane_group.terminal_view_from_pane_id(pane_id, ctx))
-                            .and_then(|terminal_view| {
-                                terminal_view
-                                    .as_ref(ctx)
-                                    .active_session_uses_environment_runtime(ctx)
+                            .map(|terminal_view| {
+                                // Liveness must use the terminal's stable transport
+                                // identity, not the active block's session. A CLI
+                                // agent running inside a subshell moves the active
+                                // block onto a non-runtime session, which must not
+                                // demote the live remote row to a virtual history row.
+                                terminal_view.as_ref(ctx).is_environment_runtime_transport()
                             })
                             .unwrap_or(false);
                         if !pane_uses_runtime {
@@ -1636,7 +1649,7 @@ impl Workspace {
         }
     }
 
-    fn prune_restored_workspace_sessions_with_missing_cli_sources(&mut self) {
+    pub(super) fn prune_restored_workspace_sessions_with_missing_cli_sources(&mut self) {
         self.restored_workspace_sessions.retain(|session| {
             if !matches!(
                 session.cli_agent_origin,

@@ -216,13 +216,13 @@ fn oss_binary_name_matches_ashide_cli() {
 }
 
 #[test]
-fn oss_source_build_remote_server_binary_uses_dev_protocol_slot_v5() {
-    assert!(remote_server_binary().ends_with("/ashide-dev-pty-v5"));
+fn oss_source_build_remote_server_binary_uses_dev_protocol_slot_v6() {
+    assert!(remote_server_binary().ends_with("/ashide-dev-pty-v6"));
 }
 
 #[test]
 fn release_remote_server_slot_includes_protocol_revision() {
-    assert_eq!(release_remote_server_slot("v0.3.0"), "v0.3.0-pty-v5");
+    assert_eq!(release_remote_server_slot("v0.3.0"), "v0.3.0-pty-v6");
 }
 
 #[test]

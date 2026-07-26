@@ -414,10 +414,10 @@ mod tests {
     /// 真实 helper 验证只接受调用者明确提供的、已在运行的 SSH ControlMaster。
     ///
     /// 这避免测试自行读取 `~/.ssh/config`、建立未知连接或写入远端状态。测试仅执行
-    /// Initialize(v5)、根目录只读列举，以及随后显式关闭的 `/bin/sh` PTY。
+    /// Initialize(当前 revision)、根目录只读列举，以及随后显式关闭的 `/bin/sh` PTY。
     #[test]
     #[ignore = "requires an explicit active remote ControlMaster"]
-    fn real_remote_helper_v5_initialize_pty_and_server_file_browser() {
+    fn real_remote_helper_current_revision_initialize_pty_and_server_file_browser() {
         let socket_path = PathBuf::from(
             env::var("ASHIDE_LR123_CONTROL_PATH")
                 .expect("ASHIDE_LR123_CONTROL_PATH must name an active ControlMaster socket"),
@@ -435,7 +435,7 @@ mod tests {
         App::test((), |app| async move {
             // 单元测试进程不会执行 `app/src/bin/ashide.rs` 的 channel 初始化；显式复现
             // 当前 AshideDev source-build 客户端，保证 production `remote_server_binary()`
-            // 选择运行中的 `~/.ashide-dev/.../ashide-dev-pty-v5` helper。
+            // 选择由当前 `REMOTE_SERVER_PROTOCOL_REVISION` 派生的 helper。
             ChannelState::set(ChannelState::new(
                 Channel::Dev,
                 ChannelConfig {

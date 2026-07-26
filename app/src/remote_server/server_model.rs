@@ -403,7 +403,7 @@ fn build_scan_cli_agent_sessions_response(
             let records = sessions
                 .into_iter()
                 .map(|session| CliAgentSessionRecord {
-                    agent: session.agent.to_string(),
+                    agent: session.agent.to_serialized_name(),
                     id: session.id,
                     source: session.source,
                     label: session.label,
@@ -413,7 +413,10 @@ fn build_scan_cli_agent_sessions_response(
                 .collect();
             scan_cli_agent_sessions_response::Result::Success(ScanCliAgentSessionsSuccess {
                 records,
-                observed_agents: observed_agents.into_iter().map(str::to_owned).collect(),
+                observed_agents: observed_agents
+                    .into_iter()
+                    .map(|agent| agent.to_serialized_name())
+                    .collect(),
                 source_missing_agent: None,
             })
         }
@@ -421,7 +424,7 @@ fn build_scan_cli_agent_sessions_response(
             scan_cli_agent_sessions_response::Result::Success(ScanCliAgentSessionsSuccess {
                 records: Vec::new(),
                 observed_agents: Vec::new(),
-                source_missing_agent: Some(agent.to_owned()),
+                source_missing_agent: Some(agent.to_serialized_name()),
             })
         }
         Err(message) => {
@@ -431,6 +434,27 @@ fn build_scan_cli_agent_sessions_response(
     ScanCliAgentSessionsResponse {
         result: Some(result),
     }
+}
+
+#[cfg(feature = "local_fs")]
+fn decode_scan_cli_agent_wire_agents(
+    field: &str,
+    names: impl IntoIterator<Item = String>,
+) -> Result<Vec<crate::terminal::CLIAgent>, String> {
+    names
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let agent = crate::terminal::CLIAgent::from_serialized_name(&name);
+            if matches!(agent, crate::terminal::CLIAgent::Unknown) {
+                Err(format!(
+                    "ScanCliAgentSessions {field}[{index}] is not a serialized CLI agent identity: {name:?}"
+                ))
+            } else {
+                Ok(agent)
+            }
+        })
+        .collect()
 }
 
 #[cfg(feature = "local_fs")]
@@ -2626,23 +2650,31 @@ impl ServerModel {
     /// former remote-Python scan heredoc with one round trip over `std::fs`.
     #[cfg(feature = "local_fs")]
     fn handle_scan_cli_agent_sessions(&self, msg: ScanCliAgentSessions) -> HandlerOutcome {
-        let enabled_agents = msg
-            .enabled_agents
-            .iter()
-            .map(|name| crate::terminal::CLIAgent::from_serialized_name(name));
-        let previously_observed_agents = msg
-            .previously_observed_agents
-            .iter()
-            .map(|name| crate::terminal::CLIAgent::from_serialized_name(name));
-        let result = cli_agent_store_roots_from_request(msg.roots).and_then(|roots| {
-            super::cli_agent_sessions::scan_sessions(
-                &roots,
-                msg.limit as usize,
-                enabled_agents,
-                previously_observed_agents,
-            )
-            .map_err(|error| error.to_string())
-        });
+        let ScanCliAgentSessions {
+            limit,
+            roots,
+            enabled_agents,
+            previously_observed_agents,
+        } = msg;
+        let result = decode_scan_cli_agent_wire_agents("enabled_agents", enabled_agents)
+            .and_then(|enabled_agents| {
+                decode_scan_cli_agent_wire_agents(
+                    "previously_observed_agents",
+                    previously_observed_agents,
+                )
+                .map(|previously_observed_agents| (enabled_agents, previously_observed_agents))
+            })
+            .and_then(|(enabled_agents, previously_observed_agents)| {
+                cli_agent_store_roots_from_request(roots).and_then(|roots| {
+                    super::cli_agent_sessions::scan_sessions(
+                        &roots,
+                        limit as usize,
+                        enabled_agents,
+                        previously_observed_agents,
+                    )
+                    .map_err(|error| error.to_string())
+                })
+            });
         let response = build_scan_cli_agent_sessions_response(result);
         HandlerOutcome::Sync(server_message::Message::ScanCliAgentSessionsResponse(
             response,

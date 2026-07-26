@@ -247,6 +247,28 @@ fn forced_environment_runtime_session_carries_transport_session_id() {
 }
 
 #[test]
+fn environment_runtime_transport_is_stable_regardless_of_active_block_session() {
+    // 远程 runtime 终端的 liveness 归属必须由稳定 transport 身份决定,
+    // 不能因为 active block 当前属于哪个 session 而翻转。CLI agent 在子 shell
+    // 里跑时 active block 会切到非 runtime session,但该终端仍然是 Environment
+    // Runtime transport —— Session Navigator 据此保持它为 live 行。
+    let mut terminal = TerminalModel::mock(None, None);
+    assert!(!terminal.is_environment_runtime_transport());
+
+    terminal.set_force_environment_runtime_session_type(true);
+    terminal.set_environment_runtime_transport_session_id(9000000000.into());
+    assert!(terminal.is_environment_runtime_transport());
+
+    // 模拟 active block 切到一个未登记为 runtime 的 session:volatile 的
+    // active-block 判据会翻成 false,但稳定 transport 判据保持 true。
+    terminal.start_active_block_as_background_block();
+    assert!(
+        terminal.is_environment_runtime_transport(),
+        "runtime transport identity must not depend on the active block's session"
+    );
+}
+
+#[test]
 fn non_inline_iterm_image_save_is_current_app_scoped() {
     let mut terminal = TerminalModel::mock(None, None);
     assert!(terminal.should_save_non_inline_iterm_image_to_current_app_fs());

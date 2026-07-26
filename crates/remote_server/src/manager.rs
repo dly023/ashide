@@ -449,6 +449,17 @@ impl RemoteServerManagerEvent {
     }
 }
 
+/// Borrowed execution-context inputs describing a bootstrapped terminal
+/// session. Groups the four transport-boundary fields so registration APIs
+/// stay within the argument-count budget and carry the data as one unit.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
+pub struct SessionExecutionContextInput<'a> {
+    pub shell_type: &'a str,
+    pub shell_path: Option<&'a str>,
+    pub working_directory: Option<&'a str>,
+    pub environment_variables: &'a HashMap<String, String>,
+}
+
 /// Shell info recorded by [`RemoteServerManager::notify_session_bootstrapped`].
 ///
 /// Persists for the lifetime of the session (removed only in
@@ -464,26 +475,23 @@ struct SessionBootstrapInfo {
 }
 
 impl SessionBootstrapInfo {
-    fn from_context(
-        shell_type: &str,
-        shell_path: Option<&str>,
-        working_directory: Option<&str>,
-        environment_variables: &HashMap<String, String>,
-    ) -> Option<Self> {
+    fn from_context(input: &SessionExecutionContextInput<'_>) -> Option<Self> {
         if let Err(error) = validate_marked_target_session_snapshot(
-            shell_path,
-            working_directory,
-            environment_variables,
+            input.shell_path,
+            input.working_directory,
+            input.environment_variables,
         ) {
             log::error!("invalid session execution context: {error}");
             return None;
         }
-        let working_directory = working_directory.expect("validated working directory");
+        let working_directory = input
+            .working_directory
+            .expect("validated working directory");
         Some(Self {
-            shell_type: shell_type.to_owned(),
-            shell_path: shell_path.map(ToOwned::to_owned),
+            shell_type: input.shell_type.to_owned(),
+            shell_path: input.shell_path.map(ToOwned::to_owned),
             working_directory: Some(working_directory.to_owned()),
-            environment_variables: environment_variables.clone(),
+            environment_variables: input.environment_variables.clone(),
         })
     }
 
@@ -1224,6 +1232,7 @@ impl RemoteServerManager {
     ///   was in, because the entry is being removed from `sessions`
     ///   outright. Unlike `SessionDisconnected`, this one never fires for
     ///   spontaneous drops -- only for explicit teardown.
+    ///
     /// Drops only the current transport resources for a canonical session
     /// owner. The owner identity, environment ownership and complete terminal
     /// alias/execution-context graph remain registered for the next connection
@@ -1527,18 +1536,10 @@ impl RemoteServerManager {
         &mut self,
         session_id: SessionId,
         transport_session_id: Option<SessionId>,
-        shell_type: &str,
-        shell_path: Option<&str>,
-        working_directory: Option<&str>,
-        environment_variables: &HashMap<String, String>,
+        execution_context: &SessionExecutionContextInput<'_>,
         ctx: &mut ModelContext<Self>,
     ) -> bool {
-        let Some(info) = SessionBootstrapInfo::from_context(
-            shell_type,
-            shell_path,
-            working_directory,
-            environment_variables,
-        ) else {
+        let Some(info) = SessionBootstrapInfo::from_context(execution_context) else {
             log::error!(
                 "register_session_execution_context: refusing incomplete execution context for session {session_id:?}"
             );

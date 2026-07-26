@@ -29,7 +29,7 @@ const DEFAULT_SCAN_LIMIT: usize = 40;
 
 /// A scanned session record, mirroring the Python JSON rows.
 pub struct ScannedSession {
-    pub agent: &'static str,
+    pub agent: crate::terminal::CLIAgent,
     pub id: String,
     pub source: String,
     pub label: Option<String>,
@@ -41,11 +41,11 @@ pub struct ScannedSession {
 /// turns a source-missing provider into an empty successful record list.
 pub enum ScannedSessionDiscovery {
     Complete {
-        observed_agents: Vec<&'static str>,
+        observed_agents: Vec<crate::terminal::CLIAgent>,
         sessions: Vec<ScannedSession>,
     },
     SourceMissing {
-        agent: &'static str,
+        agent: crate::terminal::CLIAgent,
     },
 }
 
@@ -83,7 +83,9 @@ fn file_stem(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// 执行由 desktop 显式选择的共享 plan。此模块只把 typed record 投影到 RPC record。
+/// 执行由 desktop 显式选择的共享 plan，并保留 typed provider identity。
+///
+/// RPC projection 只允许在 `server_model` 完成，以免 command prefix 穿过 transport。
 pub fn scan_sessions(
     roots: &CliAgentStoreRoots,
     limit: usize,
@@ -102,12 +104,12 @@ pub fn scan_sessions(
             Ok(ScannedSessionDiscovery::Complete {
                 observed_agents: providers
                     .into_iter()
-                    .map(|provider| provider.agent().command_prefix())
+                    .map(|provider| provider.agent())
                     .collect(),
                 sessions: records
                     .into_iter()
                     .map(|record| ScannedSession {
-                        agent: record.agent.command_prefix(),
+                        agent: record.agent,
                         id: record.provider_session_id,
                         source: record.source.transport_reference(),
                         label: record.label,
@@ -122,7 +124,7 @@ pub fn scan_sessions(
         }
         AgentSessionDiscoveryTransition::PreserveSourceMissing(provider) => {
             Ok(ScannedSessionDiscovery::SourceMissing {
-                agent: provider.agent().command_prefix(),
+                agent: provider.agent(),
             })
         }
         AgentSessionDiscoveryTransition::PreserveFailed(error) => Err(error),
@@ -246,7 +248,7 @@ fn find_codex_transcript(
     session_id: &str,
 ) -> Result<Option<PathBuf>, CliAgentSessionScanError> {
     let root = roots.codex_sessions();
-    for file in recent_jsonl_files(&root, usize::MAX)? {
+    for file in recent_jsonl_files(&root, usize::MAX, None)? {
         if codex_session_id_for_file(&file.path)? == session_id {
             return Ok(Some(file.path));
         }
@@ -560,7 +562,13 @@ mod uireq014_first_message_tests {
             .expect("create Jcode store");
         std::fs::write(
             &jcode_path,
-            json!({"id": jcode_id, "title": "Jcode remote"}).to_string(),
+            json!({
+                "id": jcode_id,
+                "short_name": "Jcode remote",
+                "is_debug": false,
+                "messages": [{"role": "user"}],
+            })
+            .to_string(),
         )
         .expect("write Jcode session");
 
@@ -588,7 +596,7 @@ mod uireq014_first_message_tests {
         };
 
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].agent, "jcode");
+        assert_eq!(sessions[0].agent, crate::terminal::CLIAgent::Jcode);
         assert_eq!(sessions[0].id, jcode_id);
     }
 
@@ -602,7 +610,7 @@ mod uireq014_first_message_tests {
             scan_sessions(&roots, 40, [crate::terminal::CLIAgent::Jcode], [])
                 .expect("first discovery completes"),
             ScannedSessionDiscovery::Complete { observed_agents, sessions }
-                if observed_agents == ["jcode"] && sessions.is_empty()
+                if observed_agents == vec![crate::terminal::CLIAgent::Jcode] && sessions.is_empty()
         ));
 
         std::fs::remove_dir_all(roots.jcode_sessions()).expect("remove observed Jcode source");
@@ -614,7 +622,9 @@ mod uireq014_first_message_tests {
                 [crate::terminal::CLIAgent::Jcode],
             )
             .expect("missing provider is a typed completion"),
-            ScannedSessionDiscovery::SourceMissing { agent: "jcode" }
+            ScannedSessionDiscovery::SourceMissing {
+                agent: crate::terminal::CLIAgent::Jcode
+            }
         ));
     }
 

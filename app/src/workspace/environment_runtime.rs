@@ -2036,11 +2036,7 @@ fn decode_environment_cli_agent_scan_records(
         .into_iter()
         .enumerate()
         .map(|(index, record)| {
-            let agent = match record.agent.as_str() {
-                "claude" => CLIAgent::Claude,
-                "codex" => CLIAgent::Codex,
-                name => CLIAgent::from_serialized_name(name),
-            };
+            let agent = CLIAgent::from_serialized_name(&record.agent);
             if matches!(agent, CLIAgent::Unknown) {
                 return Err(format!(
                     "environment session scan record {index} has unknown agent {:?}",
@@ -2070,6 +2066,63 @@ fn decode_environment_cli_agent_scan_records(
         .collect::<Result<Vec<_>, _>>()?;
     records.sort_by(|left, right| right.modified_ms.cmp(&left.modified_ms));
     Ok(records)
+}
+
+/// Validates one complete remote scan outcome before `EnvironmentTable` can
+/// commit it into an authority-scoped cache. A source-missing transition is
+/// intentionally exclusive: accepting records beside it would let a malformed
+/// helper turn a preserve-only transition into an ambiguous projection.
+#[cfg(not(target_family = "wasm"))]
+fn decode_environment_cli_agent_scan_success(
+    success: crate::environment_runtime_transport::proto::ScanCliAgentSessionsSuccess,
+) -> Result<EnvironmentCliAgentSessionDiscovery, String> {
+    let crate::environment_runtime_transport::proto::ScanCliAgentSessionsSuccess {
+        records,
+        observed_agents,
+        source_missing_agent,
+    } = success;
+
+    if let Some(agent) = source_missing_agent {
+        if !records.is_empty() || !observed_agents.is_empty() {
+            return Err(
+                "environment session scan source-missing result must not contain records or observed agents"
+                    .to_owned(),
+            );
+        }
+        let agent = CLIAgent::from_serialized_name(&agent);
+        if matches!(agent, CLIAgent::Unknown) {
+            return Err(
+                "environment session scan returned unknown source-missing agent".to_owned(),
+            );
+        }
+        return Ok(EnvironmentCliAgentSessionDiscovery::SourceMissing(agent));
+    }
+
+    let observed_agents = observed_agents
+        .into_iter()
+        .map(|name| CLIAgent::from_serialized_name(&name))
+        .map(|agent| {
+            if matches!(agent, CLIAgent::Unknown) {
+                Err("environment session scan returned unknown observed agent".to_owned())
+            } else {
+                Ok(agent)
+            }
+        })
+        .collect::<Result<HashSet<_>, _>>()?;
+    let records = decode_environment_cli_agent_scan_records(records)?;
+    if let Some(record) = records
+        .iter()
+        .find(|record| !observed_agents.contains(&record.agent))
+    {
+        return Err(format!(
+            "environment session scan record agent {:?} is not in observed_agents",
+            record.agent
+        ));
+    }
+    Ok(EnvironmentCliAgentSessionDiscovery::Complete {
+        observed_agents,
+        records,
+    })
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -2127,33 +2180,7 @@ pub(crate) async fn scan_environment_cli_agent_sessions_with_roots(
         None => return Err("environment session scan returned no result".to_owned()),
     };
 
-    if let Some(agent) = success.source_missing_agent {
-        let agent = CLIAgent::from_serialized_name(&agent);
-        if matches!(agent, CLIAgent::Unknown) {
-            return Err(
-                "environment session scan returned unknown source-missing agent".to_owned(),
-            );
-        }
-        return Ok(EnvironmentCliAgentSessionDiscovery::SourceMissing(agent));
-    }
-
-    let observed_agents = success
-        .observed_agents
-        .into_iter()
-        .map(|name| CLIAgent::from_serialized_name(&name))
-        .map(|agent| {
-            if matches!(agent, CLIAgent::Unknown) {
-                Err("environment session scan returned unknown observed agent".to_owned())
-            } else {
-                Ok(agent)
-            }
-        })
-        .collect::<Result<HashSet<_>, _>>()?;
-    let records = decode_environment_cli_agent_scan_records(success.records)?;
-    Ok(EnvironmentCliAgentSessionDiscovery::Complete {
-        observed_agents,
-        records,
-    })
+    decode_environment_cli_agent_scan_success(success)
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -2952,10 +2979,12 @@ pub(crate) fn notify_bootstrapped_session<T: Entity>(
         let context_registered = manager.register_session_execution_context(
             session_id,
             runtime_session_id,
-            shell_type_name,
-            shell_path,
-            execution_context.working_directory.as_deref(),
-            &execution_context.environment_variables,
+            &crate::environment_runtime_transport::manager::SessionExecutionContextInput {
+                shell_type: shell_type_name,
+                shell_path,
+                working_directory: execution_context.working_directory.as_deref(),
+                environment_variables: &execution_context.environment_variables,
+            },
             manager_ctx,
         );
         if !context_registered {
@@ -3255,12 +3284,81 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     #[test]
+    fn environment_cli_agent_scan_requires_serialized_agent_names() {
+        use crate::environment_runtime_transport::proto::CliAgentSessionRecord;
+
+        let records = vec![CliAgentSessionRecord {
+            agent: CLIAgent::Omp.to_serialized_name(),
+            id: "omp-session".to_owned(),
+            source: "/root/.omp/agent/sessions/session.jsonl".to_owned(),
+            label: None,
+            cwd: None,
+            modified_epoch_millis: Some(1),
+        }];
+        let decoded = decode_environment_cli_agent_scan_records(records)
+            .expect("serialized agent name must decode");
+        assert_eq!(decoded[0].agent, CLIAgent::Omp);
+
+        let legacy_prefix = vec![CliAgentSessionRecord {
+            agent: "omp".to_owned(),
+            id: "omp-session".to_owned(),
+            source: "/root/.omp/agent/sessions/session.jsonl".to_owned(),
+            label: None,
+            cwd: None,
+            modified_epoch_millis: Some(1),
+        }];
+        let error = decode_environment_cli_agent_scan_records(legacy_prefix)
+            .expect_err("command prefixes are not remote wire identities");
+        assert!(error.contains("unknown agent"));
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn environment_cli_agent_scan_rejects_mixed_source_missing_outcome() {
+        use crate::environment_runtime_transport::proto::ScanCliAgentSessionsSuccess;
+
+        let error = decode_environment_cli_agent_scan_success(ScanCliAgentSessionsSuccess {
+            records: Vec::new(),
+            observed_agents: vec![CLIAgent::Jcode.to_serialized_name()],
+            source_missing_agent: Some(CLIAgent::Omp.to_serialized_name()),
+        })
+        .expect_err("source-missing transitions must not carry a partial complete result");
+
+        assert!(error.contains("source-missing result must not contain records or observed agents"));
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn environment_cli_agent_scan_rejects_record_without_observed_provider() {
+        use crate::environment_runtime_transport::proto::{
+            CliAgentSessionRecord, ScanCliAgentSessionsSuccess,
+        };
+
+        let error = decode_environment_cli_agent_scan_success(ScanCliAgentSessionsSuccess {
+            records: vec![CliAgentSessionRecord {
+                agent: CLIAgent::Omp.to_serialized_name(),
+                id: "omp-session".to_owned(),
+                source: "/root/.omp/agent/sessions/session.jsonl".to_owned(),
+                label: None,
+                cwd: None,
+                modified_epoch_millis: Some(1),
+            }],
+            observed_agents: vec![CLIAgent::Jcode.to_serialized_name()],
+            source_missing_agent: None,
+        })
+        .expect_err("records must be owned by one provider observed in this generation");
+
+        assert!(error.contains("not in observed_agents"));
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
     fn environment_cli_agent_scan_rejects_malformed_record() {
         use crate::environment_runtime_transport::proto::CliAgentSessionRecord;
 
         let records = vec![
             CliAgentSessionRecord {
-                agent: "codex".to_owned(),
+                agent: CLIAgent::Codex.to_serialized_name(),
                 id: "valid-session".to_owned(),
                 source: "/root/.codex/sessions/valid.jsonl".to_owned(),
                 label: None,
@@ -3268,7 +3366,7 @@ mod tests {
                 modified_epoch_millis: Some(2),
             },
             CliAgentSessionRecord {
-                agent: "codex".to_owned(),
+                agent: CLIAgent::Codex.to_serialized_name(),
                 id: "malformed-session".to_owned(),
                 source: String::new(),
                 label: None,

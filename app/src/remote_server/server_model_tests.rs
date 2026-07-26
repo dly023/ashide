@@ -21,10 +21,14 @@ use super::super::protocol::RequestId;
 use super::super::server_buffer_tracker::ServerBufferTracker;
 use super::{
     build_scan_cli_agent_sessions_response, collect_complete_directory_listing,
-    remote_pty_user_defaults, resolve_path_failure, system_time_to_epoch_millis,
-    validate_repo_metadata_directory_load_paths, ConnectionId, ConnectionMessageGateError,
-    ConnectionPhase, ConnectionState, HandlerOutcome, PendingFileOps, ServerModel, SessionId,
+    decode_scan_cli_agent_wire_agents, remote_pty_user_defaults, resolve_path_failure,
+    system_time_to_epoch_millis, validate_repo_metadata_directory_load_paths, ConnectionId,
+    ConnectionMessageGateError, ConnectionPhase, ConnectionState, HandlerOutcome, PendingFileOps,
+    ServerModel, SessionId,
 };
+
+#[cfg(feature = "local_fs")]
+use super::super::cli_agent_sessions::{ScannedSession, ScannedSessionDiscovery};
 
 #[cfg(feature = "local_fs")]
 use crate::code::global_buffer_model::{GlobalBufferModel, GlobalBufferModelEvent};
@@ -59,6 +63,138 @@ fn request_id() -> RequestId {
 #[cfg(all(feature = "local_fs", unix))]
 fn canonical_temp_root(dir: &tempfile::TempDir) -> std::path::PathBuf {
     fs::canonicalize(dir.path()).unwrap()
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn remote_cli_agent_scan_success_uses_serialized_agent_names() {
+    let response = build_scan_cli_agent_sessions_response(Ok(ScannedSessionDiscovery::Complete {
+        observed_agents: vec![
+            crate::terminal::CLIAgent::Jcode,
+            crate::terminal::CLIAgent::Omp,
+        ],
+        sessions: vec![ScannedSession {
+            agent: crate::terminal::CLIAgent::Omp,
+            id: "omp-session".to_owned(),
+            source: "/root/.omp/agent/sessions/session.jsonl".to_owned(),
+            label: Some("Remote Omp".to_owned()),
+            cwd: Some("/root/project".to_owned()),
+            modified_epoch_millis: Some(1),
+        }],
+    }));
+
+    let Some(scan_cli_agent_sessions_response::Result::Success(success)) = response.result else {
+        panic!("successful remote scan must map to an RPC Success result");
+    };
+    assert_eq!(
+        success.observed_agents,
+        vec![
+            crate::terminal::CLIAgent::Jcode.to_serialized_name(),
+            crate::terminal::CLIAgent::Omp.to_serialized_name(),
+        ]
+    );
+    assert_eq!(success.records.len(), 1);
+    assert_eq!(
+        success.records[0].agent,
+        crate::terminal::CLIAgent::Omp.to_serialized_name()
+    );
+    assert!(success.source_missing_agent.is_none());
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn remote_cli_agent_scan_wire_fields_round_trip_every_known_agent() {
+    for agent in enum_iterator::all::<crate::terminal::CLIAgent>() {
+        if matches!(agent, crate::terminal::CLIAgent::Unknown) {
+            continue;
+        }
+
+        let complete =
+            build_scan_cli_agent_sessions_response(Ok(ScannedSessionDiscovery::Complete {
+                observed_agents: vec![agent],
+                sessions: vec![ScannedSession {
+                    agent,
+                    id: format!("{agent:?}-session"),
+                    source: format!("/tmp/{agent:?}.jsonl"),
+                    label: None,
+                    cwd: None,
+                    modified_epoch_millis: None,
+                }],
+            }));
+        let Some(scan_cli_agent_sessions_response::Result::Success(complete)) = complete.result
+        else {
+            panic!("complete remote scan must map to an RPC Success result");
+        };
+        assert_eq!(
+            complete
+                .observed_agents
+                .iter()
+                .map(|name| crate::terminal::CLIAgent::from_serialized_name(name))
+                .collect::<Vec<_>>(),
+            vec![agent],
+            "observed_agents must preserve {agent:?} through the wire format"
+        );
+        assert_eq!(
+            complete
+                .records
+                .iter()
+                .map(|record| crate::terminal::CLIAgent::from_serialized_name(&record.agent))
+                .collect::<Vec<_>>(),
+            vec![agent],
+            "records.agent must preserve {agent:?} through the wire format"
+        );
+
+        let missing =
+            build_scan_cli_agent_sessions_response(Ok(ScannedSessionDiscovery::SourceMissing {
+                agent,
+            }));
+        let Some(scan_cli_agent_sessions_response::Result::Success(missing)) = missing.result
+        else {
+            panic!("source-missing remote scan must map to an RPC Success result");
+        };
+        assert_eq!(
+            missing
+                .source_missing_agent
+                .as_deref()
+                .map(crate::terminal::CLIAgent::from_serialized_name),
+            Some(agent),
+            "source_missing_agent must preserve {agent:?} through the wire format"
+        );
+    }
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn remote_cli_agent_scan_source_missing_uses_serialized_agent_name() {
+    let response =
+        build_scan_cli_agent_sessions_response(Ok(ScannedSessionDiscovery::SourceMissing {
+            agent: crate::terminal::CLIAgent::Jcode,
+        }));
+
+    let Some(scan_cli_agent_sessions_response::Result::Success(success)) = response.result else {
+        panic!("source-missing remote scan must map to an RPC Success result");
+    };
+    assert!(success.records.is_empty());
+    assert!(success.observed_agents.is_empty());
+    assert_eq!(
+        success.source_missing_agent,
+        Some(crate::terminal::CLIAgent::Jcode.to_serialized_name())
+    );
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn remote_cli_agent_scan_rejects_command_prefix_wire_identities() {
+    let canonical = decode_scan_cli_agent_wire_agents(
+        "enabled_agents",
+        vec![crate::terminal::CLIAgent::Omp.to_serialized_name()],
+    )
+    .expect("serialized CLI agent identity must decode");
+    assert_eq!(canonical, vec![crate::terminal::CLIAgent::Omp]);
+
+    let error = decode_scan_cli_agent_wire_agents("enabled_agents", vec!["omp".to_owned()])
+        .expect_err("command prefixes must never be accepted as RPC identities");
+    assert!(error.contains("not a serialized CLI agent identity"));
 }
 
 #[cfg(feature = "local_fs")]

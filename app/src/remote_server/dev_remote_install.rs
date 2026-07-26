@@ -716,6 +716,27 @@ async fn rsync_upload_for_target(
     Err(anyhow!("rsync upload failed: {stderr}"))
 }
 
+/// `ssh_upload_file_for_target` 为安全起见把目标路径作为字面量传给远端 shell，
+/// 因此不能把未展开的 `~/…` 交给它。所有 SSH stdin 上传统一先解析为远端绝对
+/// 路径；rsync 上传也复用同一个解析规则。
+async fn ssh_stdin_upload_for_target(
+    socket_path: &Path,
+    ssh_target: &str,
+    local_path: &Path,
+    remote_path: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let remote_transfer_path = remote_transfer_path(socket_path, ssh_target, remote_path).await?;
+    remote_server::ssh::ssh_upload_file_for_target(
+        socket_path,
+        ssh_target,
+        local_path,
+        &remote_transfer_path,
+        timeout,
+    )
+    .await
+}
+
 async fn chmod_remote_binary(
     socket_path: &Path,
     ssh_target: &str,
@@ -807,7 +828,7 @@ async fn upload_dev_remote_build_stamp(
 ) -> Result<()> {
     let remote_stamp = dev_remote_installed_stamp_path(remote_binary);
     let remote_temp_stamp = remote_upload_temp_path(&remote_stamp);
-    remote_server::ssh::ssh_upload_file_for_target(
+    ssh_stdin_upload_for_target(
         socket_path,
         ssh_target,
         local_stamp_path,
@@ -1369,7 +1390,7 @@ pub(crate) async fn release_install_local_binary(
     } else {
         // 不能直接覆盖最终 binary（运行中或并发上传会 ETXTBSY）：先通过
         // ControlMaster 的 SSH stdin channel 写唯一临时文件，再 chmod + mv -f 原子替换。
-        remote_server::ssh::ssh_upload_file_for_target(
+        ssh_stdin_upload_for_target(
             socket_path,
             ssh_target,
             &local_binary,
@@ -1486,7 +1507,7 @@ pub(crate) async fn dev_install_local_binary(socket_path: &Path, ssh_target: &st
         // 不能直接覆盖最终 binary：若旧 remote-server 正在执行，或多个 reconnect
         // 并发安装同时写同一路径，Linux 会返回 ETXTBSY/Text file busy。
         // 先经 SSH stdin 上传唯一临时文件，再 chmod + mv -f 原子替换。
-        remote_server::ssh::ssh_upload_file_for_target(
+        ssh_stdin_upload_for_target(
             socket_path,
             ssh_target,
             &local_binary,
@@ -1623,8 +1644,8 @@ mod tests {
     #[test]
     fn dev_remote_installed_stamp_path_sits_next_to_remote_binary() {
         assert_eq!(
-            dev_remote_installed_stamp_path("~/.ashide-dev/remote-server/ashide-dev-pty-v5"),
-            "~/.ashide-dev/remote-server/ashide-dev-pty-v5.stamp"
+            dev_remote_installed_stamp_path("~/.ashide-dev/remote-server/ashide-dev-pty-v6"),
+            "~/.ashide-dev/remote-server/ashide-dev-pty-v6.stamp"
         );
     }
 
@@ -1767,6 +1788,7 @@ mod tests {
             .0;
         let ssh_transport = include_str!("../../../crates/remote_server/src/ssh.rs");
 
+        assert!(installer.contains("async fn ssh_stdin_upload_for_target"));
         assert!(installer.contains("ssh_upload_file_for_target("));
         assert!(!installer.contains(&["scp", "upload", "for", "target("].join("_")));
         assert!(ssh_transport.contains("pub async fn ssh_upload_file_for_target("));
@@ -1789,7 +1811,7 @@ mod tests {
                 .map(|(body, _)| body)
                 .expect("installer function body must exist");
             let fallback = body
-                .split_once("ssh_upload_file_for_target(")
+                .split_once("ssh_stdin_upload_for_target(")
                 .map(|(_, after_upload)| after_upload)
                 .expect("SSH stdin upload fallback must exist");
             let upload_completion = fallback
@@ -1804,6 +1826,27 @@ mod tests {
                 "{function} must promote only after SSH stdin upload succeeds"
             );
         }
+    }
+
+    #[test]
+    fn ssh_stdin_upload_resolves_tilde_before_passing_the_literal_path_to_ssh() {
+        let installer = include_str!("dev_remote_install.rs")
+            .split_once("#[cfg(test)]")
+            .expect("installer test boundary must exist")
+            .0;
+        let wrapper = installer
+            .split_once("async fn ssh_stdin_upload_for_target")
+            .and_then(|(_, after_signature)| {
+                after_signature.split_once("async fn chmod_remote_binary")
+            })
+            .map(|(body, _)| body)
+            .expect("SSH stdin upload wrapper must exist");
+
+        assert!(
+            wrapper.contains("remote_transfer_path(socket_path, ssh_target, remote_path).await?")
+        );
+        assert!(wrapper.contains("remote_server::ssh::ssh_upload_file_for_target("));
+        assert!(wrapper.contains("&remote_transfer_path"));
     }
 
     #[test]

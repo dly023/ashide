@@ -1702,6 +1702,18 @@ impl TerminalModel {
     pub fn set_environment_runtime_transport_session_id(&mut self, session_id: SessionId) {
         self.environment_runtime_transport_session_id = Some(session_id);
     }
+    /// Whether this terminal is backed by a native Environment Runtime transport.
+    ///
+    /// This is a *stable* property fixed at construction (native runtime PTYs set
+    /// `force_environment_runtime_session_type` and the transport session id),
+    /// unlike [`active_block_uses_environment_runtime`], which reflects whichever
+    /// session the current active block happens to belong to and flips when an
+    /// agent runs inside a subshell. Use this for liveness/ownership decisions
+    /// that must not depend on the active block.
+    pub fn is_environment_runtime_transport(&self) -> bool {
+        self.force_environment_runtime_session_type
+            || self.environment_runtime_transport_session_id.is_some()
+    }
 
     pub fn active_block_uses_environment_runtime(&self) -> bool {
         if let Some(session_id) = self.active_block_metadata().session_id() {

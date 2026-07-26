@@ -179,7 +179,7 @@ fn find_codex_session_path_by_id(
     roots: &CliAgentStoreRoots,
 ) -> Result<Option<PathBuf>, SessionBridgeError> {
     let root = roots.codex_sessions();
-    let files = recent_jsonl_files(&root, usize::MAX).map_err(|error| {
+    let files = recent_jsonl_files(&root, usize::MAX, None).map_err(|error| {
         SessionBridgeError::InvalidImport {
             message: error.to_string(),
         }
