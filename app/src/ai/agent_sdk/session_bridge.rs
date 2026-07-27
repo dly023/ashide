@@ -243,7 +243,7 @@ fn open_read_only_connection() -> anyhow::Result<diesel::SqliteConnection> {
     let db_url = db_path.to_str().ok_or_else(|| {
         anyhow::anyhow!("database path is not valid UTF-8: {}", db_path.display())
     })?;
-    crate::persistence::establish_ro_connection(db_url).map_err(Into::into)
+    crate::persistence::establish_ro_connection(db_url)
 }
 
 fn print_export_preview(

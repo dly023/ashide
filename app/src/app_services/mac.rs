@@ -125,6 +125,7 @@ fn try_become_gui_owner() -> Result<bool, StartupArgsForwardingError> {
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(&lock_path)
         .map_err(|source| StartupArgsForwardingError::OpenOwnerLock {
             path: lock_path.clone(),
@@ -381,6 +382,18 @@ impl Entity for MacSingleInstanceHost {
 
 impl SingletonEntity for MacSingleInstanceHost {}
 
+/// Returns an NSString containing the custom URL scheme that this build of the
+/// application will respond to.
+///
+/// Called synchronously from the NSServices dispatch path in
+/// `services.m::forFilesFromPasteboard:performAction:`, which wraps the body in
+/// an `@autoreleasepool` block. That ambient pool owns the returned NSString.
+#[allow(deprecated)]
+#[no_mangle]
+extern "C-unwind" fn warp_services_provider_custom_url_scheme() -> id {
+    make_nsstring(ChannelState::url_scheme())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,16 +607,4 @@ mod tests {
             } if size == STARTUP_IPC_MAX_PAYLOAD_BYTES + 1
         ));
     }
-}
-
-/// Returns an NSString containing the custom URL scheme that this build of the
-/// application will respond to.
-///
-/// Called synchronously from the NSServices dispatch path in
-/// `services.m::forFilesFromPasteboard:performAction:`, which wraps the body in
-/// an `@autoreleasepool` block. That ambient pool owns the returned NSString.
-#[allow(deprecated)]
-#[no_mangle]
-extern "C-unwind" fn warp_services_provider_custom_url_scheme() -> id {
-    make_nsstring(ChannelState::url_scheme())
 }

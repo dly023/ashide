@@ -2978,7 +2978,7 @@ fn identity_from_fd(fd: &impl std::os::fd::AsRawFd) -> io::Result<DeleteDirector
     let stat = unsafe { stat.assume_init() };
     Ok(DeleteDirectoryIdentity {
         device: stat.st_dev as u64,
-        inode: stat.st_ino as u64,
+        inode: stat.st_ino,
     })
 }
 
@@ -3277,8 +3277,8 @@ fn finish_transfer(
                 }))?;
             }
             ensure_identity(
-                &identity_from_fd(&open_transfer_directory_fd(&parent_path, false)?)?,
-                &parent_identity,
+                &identity_from_fd(&open_transfer_directory_fd(parent_path, false)?)?,
+                parent_identity,
             )?;
             ensure_replaceable_transfer_destination(parent, final_name)?;
             if unsafe {
@@ -3677,7 +3677,7 @@ fn collect_complete_directory_listing(
         let target_kind = complete_listing_target_kind(&file_type, &path)?;
         let is_dir = kind == FileSystemEntryKind::Directory as i32
             || target_kind == FileSystemEntryKind::Directory as i32;
-        let size_bytes = (!metadata.is_dir()).then(|| metadata.len());
+        let size_bytes = (!metadata.is_dir()).then_some(metadata.len());
         let modified_epoch_millis = Some(system_time_to_epoch_millis(metadata.modified()?)?);
         let platform_hidden = repo_metadata::platform_hidden(&metadata);
         let ignored = repo_metadata::matches_gitignores(&path, is_dir, &gitignores, true);

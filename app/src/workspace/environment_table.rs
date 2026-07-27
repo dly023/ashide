@@ -27,7 +27,6 @@ use crate::pane_group::PaneId;
 use crate::terminal::CLIAgent;
 use crate::workspace::environment_backend::{
     AgentTabEntry, EnvironmentEntryIntent, ForkEntry, PlainTerminalEntry, SessionRestoreEntry,
-    SessionRestoreFinalizeOutcome, SessionRestoreFinalizeTransition,
 };
 use crate::workspace::environment_runtime::{
     EnvironmentCliAgentSessionUserState, EnvironmentRuntimeSpawnPlan, EnvironmentRuntimeStatus,
@@ -44,18 +43,37 @@ pub(crate) struct PendingMaterialization {
     pub(crate) intent: EnvironmentEntryIntent,
     generation: u64,
 }
-
-#[derive(Clone)]
-pub(crate) enum SessionRestoreFinalizeResult {
-    Applied(PendingMaterialization),
-    Stale,
-    ModelBroken { reason: &'static str },
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MaterializationTransition {
+    pub(crate) authority: String,
+    pub(crate) pane_id: PaneId,
+    pub(crate) generation: u64,
 }
 
-impl SessionRestoreFinalizeResult {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MaterializationOutcome {
+    Success,
+    RetryableFailure { retryable_pane_id: PaneId },
+    Cancelled,
+    CarrierMissing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MaterializationError {
+    CarrierMissing,
+}
+
+#[derive(Clone)]
+pub(crate) enum MaterializationCompletion {
+    Applied(PendingMaterialization),
+    Stale,
+    Failed(MaterializationError),
+}
+
+impl MaterializationCompletion {
     #[cfg(test)]
-    fn is_model_broken(&self) -> bool {
-        matches!(self, Self::ModelBroken { .. })
+    fn is_carrier_missing(&self) -> bool {
+        matches!(self, Self::Failed(MaterializationError::CarrierMissing))
     }
 }
 
@@ -868,7 +886,7 @@ impl EnvironmentTable {
         authority: &str,
         queued_pane_id: PaneId,
         terminal_pane_id: PaneId,
-    ) -> Option<SessionRestoreFinalizeTransition> {
+    ) -> Option<MaterializationTransition> {
         let Some(entry) = self.entries.get_mut(authority) else {
             return None;
         };
@@ -890,50 +908,50 @@ impl EnvironmentTable {
         pending.stage = PendingMaterializationStage::Materializing {
             pane_id: terminal_pane_id,
         };
-        Some(SessionRestoreFinalizeTransition {
+        Some(MaterializationTransition {
             authority: authority.to_owned(),
             pane_id: terminal_pane_id,
             generation: pending.generation,
         })
     }
 
-    pub(crate) fn finalize_transition_for_pane(
+    pub(crate) fn completion_transition_for_pane(
         &self,
         authority: &str,
         pane_id: PaneId,
-    ) -> Option<SessionRestoreFinalizeTransition> {
+    ) -> Option<MaterializationTransition> {
         let pending = self.pending_materialization_for_pane(authority, pane_id)?;
-        Some(SessionRestoreFinalizeTransition {
+        Some(MaterializationTransition {
             authority: authority.to_owned(),
             pane_id,
             generation: pending.generation,
         })
     }
 
-    pub(crate) fn finalize_session_restore(
+    pub(crate) fn complete_materialization(
         &mut self,
-        transition: SessionRestoreFinalizeTransition,
-        outcome: SessionRestoreFinalizeOutcome,
-    ) -> SessionRestoreFinalizeResult {
+        transition: MaterializationTransition,
+        outcome: MaterializationOutcome,
+    ) -> MaterializationCompletion {
         let Some(entry) = self.entries.get_mut(&transition.authority) else {
-            return SessionRestoreFinalizeResult::Stale;
+            return MaterializationCompletion::Stale;
         };
         let Some(index) = entry.pending_materializations.iter().position(|pending| {
             pending.pane_id() == transition.pane_id && pending.generation == transition.generation
         }) else {
-            return SessionRestoreFinalizeResult::Stale;
+            return MaterializationCompletion::Stale;
         };
 
         match outcome {
-            SessionRestoreFinalizeOutcome::Success | SessionRestoreFinalizeOutcome::Cancelled => {
-                SessionRestoreFinalizeResult::Applied(
+            MaterializationOutcome::Success | MaterializationOutcome::Cancelled => {
+                MaterializationCompletion::Applied(
                     entry
                         .pending_materializations
                         .remove(index)
-                        .expect("exact restore finalize target must remain present"),
+                        .expect("exact materialization completion target must remain present"),
                 )
             }
-            SessionRestoreFinalizeOutcome::RetryableFailure { retryable_pane_id } => {
+            MaterializationOutcome::RetryableFailure { retryable_pane_id } => {
                 assert!(
                     entry.pending_materializations.iter().enumerate().all(
                         |(other_index, pending)| {
@@ -946,19 +964,14 @@ impl EnvironmentTable {
                 let pending = entry
                     .pending_materializations
                     .get_mut(index)
-                    .expect("exact retryable restore target must remain present");
+                    .expect("exact retryable materialization target must remain present");
                 pending.stage = PendingMaterializationStage::Queued {
                     pane_id: retryable_pane_id,
                 };
-                SessionRestoreFinalizeResult::Applied(pending.clone())
+                MaterializationCompletion::Applied(pending.clone())
             }
-            SessionRestoreFinalizeOutcome::ModelBroken { reason } => {
-                SessionRestoreFinalizeResult::ModelBroken { reason }
-            }
-            SessionRestoreFinalizeOutcome::CarrierMissing => {
-                SessionRestoreFinalizeResult::ModelBroken {
-                    reason: "canonical restore carrier missing",
-                }
+            MaterializationOutcome::CarrierMissing => {
+                MaterializationCompletion::Failed(MaterializationError::CarrierMissing)
             }
         }
     }
@@ -1615,7 +1628,7 @@ mod tests {
     }
 
     #[test]
-    fn session_restore_finalize_success_consumes_only_exact_generation() {
+    fn materialization_completion_success_consumes_only_exact_generation() {
         let authority = "ssh:example";
         let mut table = EnvironmentTable::default();
         let first_placeholder: PaneId = TerminalPaneId::dummy_terminal_pane_id().into();
@@ -1631,35 +1644,35 @@ mod tests {
 
         let first = table
             .begin_materialization(authority, first_placeholder, first_terminal)
-            .expect("first restore must enter Delivering");
+            .expect("first entry must enter Delivering");
         let second = table
             .begin_materialization(authority, second_placeholder, second_terminal)
-            .expect("second restore must enter Delivering");
-        let stale = SessionRestoreFinalizeTransition {
+            .expect("second entry must enter Delivering");
+        let stale = MaterializationTransition {
             generation: first.generation.saturating_sub(1),
             ..first.clone()
         };
 
         assert!(matches!(
-            table.finalize_session_restore(stale, SessionRestoreFinalizeOutcome::Success),
-            SessionRestoreFinalizeResult::Stale
+            table.complete_materialization(stale, MaterializationOutcome::Success),
+            MaterializationCompletion::Stale
         ));
         assert!(matches!(
-            table.finalize_session_restore(first, SessionRestoreFinalizeOutcome::Success),
-            SessionRestoreFinalizeResult::Applied(_)
+            table.complete_materialization(first, MaterializationOutcome::Success),
+            MaterializationCompletion::Applied(_)
         ));
         assert!(table
             .pending_materialization_for_pane(authority, second_terminal)
             .is_some());
         assert!(matches!(
-            table.finalize_session_restore(second, SessionRestoreFinalizeOutcome::Success),
-            SessionRestoreFinalizeResult::Applied(_)
+            table.complete_materialization(second, MaterializationOutcome::Success),
+            MaterializationCompletion::Applied(_)
         ));
         assert!(!table.has_pending_entry(authority));
     }
 
     #[test]
-    fn session_restore_finalize_retry_cancel_and_model_broken_are_distinct() {
+    fn materialization_completion_retry_cancel_and_carrier_missing_are_distinct() {
         let authority = "ssh:example";
         let mut table = EnvironmentTable::default();
         let retry_placeholder: PaneId = TerminalPaneId::dummy_terminal_pane_id().into();
@@ -1674,19 +1687,19 @@ mod tests {
         table.queue_startup_command(authority, "pwd".to_owned(), cancelled_placeholder);
         let retry = table
             .begin_materialization(authority, retry_placeholder, retry_terminal)
-            .expect("retry restore must enter Delivering");
+            .expect("retry entry must enter Delivering");
         let cancelled = table
-            .finalize_transition_for_pane(authority, cancelled_placeholder)
+            .completion_transition_for_pane(authority, cancelled_placeholder)
             .expect("cancelled carrier must remain canonically owned");
 
         assert!(matches!(
-            table.finalize_session_restore(
-                retry.clone(),
-                SessionRestoreFinalizeOutcome::RetryableFailure {
+            table.complete_materialization(
+                retry,
+                MaterializationOutcome::RetryableFailure {
                     retryable_pane_id: replacement_placeholder,
                 },
             ),
-            SessionRestoreFinalizeResult::Applied(_)
+            MaterializationCompletion::Applied(_)
         ));
         let pending = table
             .pending_materialization_for_pane(authority, replacement_placeholder)
@@ -1697,37 +1710,19 @@ mod tests {
         ));
 
         assert!(matches!(
-            table.finalize_session_restore(cancelled, SessionRestoreFinalizeOutcome::Cancelled,),
-            SessionRestoreFinalizeResult::Applied(_)
+            table.complete_materialization(cancelled, MaterializationOutcome::Cancelled),
+            MaterializationCompletion::Applied(_)
         ));
         assert!(table
             .pending_materialization_for_pane(authority, replacement_placeholder)
             .is_some());
 
         let carrier_missing = table
-            .finalize_transition_for_pane(authority, replacement_placeholder)
+            .completion_transition_for_pane(authority, replacement_placeholder)
             .expect("retryable carrier must remain canonically owned");
         assert!(table
-            .finalize_session_restore(
-                carrier_missing,
-                SessionRestoreFinalizeOutcome::CarrierMissing,
-            )
-            .is_model_broken());
-        assert!(table
-            .pending_materialization_for_pane(authority, replacement_placeholder)
-            .is_some());
-
-        let model_broken = table
-            .finalize_transition_for_pane(authority, replacement_placeholder)
-            .expect("retryable carrier must remain canonically owned");
-        assert!(table
-            .finalize_session_restore(
-                model_broken,
-                SessionRestoreFinalizeOutcome::ModelBroken {
-                    reason: "authority mismatch",
-                },
-            )
-            .is_model_broken());
+            .complete_materialization(carrier_missing, MaterializationOutcome::CarrierMissing)
+            .is_carrier_missing());
         assert!(table
             .pending_materialization_for_pane(authority, replacement_placeholder)
             .is_some());

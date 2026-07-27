@@ -39,7 +39,7 @@ fn restored_session_cli_agent(session: &WorkspaceSessionSnapshot) -> Option<CLIA
 fn short_identity_from_raw(raw: &str) -> Option<String> {
     let token = raw
         .trim()
-        .rsplit(|ch| matches!(ch, '/' | '\\' | ':' | '#'))
+        .rsplit(['/', '\\', ':', '#'])
         .find(|part| !part.trim().is_empty())?
         .trim()
         .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_');

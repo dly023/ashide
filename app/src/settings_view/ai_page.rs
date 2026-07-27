@@ -16,14 +16,8 @@ use crate::ai::paths::host_native_absolute_path;
 use crate::editor::{EditorOptions, InteractionState, SingleLineEditorOptions, TextColors};
 use crate::settings::InputSettings;
 use crate::settings::{
-    AIAutoDetectionEnabled, AICommandDenylist, AISettingsChangedEvent,
-    AgentModeCodingPermissionsType, AgentModeCommandExecutionDenylist,
-    AgentModeCommandExecutionPredicate, AgentModeQuerySuggestionsEnabled, AwsBedrockAutoLogin,
-    AwsBedrockCredentialsEnabled, FileBasedMcpEnabled, GitOperationsAutogenEnabled,
-    IncludeAgentCommandsInHistory, IntelligentAutosuggestionsEnabled, MemoryEnabled,
-    NLDInTerminalEnabled, NaturalLanguageAutosuggestionsEnabled, RuleSuggestionsEnabled,
-    ShouldRenderCLIAgentToolbar, ShouldRenderUseAgentToolbarForUserCommands, ShowAgentTips,
-    ShowAgentZeroStateHints, ShowHintText, ThinkingDisplayMode, VoiceInputEnabled,
+    AISettingsChangedEvent, AgentModeCodingPermissionsType, AgentModeCommandExecutionPredicate,
+    ThinkingDisplayMode,
 };
 use crate::terminal::session_settings::{SessionSettings, SessionSettingsChangedEvent};
 use crate::terminal::CLIAgent;
@@ -3585,7 +3579,7 @@ impl From<ViewHandle<AISettingsPageView>> for SettingsPageViewHandle {
     }
 }
 
-fn render_ai_setting_toggle<S: Setting>(
+fn render_ai_setting_toggle(
     label: impl Into<String>,
     action: AISettingsPageAction,
     is_setting_enabled: bool,
@@ -3616,7 +3610,7 @@ fn render_ai_setting_toggle<S: Setting>(
     )
 }
 
-fn render_ai_setting_label<S: Setting>(
+fn render_ai_setting_label(
     label: impl Into<String>,
     is_setting_toggleable: bool,
     _tooltip_states: &RefCell<HashMap<String, MouseStateHandle>>,
@@ -3733,7 +3727,7 @@ fn render_ai_list(
     ai_settings: &AISettings,
     app: &AppContext,
 ) -> Box<dyn Element> {
-    let setting_header = render_ai_setting_label::<AgentModeCommandExecutionDenylist>(
+    let setting_header = render_ai_setting_label(
         header.to_string(),
         ai_settings.is_any_ai_enabled(app),
         &view.local_only_icon_tooltip_states,
@@ -4057,17 +4051,15 @@ impl ActiveAIWidget {
         let is_toggleable = ai_settings.is_active_ai_enabled(app);
 
         Flex::column()
-            .with_child(
-                render_ai_setting_toggle::<IntelligentAutosuggestionsEnabled>(
-                    crate::t!("settings-ai-next-command-label"),
-                    AISettingsPageAction::ToggleIntelligentAutosuggestions,
-                    *ai_settings.intelligent_autosuggestions_enabled_internal,
-                    is_toggleable,
-                    self.intelligent_autosuggestions_toggle.clone(),
-                    &view.local_only_icon_tooltip_states,
-                    app,
-                ),
-            )
+            .with_child(render_ai_setting_toggle(
+                crate::t!("settings-ai-next-command-label"),
+                AISettingsPageAction::ToggleIntelligentAutosuggestions,
+                *ai_settings.intelligent_autosuggestions_enabled_internal,
+                is_toggleable,
+                self.intelligent_autosuggestions_toggle.clone(),
+                &view.local_only_icon_tooltip_states,
+                app,
+            ))
             .with_child(render_ai_setting_description(
                 crate::t!("settings-ai-next-command-description"),
                 is_toggleable,
@@ -4084,17 +4076,15 @@ impl ActiveAIWidget {
         let ai_settings = AISettings::as_ref(app);
         let is_toggleable = ai_settings.is_active_ai_enabled(app);
         Flex::column()
-            .with_child(
-                render_ai_setting_toggle::<AgentModeQuerySuggestionsEnabled>(
-                    crate::t!("settings-ai-prompt-suggestions-label"),
-                    AISettingsPageAction::TogglePromptSuggestions,
-                    *ai_settings.prompt_suggestions_enabled_internal,
-                    is_toggleable,
-                    self.prompt_suggestions_toggle.clone(),
-                    &view.local_only_icon_tooltip_states,
-                    app,
-                ),
-            )
+            .with_child(render_ai_setting_toggle(
+                crate::t!("settings-ai-prompt-suggestions-label"),
+                AISettingsPageAction::TogglePromptSuggestions,
+                *ai_settings.prompt_suggestions_enabled_internal,
+                is_toggleable,
+                self.prompt_suggestions_toggle.clone(),
+                &view.local_only_icon_tooltip_states,
+                app,
+            ))
             .with_child(render_ai_setting_description(
                 crate::t!("settings-ai-prompt-suggestions-description"),
                 is_toggleable,
@@ -4111,17 +4101,15 @@ impl ActiveAIWidget {
         let ai_settings = AISettings::as_ref(app);
         let is_toggleable = ai_settings.is_active_ai_enabled(app);
         Flex::column()
-            .with_child(
-                render_ai_setting_toggle::<AgentModeQuerySuggestionsEnabled>(
-                    crate::t!("settings-ai-suggested-code-banners-label"),
-                    AISettingsPageAction::ToggleCodeSuggestions,
-                    *ai_settings.code_suggestions_enabled_internal,
-                    is_toggleable,
-                    self.code_suggestions_toggle.clone(),
-                    &view.local_only_icon_tooltip_states,
-                    app,
-                ),
-            )
+            .with_child(render_ai_setting_toggle(
+                crate::t!("settings-ai-suggested-code-banners-label"),
+                AISettingsPageAction::ToggleCodeSuggestions,
+                *ai_settings.code_suggestions_enabled_internal,
+                is_toggleable,
+                self.code_suggestions_toggle.clone(),
+                &view.local_only_icon_tooltip_states,
+                app,
+            ))
             .with_child(render_ai_setting_description(
                 crate::t!("settings-ai-suggested-code-banners-description"),
                 is_toggleable,
@@ -4138,9 +4126,7 @@ impl ActiveAIWidget {
         let ai_settings = AISettings::as_ref(app);
         let is_toggleable = ai_settings.is_active_ai_enabled(app);
         Flex::column()
-            .with_child(render_ai_setting_toggle::<
-                NaturalLanguageAutosuggestionsEnabled,
-            >(
+            .with_child(render_ai_setting_toggle(
                 crate::t!("settings-ai-natural-language-autosuggestions-label"),
                 AISettingsPageAction::ToggleNaturalLanguageAutosuggestions,
                 *ai_settings.natural_language_autosuggestions_enabled_internal,
@@ -4165,7 +4151,7 @@ impl ActiveAIWidget {
         let ai_settings = AISettings::as_ref(app);
         let is_toggleable = ai_settings.is_active_ai_enabled(app);
         Flex::column()
-            .with_child(render_ai_setting_toggle::<GitOperationsAutogenEnabled>(
+            .with_child(render_ai_setting_toggle(
                 crate::t!("settings-ai-git-operations-autogen-label"),
                 AISettingsPageAction::ToggleGitOperationsAutogen,
                 *ai_settings.git_operations_autogen_enabled_internal,
@@ -5184,7 +5170,7 @@ impl SettingsWidget for AIInputWidget {
             app,
         );
 
-        let show_input_hint_text = render_ai_setting_toggle::<ShowHintText>(
+        let show_input_hint_text = render_ai_setting_toggle(
             crate::t!("settings-ai-show-input-hint-text"),
             AISettingsPageAction::ToggleShowInputHintText,
             *InputSettings::as_ref(app).show_hint_text,
@@ -5202,7 +5188,7 @@ impl SettingsWidget for AIInputWidget {
         ];
 
         if FeatureFlag::AgentTips.is_enabled() {
-            let agent_tips_toggle = render_ai_setting_toggle::<ShowAgentTips>(
+            let agent_tips_toggle = render_ai_setting_toggle(
                 crate::t!("settings-ai-show-agent-tips"),
                 AISettingsPageAction::ToggleShowAgentTips,
                 *InputSettings::as_ref(app).show_agent_tips,
@@ -5215,7 +5201,7 @@ impl SettingsWidget for AIInputWidget {
         }
 
         // 「显示 Agent 快捷键提示」：控制零状态三件套与 message bar 底部 4 项 hint。
-        widget_children.push(render_ai_setting_toggle::<ShowAgentZeroStateHints>(
+        widget_children.push(render_ai_setting_toggle(
             crate::t!("settings-ai-show-agent-zero-state-hints"),
             AISettingsPageAction::ToggleShowAgentZeroStateHints,
             *InputSettings::as_ref(app).show_agent_zero_state_hints,
@@ -5225,7 +5211,7 @@ impl SettingsWidget for AIInputWidget {
             app,
         ));
 
-        widget_children.push(render_ai_setting_toggle::<IncludeAgentCommandsInHistory>(
+        widget_children.push(render_ai_setting_toggle(
             crate::t!("settings-ai-include-agent-commands-in-history"),
             AISettingsPageAction::ToggleIncludeAgentCommandsInHistory,
             *ai_settings.include_agent_commands_in_history,
@@ -5283,7 +5269,7 @@ impl AIInputWidget {
                 });
 
             section.add_children([
-                render_ai_setting_toggle::<NLDInTerminalEnabled>(
+                render_ai_setting_toggle(
                     crate::t!("settings-ai-autodetect-agent-prompts"),
                     AISettingsPageAction::ToggleNLDInTerminal,
                     ai_settings.is_nld_in_terminal_enabled(app),
@@ -5292,7 +5278,7 @@ impl AIInputWidget {
                     &view.local_only_icon_tooltip_states,
                     app,
                 ),
-                render_ai_setting_toggle::<AIAutoDetectionEnabled>(
+                render_ai_setting_toggle(
                     crate::t!("settings-ai-autodetect-terminal-commands"),
                     AISettingsPageAction::ToggleAIInputAutoDetection,
                     is_nld_enabled,
@@ -5342,7 +5328,7 @@ impl AIInputWidget {
             });
 
             section.add_children([
-                render_ai_setting_toggle::<AIAutoDetectionEnabled>(
+                render_ai_setting_toggle(
                     crate::t!("settings-ai-natural-language-detection"),
                     AISettingsPageAction::ToggleAIInputAutoDetection,
                     is_nld_enabled,
@@ -5376,7 +5362,7 @@ impl AIInputWidget {
         }
 
         section
-            .with_child(render_ai_setting_label::<AICommandDenylist>(
+            .with_child(render_ai_setting_label(
                 crate::t!("settings-ai-natural-language-denylist"),
                 is_toggleable,
                 &view.local_only_icon_tooltip_states,
@@ -5469,15 +5455,13 @@ impl SettingsWidget for MCPServersWidget {
         let file_based_mcp_toggle = if FeatureFlag::FileBasedMcp.is_enabled() {
             Some(
                 Flex::column()
-                    .with_child(render_ai_setting_toggle::<FileBasedMcpEnabled>(
-                        crate::t!("settings-ai-file-based-mcp-toggle"),
-                        AISettingsPageAction::ToggleFileBasedMcp,
-                        *ai_settings.file_based_mcp_enabled,
-                        is_any_ai_enabled,
-                        self.file_based_mcp_toggle.clone(),
-                        &view.local_only_icon_tooltip_states,
-                        app,
-                    ))
+                    .with_child(render_ai_setting_toggle(crate::t!("settings-ai-file-based-mcp-toggle"),
+                    AISettingsPageAction::ToggleFileBasedMcp,
+                    *ai_settings.file_based_mcp_enabled,
+                    is_any_ai_enabled,
+                    self.file_based_mcp_toggle.clone(),
+                    &view.local_only_icon_tooltip_states,
+                    app,))
                     .with_child({
                         static FILE_BASED_MCP_DESCRIPTION_FRAGMENTS: LazyLock<
                             Vec<FormattedTextFragment>,
@@ -5556,7 +5540,7 @@ impl AIFactWidget {
         appearance: &Appearance,
         app: &warpui::AppContext,
     ) -> Box<dyn Element> {
-        let toggle = render_ai_setting_toggle::<MemoryEnabled>(
+        let toggle = render_ai_setting_toggle(
             crate::t!("settings-ai-rules-label"),
             AISettingsPageAction::ToggleRules,
             *ai_settings.memory_enabled,
@@ -5605,7 +5589,7 @@ impl AIFactWidget {
         ai_settings: &AISettings,
         app: &warpui::AppContext,
     ) -> Box<dyn Element> {
-        let toggle = render_ai_setting_toggle::<RuleSuggestionsEnabled>(
+        let toggle = render_ai_setting_toggle(
             crate::t!("settings-ai-suggested-rules-label"),
             AISettingsPageAction::ToggleRuleSuggestions,
             *ai_settings.rule_suggestions_enabled_internal,
@@ -5694,7 +5678,7 @@ impl VoiceWidget {
     ) -> Box<dyn warpui::Element> {
         let ai_settings = AISettings::as_ref(app);
         let is_toggleable = ai_settings.is_any_ai_enabled(app);
-        let mut column = Flex::column().with_child(render_ai_setting_toggle::<VoiceInputEnabled>(
+        let mut column = Flex::column().with_child(render_ai_setting_toggle(
             crate::t!("settings-ai-voice-input-label"),
             AISettingsPageAction::ToggleVoiceInput,
             *ai_settings.voice_input_enabled_internal,
@@ -5845,9 +5829,7 @@ impl SettingsWidget for OtherAIWidget {
 
         if FeatureFlag::AgentView.is_enabled() {
             let mut agent_view_column = Flex::column()
-                .with_child(render_ai_setting_toggle::<
-                    ShouldRenderUseAgentToolbarForUserCommands,
-                >(
+                .with_child(render_ai_setting_toggle(
                     crate::t!("settings-ai-show-use-agent-footer"),
                     AISettingsPageAction::ToggleUseAgentToolbar,
                     *ai_settings.should_render_use_agent_footer_for_user_commands,
@@ -5945,7 +5927,7 @@ impl SettingsWidget for CLIAgentWidget {
         // The Coding Agents section is always enabled, independent of the
         // global AI toggle, because these settings control third-party coding
         // agents (Claude Code, Codex) rather than Ashide's own AI.
-        let cli_agent_footer_toggle = render_ai_setting_toggle::<ShouldRenderCLIAgentToolbar>(
+        let cli_agent_footer_toggle = render_ai_setting_toggle(
             crate::t!("settings-ai-show-coding-agent-toolbar"),
             AISettingsPageAction::ToggleCLIAgentToolbar,
             *ai_settings.should_render_cli_agent_footer,
@@ -6046,9 +6028,6 @@ impl SettingsWidget for CLIAgentWidget {
 
         if is_footer_enabled {
             use super::settings_page::AdditionalInfo;
-            use crate::settings::{
-                AutoDismissRichInputAfterSubmit, AutoOpenRichInputOnCLIAgentStart,
-            };
 
             if FeatureFlag::CLIAgentRichInput.is_enabled() {
                 // Setting 1: Auto show/hide rich input based on agent status
@@ -6080,20 +6059,18 @@ impl SettingsWidget for CLIAgentWidget {
                     None,
                 ));
 
-                column.add_child(
-                    render_ai_setting_toggle::<AutoOpenRichInputOnCLIAgentStart>(
-                        crate::t!("settings-ai-auto-open-rich-input"),
-                        AISettingsPageAction::ToggleAutoOpenRichInputOnCLIAgentStart,
-                        *ai_settings.auto_open_rich_input_on_cli_agent_start,
-                        true,
-                        self.auto_open_rich_input_on_cli_agent_start_toggle.clone(),
-                        &view.local_only_icon_tooltip_states,
-                        app,
-                    ),
-                );
+                column.add_child(render_ai_setting_toggle(
+                    crate::t!("settings-ai-auto-open-rich-input"),
+                    AISettingsPageAction::ToggleAutoOpenRichInputOnCLIAgentStart,
+                    *ai_settings.auto_open_rich_input_on_cli_agent_start,
+                    true,
+                    self.auto_open_rich_input_on_cli_agent_start_toggle.clone(),
+                    &view.local_only_icon_tooltip_states,
+                    app,
+                ));
 
                 // Setting 2: Auto dismiss rich input after prompt submission
-                column.add_child(render_ai_setting_toggle::<AutoDismissRichInputAfterSubmit>(
+                column.add_child(render_ai_setting_toggle(
                     crate::t!("settings-ai-auto-dismiss-rich-input"),
                     AISettingsPageAction::ToggleAutoDismissRichInputAfterSubmit,
                     *ai_settings.auto_dismiss_rich_input_after_submit,
@@ -6454,7 +6431,7 @@ impl AwsBedrockWidget {
 
         let mut column = Flex::column().with_spacing(16.).with_child(
             Flex::column()
-                .with_child(render_ai_setting_toggle::<AwsBedrockCredentialsEnabled>(
+                .with_child(render_ai_setting_toggle(
                     crate::t!("settings-ai-aws-bedrock-toggle"),
                     AISettingsPageAction::ToggleAwsBedrockCredentialsEnabled,
                     are_credentials_enabled,
@@ -6615,7 +6592,7 @@ impl AwsBedrockWidget {
 
         let auto_login_enabled = *AISettings::as_ref(app).aws_bedrock_auto_login.value();
 
-        let toggle = render_ai_setting_toggle::<AwsBedrockAutoLogin>(
+        let toggle = render_ai_setting_toggle(
             crate::t!("settings-ai-aws-auto-login"),
             AISettingsPageAction::ToggleAwsBedrockAutoLogin,
             auto_login_enabled,

@@ -220,7 +220,7 @@ impl CurrentAppCodeEditorView {
             CodeEditorEvent::SelectionEnd => {
                 ctx.notify();
             }
-            CodeEditorEvent::MouseHovered { .. } => {
+            CodeEditorEvent::MouseHovered => {
                 // LSP 下线后,鼠标 hover 不再触发 hover/goto-definition;保留 event 订阅但不做处理。
             }
             CodeEditorEvent::CommentSaved { comment } => {

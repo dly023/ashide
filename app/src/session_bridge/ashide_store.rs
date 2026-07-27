@@ -318,7 +318,7 @@ fn session_ir_to_native_tasks(
             id: format!("session-bridge-message-{target_session_id}-{index}"),
             task_id: task_id.clone(),
             request_id,
-            timestamp: timestamp.clone(),
+            timestamp,
             server_message_data: String::new(),
             citations: vec![],
             message: Some(match message.role.as_str() {

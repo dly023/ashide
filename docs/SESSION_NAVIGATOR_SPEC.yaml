@@ -1,11 +1,12 @@
-# Ashide Session Navigator 语义规范 v34
+# Ashide Session Navigator 语义规范 v35
 #
 # 这是 Session Navigator 排序、合并、置顶、删除、恢复、focus/active/selection
 # 行为的唯一权威定义。代码实现和所有测试必须与此 spec 一致。
 # 当 spec 与代码冲突时,以 spec 为准;修改行为先改 spec 再改代码。
 #
-# v34 变更摘要:
-#   - live CLI Agent 活动态只从 container UUID 绑定的 structured runtime status 投影到图标；历史行和无可信状态的会话保持 quiet
+# v35 变更摘要:
+#   - Resume 点击消费已提交的 render model，禁止在 UI action 热路径重做全量 pane/source snapshot
+#   - 会话图标状态明确区分 restoring、Agent execution、focused live、background live 与 historical
 #
 # v33 变更摘要:
 #   - Agent provider/session binding 唯一归 PaneConfiguration，Navigator/placeholder 禁止后补 metadata
@@ -151,8 +152,8 @@
 # v2 = codex commit 8aef2d2 的隐式语义 (已废弃)
 # v1 = 更早的隐式语义 (已废弃)
 
-spec_version: 19
-last_updated: "2026-07-24"
+spec_version: 20
+last_updated: "2026-07-27"
 
 # ─────────────────────────────────────────────────────────
 # 0. 内聚状态模型 (Cohesive State Model)
@@ -216,16 +217,16 @@ state_model:
     carrier_missing_rule: "Agent-bound live/materializing container 缺 binding 属于模型破坏，立即失败；禁止 fallback 到 tab/leaf locator、terminal UUID、EntityId 或 environment authority。"
     forbidden_parallel_paths: ["Navigator CLIAgentSessionsModel enrichment", "placeholder metadata reconstruction", "render-time provider binding", "command-derived cold binding"]
 
-  typed_restore_finalize:
-    id: "SN-RESTORE-ATOMIC-FINALIZE-ROLLBACK-61"
+  typed_materialization_completion:
+    id: "SN-MATERIALIZATION-ATOMIC-COMPLETION-ROLLBACK-61"
     existing_abstractions: ["EnvironmentBackend::deliver_entry", "PendingMaterialization", "PaneConfiguration", "EnvironmentTable"]
-    lifecycle: "EnvironmentTable 原子持有 canonical pending projection 与单调 generation：Allocated → Delivering(generation) → Live | Retryable | Cancelled；每个非终态必须有 exact container carrier。"
-    success_rule: "current generation success 原子用 live runtime 替换 carrier并保留 container UUID/binding/RowId/order/selection。"
-    failure_rule: "delivery failure 回到同一 Retryable carrier并保留 intent；显式 Cancelled 才移除并清理 restoring/selection；CarrierMissing 是独立 ModelBroken outcome，保留 canonical pending 供诊断且禁止伪装成 cancel、cleanup 或 log-and-return。"
-    stale_rule: "旧 success/failure/cancel completion 不得修改较新 generation 或无关 carriers；生产 caller 收到 Stale 必须 fail closed，禁止静默 return。"
-    cleanup_rule: "Success 消费 exact pending 并提交 live carrier；RetryableFailure 原子换回 placeholder且保留 intent/generation；Cancelled 消费 exact pending并清理 restoring/selection；CarrierMissing 与 ModelBroken 不消费 canonical owner。"
+    ownership_rule: "EnvironmentTable 是 pending collection、monotonic generation、MaterializationTransition、MaterializationOutcome 与 MaterializationCompletion 的唯一 home；该协议覆盖 PlainTerminal/StartupCommand/AgentView/ForkedConversation/SessionRestore，禁止以 SessionRestore 命名通用完成状态。"
+    lifecycle: "EnvironmentTable 原子持有 canonical pending projection：Allocated → Delivering(generation) → Live | Retryable | Cancelled；每个非终态必须有 exact container carrier。"
+    success_rule: "current generation Success 原子消费 exact pending；调用方随后提交 live runtime，并保留 container UUID/binding/RowId/order/selection。"
+    failure_rule: "RetryableFailure 回到同一 retryable carrier并保留 intent；显式 Cancelled 才移除并 cleanup；CarrierMissing 返回 typed MaterializationError::CarrierMissing 并保留 canonical pending，禁止把调用方制造的任意 ModelBroken outcome 注回 owner。"
+    stale_rule: "旧 success/failure/cancel completion 返回 Stale，不得修改较新 generation 或无关 carriers；生产 caller 必须 fail closed。"
     backend_rule: "local 同步与 runtime 异步只允许 completion timing 不同；typed outcome、rollback、carrier semantics 完全一致。"
-    forbidden_parallel_paths: ["bool finalize outcome", "log-and-return failure", "backend-specific rollback", "authority-wide pending drain", "carrierless pending restore"]
+    forbidden_parallel_paths: ["SessionRestoreFinalize types", "caller-authored ModelBroken outcome", "bool finalize outcome", "log-and-return failure", "backend-specific rollback", "authority-wide pending drain", "carrierless pending state"]
 
   pane_snapshot_precondition:
     id: "SN-PANE-SNAPSHOT-MISSING-CONTENT-FAIL-CLOSED-62"
@@ -402,11 +403,11 @@ state_model:
   atomic_action_model:
     id: "SN-SESSION-NAVIGATOR-ATOMIC-ACTION-MODEL-50"
     existing_abstractions: ["SessionNavigatorModel", "Workspace::session_navigator_model", "session_navigator_reducer::reduce", "Workspace::apply_session_navigator_reduction"]
-    owner_rule: "Pin、Reorder、Activate、Restore lifecycle、Delete 的 reducer 输入必须来自同一次 session_navigator_model Refresh，sessions/state 不得拆读"
-    lifecycle_rule: "action 发生前的新 source identity 必须先随 canonical Refresh 获得 RowId/display_order，再与 selection/restoring/deleting mutation 一起由 reducer 提交"
-    parity_rule: "local/runtime 只在 carrier delivery 时机不同；两者的 action input model、reducer、identity、position 和 lifecycle 完全共用"
-    failure_rule: "旧 state + 新 sessions 属于半事务模型破坏；禁止 raw session helper、action 后补 sync、retry、freeze 或 UI masking"
-    forbidden_parallel_paths: ["snapshot state then refresh sessions", "raw_session_navigator_sessions action input", "backend-specific action adapter", "post-action identity repair"]
+    owner_rule: "可点击的 Pin、Reorder、Activate、Restore lifecycle、Delete 目标必须来自当前已提交 SessionNavigatorModel；用户点击屏幕上已渲染的 RowId 时，action 直接消费这份 sessions/state，不得在 UI 热路径重新 snapshot 全部 PaneGroup/source。后台 source/live mutation 必须在 notify/render 前通过 canonical sync 提交。"
+    lifecycle_rule: "rendered action target 与 committed model 属于同一代；delivery 后只允许一次 canonical Refresh 把新 carrier、identity、selection/restoring 原子提交。不可见的新 source identity 先由 sync 获得 RowId/display_order，之后才可能产生点击 action。"
+    parity_rule: "local/runtime 只在 carrier delivery 时机不同；两者的 committed action input、reducer、identity、position 和 lifecycle 完全共用"
+    failure_rule: "点击时重新遍历全部 tabs/panes、构造 TerminalPaneSnapshot、或使用旧 state + 新 sessions 都属于热路径/半事务模型破坏；禁止 action-time speculative Refresh、lifecycle dispatch 内嵌 action_model、raw session helper、action 后补多次 sync、retry、freeze 或 UI masking"
+    forbidden_parallel_paths: ["action-time full source refresh", "snapshot state then refresh sessions", "raw_session_navigator_sessions action input", "backend-specific action adapter", "post-action identity repair", "duplicate post-delivery sync", "PaneGroup::snapshot Navigator live projection", "live_or_pending full live_workspace_sessions"]
 
   indexed_session_scan_transaction:
     id: "SN-ENVIRONMENT-INDEXED-SESSION-SCAN-TRANSACTION-51"
@@ -467,13 +468,13 @@ state_model:
 
   live_cli_agent_activity_projection:
     id: "SN-LIVE-CLI-AGENT-ACTIVITY-63"
-    existing_abstractions: ["PaneConfiguration.container_uuid", "PaneGroup terminal carrier lookup", "CLIAgentSessionsModel structured status", "Workspace::handle_cli_agent_sessions_event", "vertical-tabs restored session icon"]
-    owner_rule: "CLIAgentSessionsModel 是 live CLI Agent activity 的唯一 canonical owner；Session Navigator 只做 render-time projection，不能把 activity 写入 WorkspaceSessionSnapshot、PaneConfiguration、SQLite 或 Environment user state。"
-    identity_rule: "只允许 live WorkspaceSessionSnapshot.container_uuid → current PaneGroup terminal carrier → TerminalView EntityId 的 runtime lookup。tab/leaf locator、row id、EntityId、agent/session native id 都不得作为 activity registry/persistence identity；找不到 carrier 时活动态为 unknown/quiet。"
-    state_rule: "仅 session_supports_rich_status 的 structured session 有活动态：InProgress = running；Blocked = attention；Success = quiet/idle。command detection、plain terminal、unknown provider、历史 virtual row 与缺 runtime carrier 均为 unknown/quiet，不猜测。"
-    rendering_rule: "running/attention 以 provider 图标右下角状态点表达；quiet/idle 不绘制活动点。Resume/restoring spinner 优先于 activity 点。live/selected 不是 activity，禁止再用 generic accent/muted point 冒充 agent running。"
-    parity_rule: "local 和 Environment runtime 复用同一个 PaneConfiguration container identity、TerminalView 与 CLIAgentSessionsModel；只允许 structured event 的 transport arrival timing 不同。"
-    forbidden_parallel_paths: ["locator-based activity lookup", "history metadata activity inference", "PTY text or process-exit activity inference", "persisted activity status", "backend-specific activity registry", "polling/cache overlay"]
+    existing_abstractions: ["PaneConfiguration.container_uuid", "PaneGroup terminal carrier lookup", "CLIAgentSessionsModel structured status", "WorkspaceSessionSnapshot.is_live_container/is_active", "Workspace::handle_cli_agent_sessions_event", "vertical-tabs restored session icon"]
+    owner_rule: "图标 badge 是一个穷尽的 render-only 状态投影，不持久化：restore lifecycle 归 reducer；Agent execution 归 CLIAgentSessionsModel；live/focused 归 committed WorkspaceSessionSnapshot。三类 owner 禁止互相推断。"
+    identity_rule: "structured Agent execution 只允许 live WorkspaceSessionSnapshot.container_uuid → current PaneGroup terminal carrier → TerminalView EntityId lookup。tab/leaf locator、row id、native history id 不得作为 execution registry identity；live/focused fallback 只读取当前 committed row 自身。"
+    state_rule: "优先级固定为 Restoring > Attention(Blocked) > Running(InProgress) > FocusedLive(is_live_container && is_active) > BackgroundLive(is_live_container) > HistoricalQuiet。Success、command-only 与无 structured status 不猜 Agent execution，但仍保留真实 live/focused 存在态。"
+    rendering_rule: "Restoring 使用 spinner；Attention 使用黄色状态点；Running 使用蓝色状态点；FocusedLive 使用 accent 实心点；BackgroundLive 使用 muted 小点；HistoricalQuiet 无点。row background/border 继续表达选择焦点，badge 提供可扫视状态且不得把 live 冒充 running。"
+    parity_rule: "local 和 Environment runtime 复用同一个 PaneConfiguration container identity、TerminalView、committed row 与 CLIAgentSessionsModel；只允许 structured event 和 carrier delivery timing 不同。"
+    forbidden_parallel_paths: ["locator-based execution lookup", "history metadata execution inference", "PTY text or process-exit execution inference", "persisted activity status", "backend-specific status registry", "polling/cache overlay", "deleting live/focused state to avoid badge ambiguity"]
 
   environment_target_home_materialization:
     id: "SN-ENVIRONMENT-TARGET-HOME-MATERIALIZATION-48"
@@ -1768,10 +1769,16 @@ ux_contract_matrix:
       test: "test_workspace_split_action_uses_active_environment_when_focus_is_stale"
     - id: "SN-LIVE-CLI-AGENT-ACTIVITY-63"
       scope: "local_remote_parity"
-      event: "A live structured CLI agent changes InProgress, Blocked, Success, or ends while its Session Navigator row remains visible"
-      may_change: ["render_only_activity_indicator"]
+      event: "A row transitions among restoring, structured Agent execution, focused live, background live, and historical states"
+      may_change: ["render_only_status_badge", "row_focus_decoration"]
       must_preserve: ["container_uuid_identity", "row_id", "display_order", "selection", "alias", "WorkspaceSessionSnapshot_persistence", "unrelated_live_agent_rows", "virtual_history_rows"]
-      test: "activity_resolver_uses_container_identity_not_locator"
+      test: "session_status_badge_has_explicit_semantic_precedence"
+    - id: "SN-RESUME-COMMITTED-ACTION-HOT-PATH-64"
+      scope: "local_remote_parity"
+      event: "User clicks Resume on a row already rendered from the committed SessionNavigatorModel"
+      may_change: ["target_restore_lifecycle", "target_carrier", "focused_row"]
+      must_preserve: ["ui_thread_responsiveness", "unrelated_rows", "row_id", "display_order", "single_post_delivery_refresh", "no_action_time_full_pane_snapshot"]
+      test: "resume_action_consumes_committed_model_without_action_time_refresh"
 
   check:
     parser_test: "test_session_navigator_spec_matrix_is_complete_and_linked"

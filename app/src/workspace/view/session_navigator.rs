@@ -13,9 +13,11 @@ use std::collections::{HashMap, HashSet};
 
 use warpui::{AppContext, EntityId, SingletonEntity, UpdateView, ViewContext, ViewHandle};
 
+use crate::ai::blocklist::history_model::BlocklistAIHistoryModel;
 use crate::environment_authority::{
     session_authority_matches, session_authority_or_terminal_bootstrap, ParsedEnvironmentAuthority,
 };
+use crate::pane_group::EnvironmentRuntimePlaceholderPane;
 use crate::workspace::environment_backend::{
     EnvironmentBackendKind, EnvironmentNavigationActivationIntent, EnvironmentSessionRefreshIntent,
 };
@@ -31,9 +33,8 @@ use super::{
     CLIAgentSessionsModelEvent, ContextFlag, DismissibleToast, EditorEvent, EditorView,
     EnvironmentCliAgentSessionSourceAction, MenuItem, MenuItemFields, ModalButton, PaneId,
     PaneViewLocator, SessionBridgeActionSource, SingleLineEditorOptions, TabContextMenuAnchor,
-    TabSnapshot, TerminalView, TextOptions, Vector2F, Workspace, WorkspaceAction,
-    WorkspaceSessionActionTarget, WorkspaceSessionKind, WorkspaceSessionSnapshot,
-    WORKSPACE_SESSIONS_REFRESH_TOAST_ID,
+    TerminalView, TextOptions, Vector2F, Workspace, WorkspaceAction, WorkspaceSessionActionTarget,
+    WorkspaceSessionKind, WorkspaceSessionSnapshot, WORKSPACE_SESSIONS_REFRESH_TOAST_ID,
 };
 
 #[derive(Debug)]
@@ -1180,6 +1181,9 @@ impl Workspace {
 
     // ── 实时会话快照（来自当前窗口各 tab 的 pane group）─────────────────────
 
+    /// Navigator live projection. Reads PaneConfiguration / tab Environment only.
+    /// Must not call `PaneGroup::snapshot` or walk TerminalPane LeafContents — those
+    /// lock every TerminalModel and belong to persistence, not Session Navigator.
     pub(super) fn live_workspace_sessions(
         &self,
         ctx: &AppContext,
@@ -1187,17 +1191,12 @@ impl Workspace {
         let mut sessions = Vec::new();
         for (tab_index, tab) in self.tabs.iter().enumerate() {
             let pane_group = tab.pane_group.as_ref(ctx);
-            let root = pane_group.snapshot(ctx);
-            let tab_environment =
-                Self::tab_environment_or_terminal_bootstrap_environment(Some(tab), &root);
+            let tab_environment = tab.environment.clone().unwrap_or_else(|| {
+                crate::workspace::environment_runtime::terminal_bootstrap_environment(None)
+            });
             let tab_requires_runtime_sessions =
                 ParsedEnvironmentAuthority::parse(&tab_environment.authority_key)
                     .uses_runtime_environment();
-            let placeholder_leaf_indices = if tab_requires_runtime_sessions {
-                Self::environment_runtime_placeholder_leaf_indices(&root)
-            } else {
-                Vec::new()
-            };
             let focused_pane_index = if tab_index == self.active_tab_index {
                 let focused_pane_id = pane_group.focused_pane_id(ctx);
                 pane_group
@@ -1207,77 +1206,139 @@ impl Workspace {
             } else {
                 None
             };
-            let tab_snapshot = TabSnapshot {
-                environment: Some(tab_environment.clone()),
-                custom_title: pane_group.custom_title(ctx),
-                root,
-                default_directory_color: tab.default_directory_color,
-                selected_color: tab.selected_color,
-                left_panel: None,
-                right_panel: None,
-            };
-            let tab_sessions = WorkspaceSessionSnapshot::from_tabs(&[tab_snapshot], None);
-            for mut session in tab_sessions {
-                if let Some((_, pane_index)) = Self::locator_from_restored_session_id(&session.id) {
-                    if tab_requires_runtime_sessions {
-                        let pane_uses_runtime = pane_group
-                            .pane_id_from_index(pane_index)
-                            .and_then(|pane_id| pane_group.terminal_view_from_pane_id(pane_id, ctx))
-                            .map(|terminal_view| {
-                                // Liveness must use the terminal's stable transport
-                                // identity, not the active block's session. A CLI
-                                // agent running inside a subshell moves the active
-                                // block onto a non-runtime session, which must not
-                                // demote the live remote row to a virtual history row.
-                                terminal_view.as_ref(ctx).is_environment_runtime_transport()
-                            })
-                            .unwrap_or(false);
-                        if !pane_uses_runtime {
-                            continue;
-                        }
-                    }
-                    session.id = format!("tab:{tab_index}:leaf:{pane_index}");
-                    session.is_active = focused_pane_index == Some(pane_index);
-                } else {
-                    session.is_active = false;
-                }
-                sessions.push(session);
-            }
+            let group_title = pane_group.custom_title(ctx);
 
-            for placeholder_leaf_index in placeholder_leaf_indices {
-                let placeholder_pane_id = pane_group
-                    .pane_id_from_index(placeholder_leaf_index)
-                    .expect("snapshot 中的 placeholder leaf 必须对应 live pane");
+            for (pane_index, pane_id) in pane_group.visible_pane_ids().into_iter().enumerate() {
                 let container_uuid = pane_group
-                    .container_uuid_for_pane_id(placeholder_pane_id, ctx)
+                    .container_uuid_for_pane_id(pane_id, ctx)
                     .expect("Navigator 可见 live pane 必须拥有稳定 container UUID");
-                let pane_session_binding =
-                    pane_group.session_binding_for_pane_id(placeholder_pane_id, ctx);
-                let mut session = WorkspaceSessionSnapshot {
-                    id: format!("tab:{tab_index}:leaf:{placeholder_leaf_index}"),
-                    container_uuid: Some(container_uuid),
-                    kind: WorkspaceSessionKind::Terminal,
-                    label: pane_group
-                        .custom_title(ctx)
-                        .or_else(|| Some(tab_environment.label.clone())),
-                    environment_authority_key: Some(tab_environment.authority_key.clone()),
-                    cwd: tab_environment.active_workspace_root.clone(),
-                    startup_directory: None,
-                    cli_agent: None,
-                    cli_command: None,
-                    cli_agent_origin: None,
-                    conversation_ids: Vec::new(),
-                    active_conversation_id: None,
-                    cli_agent_session_id: None,
-                    is_active: focused_pane_index == Some(placeholder_leaf_index),
-                    is_pinned: false,
-                    updated_at_unix_ms: None,
-                    is_live_container: true,
-                };
-                if let Some(binding) = pane_session_binding.as_ref() {
-                    binding.apply_to_workspace_session(&mut session);
+                let leaf_title = pane_group
+                    .pane_by_id(pane_id)
+                    .and_then(|pane| {
+                        pane.pane_configuration()
+                            .as_ref(ctx)
+                            .custom_vertical_tabs_title()
+                            .map(str::to_owned)
+                    })
+                    .or_else(|| group_title.clone());
+
+                if pane_group
+                    .downcast_pane_by_id::<EnvironmentRuntimePlaceholderPane>(pane_id)
+                    .is_some()
+                {
+                    let pane_session_binding =
+                        pane_group.session_binding_for_pane_id(pane_id, ctx);
+                    let mut session = WorkspaceSessionSnapshot {
+                        id: format!("tab:{tab_index}:leaf:{pane_index}"),
+                        container_uuid: Some(container_uuid),
+                        kind: WorkspaceSessionKind::Terminal,
+                        label: leaf_title.or_else(|| Some(tab_environment.label.clone())),
+                        environment_authority_key: Some(tab_environment.authority_key.clone()),
+                        cwd: tab_environment.active_workspace_root.clone(),
+                        startup_directory: None,
+                        cli_agent: None,
+                        cli_command: None,
+                        cli_agent_origin: None,
+                        conversation_ids: Vec::new(),
+                        active_conversation_id: None,
+                        cli_agent_session_id: None,
+                        is_active: focused_pane_index == Some(pane_index),
+                        is_pinned: false,
+                        updated_at_unix_ms: None,
+                        is_live_container: true,
+                    };
+                    if let Some(binding) = pane_session_binding.as_ref() {
+                        binding.apply_to_workspace_session(&mut session);
+                    }
+                    sessions.push(session);
+                    continue;
                 }
-                sessions.push(session);
+
+                if let Some(terminal_view) = pane_group.terminal_view_from_pane_id(pane_id, ctx) {
+                    if tab_requires_runtime_sessions
+                        && !terminal_view.as_ref(ctx).is_environment_runtime_transport()
+                    {
+                        // Liveness must use the terminal's stable transport identity,
+                        // not the active block's session. A CLI agent running inside a
+                        // subshell moves the active block onto a non-runtime session,
+                        // which must not demote the live remote row to a virtual history row.
+                        continue;
+                    }
+
+                    let pane_session_binding = pane_group.session_binding_for_pane_id(pane_id, ctx);
+                    let conversation_ids: Vec<String> = BlocklistAIHistoryModel::as_ref(ctx)
+                        .all_live_conversations_for_terminal_view(terminal_view.id())
+                        .map(|conversation| conversation.id().to_string())
+                        .collect();
+                    let has_conversation = !conversation_ids.is_empty()
+                        || pane_session_binding
+                            .as_ref()
+                            .is_some_and(|binding| binding.has_semantic_identity());
+                    let mut session = WorkspaceSessionSnapshot {
+                        id: format!("tab:{tab_index}:leaf:{pane_index}"),
+                        container_uuid: Some(container_uuid),
+                        kind: if has_conversation {
+                            WorkspaceSessionKind::AgentTerminal
+                        } else {
+                            WorkspaceSessionKind::Terminal
+                        },
+                        label: leaf_title,
+                        environment_authority_key: Some(tab_environment.authority_key.clone()),
+                        cwd: pane_session_binding
+                            .as_ref()
+                            .and_then(|binding| binding.cwd.clone())
+                            .or_else(|| tab_environment.active_workspace_root.clone()),
+                        startup_directory: None,
+                        cli_agent: None,
+                        cli_command: None,
+                        cli_agent_origin: None,
+                        conversation_ids,
+                        active_conversation_id: None,
+                        cli_agent_session_id: None,
+                        is_active: focused_pane_index == Some(pane_index),
+                        is_pinned: false,
+                        updated_at_unix_ms: None,
+                        is_live_container: true,
+                    };
+                    if let Some(binding) = pane_session_binding.as_ref() {
+                        binding.apply_to_workspace_session(&mut session);
+                    }
+                    sessions.push(session);
+                    continue;
+                }
+
+                // Non-terminal / non-placeholder only. TerminalPane::snapshot locks
+                // TerminalModel and is forbidden on the Navigator hot path.
+                if let Some(startup_directory) = pane_group.pane_by_id(pane_id).and_then(|pane| {
+                    match pane.snapshot(ctx) {
+                        crate::app_state::LeafContents::Welcome { startup_directory } => {
+                            Some(startup_directory)
+                        }
+                        _ => None,
+                    }
+                }) {
+                    sessions.push(WorkspaceSessionSnapshot {
+                        id: format!("tab:{tab_index}:leaf:{pane_index}"),
+                        container_uuid: Some(container_uuid),
+                        kind: WorkspaceSessionKind::Welcome,
+                        label: leaf_title,
+                        environment_authority_key: Some(tab_environment.authority_key.clone()),
+                        cwd: None,
+                        startup_directory: startup_directory
+                            .as_ref()
+                            .map(|path| path.to_string_lossy().into_owned()),
+                        cli_agent: None,
+                        cli_command: None,
+                        cli_agent_origin: None,
+                        conversation_ids: Vec::new(),
+                        active_conversation_id: None,
+                        cli_agent_session_id: None,
+                        is_active: focused_pane_index == Some(pane_index),
+                        is_pinned: false,
+                        updated_at_unix_ms: None,
+                        is_live_container: true,
+                    });
+                }
             }
         }
         sessions
@@ -1286,33 +1347,31 @@ impl Workspace {
     /// Resolves a durable CLI/AI session identity to a semantic pane container
     /// owned by this Workspace. Placeholder and terminal carriers expose the
     /// same PaneConfiguration binding, so ownership never reads the runtime
-    /// pending queue or waits for materialization.
+    /// pending queue, waits for materialization, or snapshots every terminal.
     pub(crate) fn live_or_pending_workspace_session_locator(
         &self,
         durable_identity_key: &str,
         ctx: &AppContext,
     ) -> Option<PaneViewLocator> {
-        if let Some(locator) = self
-            .live_workspace_sessions(ctx)
-            .into_iter()
-            .find_map(|session| {
-                (session.durable_identity_key().as_deref() == Some(durable_identity_key))
-                    .then(|| self.locator_for_workspace_session_snapshot(&session, ctx))
-                    .flatten()
-            })
-        {
-            return Some(locator);
-        }
-
         for tab in &self.tabs {
             let pane_group = tab.pane_group.as_ref(ctx);
-            let root = pane_group.snapshot(ctx);
-            let environment =
-                Self::tab_environment_or_terminal_bootstrap_environment(Some(tab), &root);
+            let environment = tab.environment.clone().unwrap_or_else(|| {
+                crate::workspace::environment_runtime::terminal_bootstrap_environment(None)
+            });
             for pane_id in pane_group.pane_ids() {
                 let Some(binding) = pane_group.session_binding_for_pane_id(pane_id, ctx) else {
                     continue;
                 };
+                if binding
+                    .source_identity_keys
+                    .iter()
+                    .any(|key| key == durable_identity_key)
+                {
+                    return Some(PaneViewLocator {
+                        pane_group_id: tab.pane_group.id(),
+                        pane_id,
+                    });
+                }
                 let binding_identity = WorkspaceSessionSnapshot::durable_cli_agent_identity_key(
                     Some(&environment.authority_key),
                     binding.agent.as_deref(),
@@ -1898,10 +1957,12 @@ impl Workspace {
         target: &WorkspaceSessionActionTarget,
         ctx: &mut ViewContext<Self>,
     ) {
-        let sessions = self.session_navigator_sessions_for_display_update(ctx);
-        let Some(session) = sessions
-            .into_iter()
+        let navigator_model = self.session_navigator_model();
+        let Some(session) = navigator_model
+            .sessions
+            .iter()
             .find(|session| Self::workspace_session_matches_action_target(session, target))
+            .cloned()
         else {
             log::warn!(
                 "activate_restored_workspace_session: missing session {} in {:?}",
@@ -1938,7 +1999,6 @@ impl Workspace {
         }
 
         let logical_key = Self::workspace_session_logical_key(&session);
-        let navigator_model = self.session_navigator_model();
         if navigator_model
             .state
             .restoring_row_ids
@@ -2137,8 +2197,12 @@ impl Workspace {
         action: SessionNavigatorAction,
         ctx: &AppContext,
     ) -> bool {
+        // Lifecycle / selection / pin mutations consume the committed render model.
+        // Source membership changes must go through sync_session_navigator_sessions
+        // or commit_session_navigator_restore_started_after_delivery — never through
+        // a speculative action-time Refresh smuggled into this helper.
         let pane_info = self.snapshot_pane_group_info(ctx);
-        let SessionNavigatorModel { sessions, state } = self.session_navigator_action_model(ctx);
+        let SessionNavigatorModel { sessions, state } = self.session_navigator_model();
         let before = ReduceResult {
             sessions: sessions.clone(),
             state: state.clone(),
@@ -2155,6 +2219,45 @@ impl Workspace {
         }
         self.apply_session_navigator_reduction(&reduced);
         true
+    }
+
+    /// Single post-delivery Navigator commit: one binding-based Refresh, then
+    /// RestoreStarted on that result. Local and runtime share this boundary;
+    /// only carrier arrival timing differs upstream.
+    pub(super) fn commit_session_navigator_restore_started_after_delivery(
+        &mut self,
+        session_keys: Vec<String>,
+        selected_logical_key: Option<String>,
+        ctx: &AppContext,
+    ) {
+        let pane_info = self.snapshot_pane_group_info(ctx);
+        let refreshed = self.reduce_session_navigator_refresh(ctx);
+        let action = SessionNavigatorAction::RestoreStarted {
+            session_keys,
+            selected_logical_key,
+        };
+        let before = ReduceResult {
+            sessions: refreshed.sessions.clone(),
+            state: refreshed.state.clone(),
+            side_effect: SideEffect::None,
+        };
+        let reduced = session_navigator_reducer::reduce(
+            refreshed.sessions,
+            refreshed.state,
+            action.clone(),
+            &pane_info,
+        );
+        if let Err(error) =
+            session_navigator_reducer::validate_transition(&before, &reduced, &action, &pane_info)
+        {
+            log::error!("session_navigator restore-started commit rejected: {error}");
+            debug_assert!(
+                false,
+                "session_navigator restore-started commit rejected: {error}"
+            );
+            return;
+        }
+        self.apply_session_navigator_reduction(&reduced);
     }
 
     pub(super) fn snapshot_session_navigator_model(&self) -> SessionNavigatorModel {
@@ -2307,7 +2410,7 @@ impl Workspace {
     ) -> bool {
         match side_effect {
             SideEffect::FocusPane(locator) => {
-                self.focus_pane(locator.clone(), ctx);
+                self.focus_pane(*locator, ctx);
                 true
             }
             SideEffect::SpawnTerminal { session_id, .. } => {
@@ -2385,7 +2488,7 @@ impl Workspace {
             matches!(effects.close, DeleteCloseKind::ClosePane(_)) && effects.focus.is_some();
         if !skip_explicit_focus {
             if let Some(locator) = &effects.focus {
-                self.focus_pane(locator.clone(), ctx);
+                self.focus_pane(*locator, ctx);
             }
         }
 

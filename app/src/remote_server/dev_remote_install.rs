@@ -428,7 +428,7 @@ fn dev_remote_binary_covers_paths(binary: &Path, paths: &[PathBuf]) -> Result<bo
         .with_context(|| format!("读取 helper 产物修改时间 {} 失败", binary.display()))?;
 
     for path in paths {
-        let modified = match fs::metadata(&path) {
+        let modified = match fs::metadata(path) {
             Ok(metadata) => metadata
                 .modified()
                 .with_context(|| format!("读取 freshness 输入修改时间 {} 失败", path.display()))?,
@@ -1676,7 +1676,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         fs::write(&binary, "binary").unwrap();
 
-        assert!(dev_remote_binary_covers_paths(&binary, &[input.clone()]).unwrap());
+        assert!(dev_remote_binary_covers_paths(&binary, std::slice::from_ref(&input)).unwrap());
 
         std::thread::sleep(std::time::Duration::from_millis(5));
         fs::write(&input, "changed").unwrap();

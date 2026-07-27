@@ -39,6 +39,8 @@ impl SessionBridgeTargetIdentity {
     }
 }
 
+// 为计划中的 SessionBridge fork/edit/write-back 能力保留:意图状态机骨架
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionBridgeIntent {
     Read,
@@ -79,6 +81,8 @@ impl SessionBridgeIntent {
     }
 }
 
+// 为计划中的 SessionBridge 生命周期状态机保留:含尚未接线的 Cancelled 等阶段
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionBridgeLifecyclePhase {
     Prepared,
@@ -147,6 +151,8 @@ pub trait SessionBridgeLifecycleTransport {
     fn cleanup_staging(&mut self, operation_id: Uuid) -> Result<(), SessionBridgeError>;
 }
 
+// 为计划中的 SessionBridge fork/edit/write-back 能力保留:生命周期事务状态机
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SessionBridgeLifecycle {
     operation_id: Uuid,
@@ -159,6 +165,8 @@ pub struct SessionBridgeLifecycle {
     phase: SessionBridgeLifecyclePhase,
 }
 
+// 为计划中的 SessionBridge fork/edit/write-back 能力保留:生命周期方法尚未接线
+#[allow(dead_code)]
 impl SessionBridgeLifecycle {
     pub fn prepare_fork_derivation(
         source: &SessionIr,
@@ -393,6 +401,8 @@ fn session_revision(session: &SessionIr) -> Result<String, SessionBridgeError> {
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
+// 为计划中的 SessionBridge fork/edit 能力保留:仅被尚未接线的 prepare 使用
+#[allow(dead_code)]
 fn generated_target_identity(target: SessionBridgeForkTarget) -> SessionBridgeTargetIdentity {
     let session_id = Uuid::new_v4().to_string();
     match target {

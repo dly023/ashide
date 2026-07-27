@@ -3601,16 +3601,17 @@ then
     fail=1
 fi
 
-# LR-177: restore completion has typed success/retry/cancel/model-broken semantics.
-require_contract_marker "LR-177" "SESSION-RESTORE-TYPED-FINALIZE-81" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
-require_contract_marker "LR-177" "SN-RESTORE-ATOMIC-FINALIZE-ROLLBACK-61" docs/SESSION_NAVIGATOR_SPEC.yaml
+# LR-177: EnvironmentTable owns the generic entry materialization completion
+# protocol; backend delivery only controls timing.
+require_contract_marker "LR-177" "ENVIRONMENT-MATERIALIZATION-TYPED-COMPLETION-81" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
+require_contract_marker "LR-177" "SN-MATERIALIZATION-ATOMIC-COMPLETION-ROLLBACK-61" docs/SESSION_NAVIGATOR_SPEC.yaml
 require_contract_marker "LR-177" "id: LR-177" docs/design/local-remote-parity-tracker.yaml
-require_contract_marker "LR-177" "Workspace session restore: typed finalize rollback" docs/design/local-remote-capability-matrix.csv
-require_contract_marker "LR-177" "SessionRestoreFinalizeOutcome" app/src/workspace/view.rs app/src/workspace/environment_backend.rs
+require_contract_marker "LR-177" "Environment entry materialization: typed completion rollback" docs/design/local-remote-capability-matrix.csv
+require_contract_marker "LR-177" "MaterializationOutcome" app/src/workspace/environment_table.rs app/src/workspace/view.rs
 require_rust_callsite_owners \
     "LR-177" \
-    "canonical restore finalize primitive" \
-    '\.finalize_session_restore\(' \
+    "canonical materialization completion primitive" \
+    '\.complete_materialization\(' \
     $'app/src/workspace/view.rs:materialize_environment_runtime_terminal\napp/src/workspace/view.rs:complete_environment_runtime_terminal_materialization\napp/src/workspace/view.rs:fail_environment_runtime_terminal_materialization\napp/src/workspace/view.rs:discard_pending_environment_runtime_materialization\napp/src/workspace/view.rs:cancel_pending_environment_runtime_materialization_for_pane'
 if ! python3 - <<'PY'
 import re
@@ -3620,26 +3621,38 @@ backend = Path("app/src/workspace/environment_backend.rs").read_text()
 table = Path("app/src/workspace/environment_table.rs").read_text()
 view = Path("app/src/workspace/view.rs").read_text()
 
-for outcome in ["Success", "RetryableFailure", "Cancelled", "CarrierMissing", "ModelBroken"]:
-    if not re.search(rf"\b{outcome}\b", backend):
-        raise SystemExit(f"missing typed restore finalize outcome: {outcome}")
+for declaration in [
+    "struct MaterializationTransition",
+    "enum MaterializationOutcome",
+    "enum MaterializationCompletion",
+    "enum MaterializationError",
+]:
+    if declaration not in table:
+        raise SystemExit(f"EnvironmentTable module must own {declaration}")
+    if declaration in backend:
+        raise SystemExit(f"backend trait module must not own {declaration}")
+for outcome in ["Success", "RetryableFailure", "Cancelled", "CarrierMissing"]:
+    if not re.search(rf"\b{outcome}\b", table):
+        raise SystemExit(f"missing typed materialization outcome: {outcome}")
 if "next_materialization_generation" not in table or "pending.generation == transition.generation" not in table:
-    raise SystemExit("EnvironmentTable must atomically own restore generation and pending projection")
-if "SessionRestoreFinalizeOutcome::CarrierMissing" not in view:
+    raise SystemExit("EnvironmentTable must atomically own materialization generation and pending projection")
+if "MaterializationOutcome::CarrierMissing" not in view:
     raise SystemExit("carrier missing must enter its distinct fail-closed transition")
 for forbidden in [
-    "SessionRestoreFinalizeOutcome::CancelledCarrierMissing",
-    "SessionRestoreFinalizeResult::Stale => return",
+    "SessionRestoreFinalize",
+    "finalize_session_restore",
+    "ModelBroken",
+    "MaterializationCompletion::Stale => return",
 ]:
     if forbidden in view or forbidden in table or forbidden in backend:
-        raise SystemExit(f"forbidden restore finalize fallback remains: {forbidden}")
+        raise SystemExit(f"forbidden materialization completion debt remains: {forbidden}")
 PY
 then
-    echo "[LR-177] restore generation, typed outcome, or fail-closed cleanup contract changed" >&2
-    echo "finalize inventory (path:line):" >&2
-    rust_production_call_sites '\.finalize_session_restore\(' >&2
-    echo "finalize owners:" >&2
-    rust_production_callsite_owners '\.finalize_session_restore\(' >&2
+    echo "[LR-177] materialization generation, typed outcome, or fail-closed cleanup contract changed" >&2
+    echo "completion inventory (path:line):" >&2
+    rust_production_call_sites '\.complete_materialization\(' >&2
+    echo "completion owners:" >&2
+    rust_production_callsite_owners '\.complete_materialization\(' >&2
     fail=1
 fi
 
@@ -4275,18 +4288,21 @@ then
     fail=1
 fi
 
-# LR-185: Session Navigator agent activity is render-only runtime state. It
-# resolves the current carrier exclusively through the stable pane container
-# identity, never through a layout locator or provider history metadata.
-require_contract_marker "LR-185" "SESSION-NAVIGATOR-LIVE-AGENT-ACTIVITY-87" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
-require_contract_marker "LR-185" "SN-LIVE-CLI-AGENT-ACTIVITY-63" docs/SESSION_NAVIGATOR_SPEC.yaml
-require_contract_marker "LR-185" "id: LR-185" docs/design/local-remote-parity-tracker.yaml
-require_contract_marker "LR-185" "Session Navigator live CLI agent activity" docs/design/local-remote-capability-matrix.csv
-require_contract_marker "LR-185" "activity_resolver_uses_container_identity_not_locator" app/src/workspace/view/vertical_tabs_tests.rs
-require_contract_marker "LR-185" "historical_and_idle_session_rows_render_without_activity_badge" app/src/workspace/view/vertical_tabs_tests.rs
-require_contract_marker "LR-185" "resume_spinner_precedes_live_agent_activity_badge" app/src/workspace/view/vertical_tabs_tests.rs
+# LR-190/191: Resume consumes the committed visible model, while the status
+# badge keeps restore, structured execution, focus, and liveness orthogonal.
+require_contract_marker "LR-190" "SESSION-NAVIGATOR-RESUME-COMMITTED-HOT-PATH-88" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
+require_contract_marker "LR-190" "SN-RESUME-COMMITTED-ACTION-HOT-PATH-64" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-190" "id: LR-190" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-190" "Session Navigator Resume committed hot path" docs/design/local-remote-capability-matrix.csv
+require_contract_marker "LR-190" "resume_action_consumes_committed_model_without_action_time_refresh" app/src/workspace/view_test.rs
+require_contract_marker "LR-191" "SESSION-NAVIGATOR-LIVE-AGENT-ACTIVITY-87" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
+require_contract_marker "LR-191" "SN-LIVE-CLI-AGENT-ACTIVITY-63" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-191" "id: LR-191" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-191" "Session Navigator orthogonal status projection" docs/design/local-remote-capability-matrix.csv
+require_contract_marker "LR-191" "session_status_badge_has_explicit_semantic_precedence" app/src/workspace/view/vertical_tabs_tests.rs
+require_contract_marker "LR-191" "activity_resolver_uses_container_identity_not_locator" app/src/workspace/view/vertical_tabs_tests.rs
 require_rust_callsite_owners \
-    "LR-185" \
+    "LR-191" \
     "stable container activity lookup" \
     '\.terminal_view_id_for_container_uuid\(' \
     $'app/src/workspace/view/vertical_tabs.rs:live_cli_agent_activity_indicator'
@@ -4313,6 +4329,77 @@ def function_body(path, name):
                 return text[match.start():index + 1]
     raise SystemExit(f"unterminated function {path}:{name}")
 
+
+activate = function_body(
+    "app/src/workspace/view/session_navigator.rs",
+    "activate_restored_workspace_session",
+)
+for required in ["self.session_navigator_model()", "SessionNavigatorAction::Activate"]:
+    if required not in activate:
+        raise SystemExit(f"Resume committed action path is missing: {required}")
+for forbidden in [
+    "session_navigator_sessions_for_display_update",
+    "session_navigator_action_model",
+    "reduce_session_navigator_refresh",
+    "live_workspace_sessions",
+]:
+    if forbidden in activate:
+        raise SystemExit(f"Resume action hot path still performs speculative projection: {forbidden}")
+
+live_or_pending = function_body(
+    "app/src/workspace/view/session_navigator.rs",
+    "live_or_pending_workspace_session_locator",
+)
+if "session_binding_for_pane_id" not in live_or_pending:
+    raise SystemExit("Resume locator must resolve durable identity via PaneConfiguration binding")
+for forbidden in ["live_workspace_sessions", ".snapshot("]:
+    if forbidden in live_or_pending:
+        raise SystemExit(f"Resume locator still performs full live projection: {forbidden}")
+
+live_projection = function_body(
+    "app/src/workspace/view/session_navigator.rs",
+    "live_workspace_sessions",
+)
+for required in ["session_binding_for_pane_id", "container_uuid_for_pane_id"]:
+    if required not in live_projection:
+        raise SystemExit(f"Navigator live projection is missing: {required}")
+for forbidden in [
+    "pane_group.snapshot",
+    "WorkspaceSessionSnapshot::from_tabs",
+    "TabSnapshot",
+]:
+    if forbidden in live_projection:
+        raise SystemExit(f"Navigator live projection still snapshots terminal panes: {forbidden}")
+
+dispatch = function_body(
+    "app/src/workspace/view/session_navigator.rs",
+    "dispatch_session_navigator_state_action",
+)
+if "self.session_navigator_model()" not in dispatch:
+    raise SystemExit("lifecycle dispatch must consume the committed SessionNavigatorModel")
+for forbidden in ["session_navigator_action_model", "reduce_session_navigator_refresh"]:
+    if forbidden in dispatch:
+        raise SystemExit(f"lifecycle dispatch still embeds speculative refresh: {forbidden}")
+
+post_delivery = function_body(
+    "app/src/workspace/view/session_navigator.rs",
+    "commit_session_navigator_restore_started_after_delivery",
+)
+if post_delivery.count("reduce_session_navigator_refresh") != 1:
+    raise SystemExit("post-delivery commit must perform exactly one canonical Refresh")
+if "SessionNavigatorAction::RestoreStarted" not in post_delivery:
+    raise SystemExit("post-delivery commit must apply RestoreStarted on the refreshed model")
+
+finalize = function_body(
+    "app/src/workspace/view.rs",
+    "finalize_delivered_workspace_session_restore_container",
+)
+for forbidden in ["live_workspace_sessions", "sync_session_navigator_sessions", "dispatch_session_navigator_state_action"]:
+    if forbidden in finalize:
+        raise SystemExit(f"restore finalize still duplicates canonical projection: {forbidden}")
+if finalize.count("commit_session_navigator_restore_started_after_delivery") != 1:
+    raise SystemExit("restore finalize must submit exactly one canonical RestoreStarted commit")
+
 resolver = function_body(
     "app/src/workspace/view/vertical_tabs.rs", "live_cli_agent_activity_indicator"
 )
@@ -4335,13 +4422,20 @@ for forbidden in [
     "command_prefix",
 ]:
     if forbidden in resolver:
-        raise SystemExit(f"live activity resolver must not infer status from: {forbidden}")
+        raise SystemExit(f"live activity resolver must not infer execution from: {forbidden}")
 
 badge = function_body(
     "app/src/workspace/view/vertical_tabs.rs", "restored_session_icon_badge"
 )
-if badge.find("RestoredSessionIconBadge::Resuming") > badge.find("activity_indicator.map"):
-    raise SystemExit("resume spinner must take precedence over activity badge")
+precedence = [
+    "RestoredSessionIconBadge::Resuming",
+    "RestoredSessionIconBadge::Activity",
+    "RestoredSessionIconBadge::FocusedLive",
+    "RestoredSessionIconBadge::BackgroundLive",
+]
+positions = [badge.find(item) for item in precedence]
+if any(position < 0 for position in positions) or positions != sorted(positions):
+    raise SystemExit("session status badge precedence must be restoring > execution > focused live > background live")
 
 lookup = function_body(
     "app/src/pane_group/mod.rs", "terminal_view_id_for_container_uuid"
@@ -4359,7 +4453,7 @@ if "CLIAgentSessionsModelEvent::StatusChanged" not in handler:
     raise SystemExit("Workspace must refresh Navigator on CLI agent status changes")
 PY
 then
-    echo "[LR-185] Session Navigator live CLI agent activity ownership changed" >&2
+    echo "[LR-190/191] Resume hot path or Session Navigator status ownership changed" >&2
     fail=1
 fi
 

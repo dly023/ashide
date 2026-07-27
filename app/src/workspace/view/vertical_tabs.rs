@@ -185,6 +185,8 @@ enum RestoredSessionActivityIndicator {
 enum RestoredSessionIconBadge {
     Resuming,
     Activity(RestoredSessionActivityIndicator),
+    FocusedLive,
+    BackgroundLive,
 }
 
 fn restored_session_activity_indicator(
@@ -201,12 +203,20 @@ fn restored_session_activity_indicator(
 
 fn restored_session_icon_badge(
     is_resuming: bool,
+    is_live: bool,
+    is_focused: bool,
     activity_indicator: Option<RestoredSessionActivityIndicator>,
 ) -> Option<RestoredSessionIconBadge> {
     if is_resuming {
         Some(RestoredSessionIconBadge::Resuming)
+    } else if let Some(activity_indicator) = activity_indicator {
+        Some(RestoredSessionIconBadge::Activity(activity_indicator))
+    } else if is_live && is_focused {
+        Some(RestoredSessionIconBadge::FocusedLive)
+    } else if is_live {
+        Some(RestoredSessionIconBadge::BackgroundLive)
     } else {
-        activity_indicator.map(RestoredSessionIconBadge::Activity)
+        None
     }
 }
 
@@ -250,7 +260,12 @@ fn render_restored_session_icon_with_status(
 ) -> Box<dyn Element> {
     let theme = appearance.theme();
     let icon = restored_session_icon(session, appearance);
-    let Some(badge) = restored_session_icon_badge(is_resuming, activity_indicator) else {
+    let Some(badge) = restored_session_icon_badge(
+        is_resuming,
+        session.is_live_container(),
+        session.is_active,
+        activity_indicator,
+    ) else {
         return icon;
     };
 
@@ -272,7 +287,13 @@ fn render_restored_session_icon_with_status(
                     theme.terminal_colors().normal.yellow.into()
                 }
             };
-            render_restored_session_activity_dot(color)
+            render_restored_session_status_dot(color, 6.)
+        }
+        RestoredSessionIconBadge::FocusedLive => {
+            render_restored_session_status_dot(theme.accent().into(), 6.)
+        }
+        RestoredSessionIconBadge::BackgroundLive => {
+            render_restored_session_status_dot(theme.sub_text_color(theme.background()).into(), 4.)
         }
     };
     let status_with_ring = Container::new(status)
@@ -303,14 +324,14 @@ fn render_restored_session_icon_with_status(
         .finish()
 }
 
-fn render_restored_session_activity_dot(color: ColorU) -> Box<dyn Element> {
+fn render_restored_session_status_dot(color: ColorU, size: f32) -> Box<dyn Element> {
     ConstrainedBox::new(
         WarpIcon::CircleFilled
             .to_warpui_icon(WarpThemeFill::Solid(color))
             .finish(),
     )
-    .with_width(6.)
-    .with_height(6.)
+    .with_width(size)
+    .with_height(size)
     .finish()
 }
 

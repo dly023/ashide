@@ -48,9 +48,7 @@ fn handle_jsonrpc_line(line: &str) -> Option<Value> {
         }
     };
 
-    if request.id.is_none() {
-        return None;
-    }
+    request.id.as_ref()?;
 
     let id = request.id.clone().unwrap_or(Value::Null);
     match handle_request(request) {

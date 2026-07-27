@@ -2185,7 +2185,7 @@ pub(crate) async fn scan_environment_cli_agent_sessions_with_roots(
 
 #[cfg(not(target_family = "wasm"))]
 pub(crate) fn hex_decode_session_id_component(hex: &str) -> Option<String> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return None;
     }
     let mut bytes = Vec::with_capacity(hex.len() / 2);

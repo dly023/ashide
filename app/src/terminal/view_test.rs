@@ -69,7 +69,7 @@ fn test_pending_session_launch_data_query_treats_bootstrap_as_unavailable() {
 
         terminal.update(&mut app, |view, _ctx| {
             view.model.lock().init_shell(InitShellValue {
-                session_id: session_id.into(),
+                session_id,
                 shell: "bash".to_owned(),
                 ..Default::default()
             });
@@ -4792,7 +4792,7 @@ fn rows_indices(rows: OnekeyMenuRows) -> Vec<usize> {
 
 #[test]
 fn onekey_empty_query_returns_full_set_in_original_order() {
-    let candidates = vec![
+    let candidates = [
         ("prod-db", "deploy@10.0.0.5:22"),
         ("staging-web", "ubuntu@stage.foo.com:22"),
         ("生产数据库", "ops@db.example.com:22"),
@@ -4803,14 +4803,14 @@ fn onekey_empty_query_returns_full_set_in_original_order() {
 
 #[test]
 fn onekey_empty_query_after_trim_returns_full_set() {
-    let candidates = vec![("a", "1"), ("b", "2")];
+    let candidates = [("a", "1"), ("b", "2")];
     let result = filter_and_sort_onekey_candidates(candidates.iter().copied(), "   ");
     assert_eq!(rows_indices(result), vec![0, 1]);
 }
 
 #[test]
 fn onekey_query_filters_out_non_matches() {
-    let candidates = vec![("apple", "x"), ("banana", "x"), ("apricot", "x")];
+    let candidates = [("apple", "x"), ("banana", "x"), ("apricot", "x")];
     // "ap" 应该命中 apple / apricot,banana 不命中。
     // 这里不断言 apple / apricot 之间的相对顺序——具体打分由 skim 决定,
     // 我们只保证 banana 被过滤掉。
@@ -4823,7 +4823,7 @@ fn onekey_query_filters_out_non_matches() {
 
 #[test]
 fn onekey_query_matches_subtitle() {
-    let candidates = vec![
+    let candidates = [
         ("server-1", "alice@prod.example.com:22"),
         ("server-2", "bob@stage.example.com:22"),
     ];
@@ -4835,7 +4835,7 @@ fn onekey_query_matches_subtitle() {
 
 #[test]
 fn onekey_query_no_match_returns_no_matches() {
-    let candidates = vec![("a", "1"), ("b", "2")];
+    let candidates = [("a", "1"), ("b", "2")];
     let result = filter_and_sort_onekey_candidates(candidates.iter().copied(), "zzz-not-present");
     assert_eq!(result, OnekeyMenuRows::NoMatches);
 }
@@ -4843,7 +4843,7 @@ fn onekey_query_no_match_returns_no_matches() {
 #[test]
 fn onekey_query_matches_chinese_characters() {
     // 中文字符序列匹配:skim 算法按 Unicode char 处理。
-    let candidates = vec![
+    let candidates = [
         ("生产数据库", "ops@db.example.com:22"),
         ("测试服务器", "qa@test.example.com:22"),
     ];
@@ -4854,7 +4854,7 @@ fn onekey_query_matches_chinese_characters() {
 
 #[test]
 fn onekey_query_matches_japanese_characters() {
-    let candidates = vec![
+    let candidates = [
         ("本番データベース", "ops@db.example.com:22"),
         ("ステージング", "stage@example.com:22"),
     ];
@@ -4865,7 +4865,7 @@ fn onekey_query_matches_japanese_characters() {
 
 #[test]
 fn onekey_query_case_insensitive() {
-    let candidates = vec![("ProductionDB", "ops@example.com:22")];
+    let candidates = [("ProductionDB", "ops@example.com:22")];
     let result = filter_and_sort_onekey_candidates(candidates.iter().copied(), "production");
     assert_eq!(rows_indices(result), vec![0]);
 }

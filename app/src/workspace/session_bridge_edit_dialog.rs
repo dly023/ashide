@@ -555,7 +555,7 @@ impl SessionBridgeEditDialog {
         Some(
             Container::new(
                 Text::new_inline(error.clone(), appearance.ui_font_family(), 13.)
-                    .with_color(appearance.theme().ansi_fg_red().into())
+                    .with_color(appearance.theme().ansi_fg_red())
                     .finish(),
             )
             .with_padding_bottom(12.)

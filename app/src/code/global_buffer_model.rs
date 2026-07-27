@@ -206,6 +206,17 @@ pub struct CharOffsetEdit {
     pub text: String,
 }
 
+/// `handle_buffer_updated_push` 的入参集合：把一次 Environment Runtime buffer
+/// push 的语义字段收进一个借用的 params struct，避免函数参数过多。
+pub struct BufferUpdatedPush<'a> {
+    pub session_id: SessionId,
+    pub host_id: &'a warp_core::HostId,
+    pub path: &'a str,
+    pub new_server_version: u64,
+    pub expected_client_version: u64,
+    pub edits: &'a [CharOffsetEdit],
+}
+
 /// Global singleton model for managing shared buffers across editors.
 ///
 /// This allows multiple editors to share the same buffer when editing the same file,
@@ -253,12 +264,14 @@ impl GlobalBufferModel {
                     })
                     .collect();
                 me.handle_buffer_updated_push(
-                    update.session_id,
-                    &update.host_id,
-                    &update.path,
-                    update.new_server_version,
-                    update.expected_client_version,
-                    &char_edits,
+                    BufferUpdatedPush {
+                        session_id: update.session_id,
+                        host_id: &update.host_id,
+                        path: &update.path,
+                        new_server_version: update.new_server_version,
+                        expected_client_version: update.expected_client_version,
+                        edits: &char_edits,
+                    },
                     ctx,
                 );
             },
@@ -1269,14 +1282,17 @@ impl GlobalBufferModel {
     #[cfg_attr(not(feature = "local_tty"), allow(dead_code))]
     pub fn handle_buffer_updated_push(
         &mut self,
-        session_id: SessionId,
-        host_id: &warp_core::HostId,
-        path: &str,
-        new_server_version: u64,
-        expected_client_version: u64,
-        edits: &[CharOffsetEdit],
+        push: BufferUpdatedPush,
         ctx: &mut ModelContext<Self>,
     ) {
+        let BufferUpdatedPush {
+            session_id,
+            host_id,
+            path,
+            new_server_version,
+            expected_client_version,
+            edits,
+        } = push;
         // Find the buffer by scanning for an Environment Runtime source with matching host+path.
         let file_id = self.buffers.iter().find_map(|(id, state)| {
             if let BufferSource::EnvironmentRuntime {

@@ -8123,7 +8123,7 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) -> bool {
         match resolution {
-            PromptSuggestionResolution::Accept { .. } => {}
+            PromptSuggestionResolution::Accept => {}
             PromptSuggestionResolution::Reject { ctrl_c } => {
                 // ctrl-c shouldn't clear prompt suggestions, but all other rejections should.
                 if !ctrl_c {
@@ -14962,9 +14962,6 @@ impl TerminalView {
                             self.reset_selection_to_single_block(*block_index, ctx);
                         }
 
-                        if !self.ai_input_model.as_ref(ctx).is_ai_input_enabled() {
-                        } else if !self.selected_blocks.is_empty() {
-                        }
                         self.tips_completed.update(ctx, |tips, ctx| {
                             mark_feature_used_and_write_to_user_defaults(
                                 Tip::Hint(TipHint::BlockSelect),

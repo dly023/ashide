@@ -7,7 +7,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use tempfile::NamedTempFile;
@@ -380,11 +379,6 @@ fn set_session_pinned_with_config(
     write_session_user_state(&state, config_dir)
 }
 
-fn system_time_to_unix_ms(time: SystemTime) -> Option<i64> {
-    let duration = time.duration_since(UNIX_EPOCH).ok()?;
-    i64::try_from(duration.as_millis()).ok()
-}
-
 fn session_user_state_path(config_dir: Option<&Path>) -> Option<PathBuf> {
     let config_dir = config_dir
         .map(PathBuf::from)
@@ -683,7 +677,7 @@ mod tests {
     use super::*;
     use std::fs::FileTimes;
     use std::io::Write;
-    use std::time::Duration;
+    use std::time::{Duration, UNIX_EPOCH};
     use tempfile::TempDir;
 
     #[test]

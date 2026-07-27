@@ -38,6 +38,7 @@ const THUMBNAIL_MARGIN: f32 = 10.;
     settings_value::SettingsValue,
 )]
 #[schemars(description = "The color theme.", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ThemeKind {
     #[schemars(skip)]
     SentReferralReward,
@@ -50,6 +51,7 @@ pub enum ThemeKind {
     #[schemars(description = "Dark")]
     Dark,
     #[schemars(description = "Dracula")]
+    #[default]
     Dracula,
     #[schemars(description = "Tokyo Night")]
     TokyoNight,
@@ -98,12 +100,6 @@ pub enum ThemeKind {
     CustomBase16(CustomTheme),
     #[schemars(skip)]
     InMemory(InMemoryThemeOptions),
-}
-
-impl Default for ThemeKind {
-    fn default() -> Self {
-        Self::Dracula
-    }
 }
 
 impl From<CustomTheme> for ThemeKind {

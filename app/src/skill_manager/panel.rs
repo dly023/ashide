@@ -467,7 +467,7 @@ impl SkillManagerPanel {
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(4.0)
             .with_child(self.render_filter_button(
-                crate::t!("skill-manager-filter-all").into(),
+                crate::t!("skill-manager-filter-all"),
                 active_filter.is_none(),
                 None,
                 appearance,
@@ -498,7 +498,7 @@ impl SkillManagerPanel {
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(4.0)
             .with_child(self.render_filter_button(
-                crate::t!("skill-manager-filter-all").into(),
+                crate::t!("skill-manager-filter-all"),
                 self.provider_filter.is_none(),
                 None,
                 appearance,
@@ -624,25 +624,25 @@ impl SkillManagerPanel {
         app: &AppContext,
     ) -> String {
         let Some(environment_scope) = Self::active_environment_runtime_scope(app) else {
-            return crate::t!("skill-manager-empty").into();
+            return crate::t!("skill-manager-empty");
         };
         let Some(session_id) = environment_scope.session_id else {
-            return crate::t!("skill-manager-remote-connecting").into();
+            return crate::t!("skill-manager-remote-connecting");
         };
 
         let cache = EnvironmentSkillInventoryCache::as_ref(app);
         let cwd = environment_scope.current_working_directory.as_deref();
         if cache.is_refreshing_for_session(session_id, cwd) && inventory_is_empty {
-            return crate::t!("skill-manager-remote-loading").into();
+            return crate::t!("skill-manager-remote-loading");
         }
         if let Some(error) = cache.failure_for_session(session_id, cwd) {
-            return crate::t!("skill-manager-remote-error", error = error).into();
+            return crate::t!("skill-manager-remote-error", error = error);
         }
         if inventory_is_empty && query.trim().is_empty() && self.provider_filter.is_none() {
-            return crate::t!("skill-manager-remote-empty").into();
+            return crate::t!("skill-manager-remote-empty");
         }
 
-        crate::t!("skill-manager-empty").into()
+        crate::t!("skill-manager-empty")
     }
 
     fn render_skill_list(

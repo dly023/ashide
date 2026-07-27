@@ -246,23 +246,6 @@ impl LLMInfo {
     pub fn reasoning_level(&self) -> Option<String> {
         self.reasoning_level.clone()
     }
-
-    #[cfg(feature = "integration_tests")]
-    fn new_for_test(llm_name: &str) -> Self {
-        Self {
-            display_name: llm_name.to_string(),
-            base_model_name: llm_name.to_string(),
-            id: llm_name.into(),
-            reasoning_level: None,
-            description: None,
-            disable_reason: None,
-            vision_supported: false, // Default to false for tests
-            spec: None,
-            provider: LLMProvider::Unknown,
-            host_configs: HashMap::new(),
-            context_window: LLMContextWindow::default(),
-        }
-    }
 }
 
 /// The set of LLMs available for a feature.
@@ -319,15 +302,6 @@ impl AvailableLLMs {
     fn default_llm_info(&self) -> &LLMInfo {
         self.info_for_id(&self.default_id)
             .expect("Default LLM ID must be present in choices")
-    }
-
-    #[cfg(feature = "integration_tests")]
-    pub fn new_for_test(llm_name: &str) -> Self {
-        Self {
-            default_id: llm_name.into(),
-            choices: vec![LLMInfo::new_for_test(llm_name)],
-            preferred_codex_model_id: None,
-        }
     }
 }
 
@@ -516,15 +490,13 @@ impl LLMPreferences {
             map
         };
 
-        let me = Self {
+        Self {
             models_by_feature,
             last_update: None,
             base_llm_for_terminal_view,
             reasoning_effort_per_terminal: HashMap::new(),
             last_used_reasoning,
-        };
-
-        me
+        }
     }
 
     /// Returns the `LLMInfo` for the base LLM to be used for an Agent Mode request.

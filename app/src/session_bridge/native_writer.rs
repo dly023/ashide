@@ -493,7 +493,7 @@ fn build_codex_native_session_write_plan(
     let project_path = project_context.as_str().to_owned();
     let title = native_title(session);
     let first_user_message = first_user_message(session).unwrap_or_else(|| title.clone());
-    let rollout_path = codex_rollout_path_for_root(&root, &sid, now);
+    let rollout_path = codex_rollout_path_for_root(root, &sid, now);
 
     let mut rows = vec![json!({
         "timestamp": timestamp,
@@ -525,7 +525,7 @@ fn build_codex_native_session_write_plan(
         contents: jsonl_values_to_bytes(&rows)?,
     }];
     operations.push(NativeSessionWriteOperation::Append {
-        path: native_join(&root, &["session_index.jsonl"]),
+        path: native_join(root, &["session_index.jsonl"]),
         contents: jsonl_value_to_bytes(&json!({
             "id": sid,
             "thread_name": title,
@@ -533,7 +533,7 @@ fn build_codex_native_session_write_plan(
         }))?,
     });
     operations.push(NativeSessionWriteOperation::Append {
-        path: native_join(&root, &["history.jsonl"]),
+        path: native_join(root, &["history.jsonl"]),
         contents: jsonl_value_to_bytes(&json!({
             "session_id": sid,
             "ts": now.timestamp(),
@@ -575,7 +575,7 @@ fn build_claude_native_session_write_plan(
     let project_path = project_context.as_str().to_owned();
     let title = native_title(session);
     let project_slug = project_to_claude_slug(&project_path);
-    let project_dir = native_join(&root, &["projects", &project_slug]);
+    let project_dir = native_join(root, &["projects", &project_slug]);
     let sid = seed.session_id.clone();
     let session_filename = format!("{sid}.jsonl");
     let session_file = native_join(&project_dir, &[&session_filename]);
@@ -596,7 +596,7 @@ fn build_claude_native_session_write_plan(
             "type": message.role,
             "uuid": row_uuid,
             "timestamp": row_timestamp,
-            "message": claude_message_payload(&message.role, &message.text, &row_uuid),
+            "message": claude_message_payload(&message.role, &message.text, row_uuid),
         }));
         parent_uuid = Some(row_uuid.clone());
         leaf_uuid = Some(row_uuid.clone());
@@ -609,7 +609,7 @@ fn build_claude_native_session_write_plan(
             contents: jsonl_values_to_bytes(&rows)?,
         },
         NativeSessionWriteOperation::Append {
-            path: native_join(&root, &["history.jsonl"]),
+            path: native_join(root, &["history.jsonl"]),
             contents: jsonl_value_to_bytes(&json!({
                 "display": title,
                 "pastedContents": {},
@@ -1243,9 +1243,10 @@ fn backup_paths(home_dir: &Path, paths: &[PathBuf]) -> Result<PathBuf, SessionBr
 fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), SessionBridgeError> {
     for entry in WalkDir::new(source).follow_links(false) {
         let entry = entry.map_err(|error| SessionBridgeError::Io(error.into()))?;
-        let relative_path = entry.path().strip_prefix(source).map_err(|error| {
-            SessionBridgeError::Io(std::io::Error::new(std::io::ErrorKind::Other, error))
-        })?;
+        let relative_path = entry
+            .path()
+            .strip_prefix(source)
+            .map_err(|error| SessionBridgeError::Io(std::io::Error::other(error)))?;
         let target = destination.join(relative_path);
         if entry.file_type().is_dir() {
             fs::create_dir_all(&target)?;

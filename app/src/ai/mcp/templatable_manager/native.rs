@@ -1781,6 +1781,55 @@ fn make_client_info() -> rmcp::model::ClientInfo {
     }
 }
 
+/// A wrapper around a [`rmcp::transport::Transport`] that logs all requests and responses.
+struct TransportLoggingWrapper<T> {
+    transport: T,
+    logger: SimpleLogger,
+}
+
+impl<T: rmcp::transport::Transport<R>, R: rmcp::service::ServiceRole> rmcp::transport::Transport<R>
+    for TransportLoggingWrapper<T>
+{
+    type Error = T::Error;
+
+    fn send(
+        &mut self,
+        item: rmcp::service::TxJsonRpcMessage<R>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        if let Ok(json) = serde_json::to_string(&item) {
+            self.logger
+                .log(format!("[info] MCP: Sending request: {json}"));
+        }
+
+        let logger = self.logger.clone();
+        self.transport.send(item).map(move |result| {
+            if let Err(e) = &result {
+                logger.log(format!("[warn] MCP: Failed to send request: {e:#}"));
+            }
+            result
+        })
+    }
+
+    fn receive(
+        &mut self,
+    ) -> impl Future<Output = Option<rmcp::service::RxJsonRpcMessage<R>>> + Send {
+        let logger = self.logger.clone();
+        async move {
+            let result = self.transport.receive().await;
+            if let Some(item) = &result {
+                if let Ok(json) = serde_json::to_string(item) {
+                    logger.log(format!("[info] MCP: Received response: {json}"));
+                }
+            }
+            result
+        }
+    }
+
+    fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        self.transport.close()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2130,54 +2179,5 @@ except Exception:
                 "fixture should crash only on the first attempt"
             );
         });
-    }
-}
-
-/// A wrapper around a [`rmcp::transport::Transport`] that logs all requests and responses.
-struct TransportLoggingWrapper<T> {
-    transport: T,
-    logger: SimpleLogger,
-}
-
-impl<T: rmcp::transport::Transport<R>, R: rmcp::service::ServiceRole> rmcp::transport::Transport<R>
-    for TransportLoggingWrapper<T>
-{
-    type Error = T::Error;
-
-    fn send(
-        &mut self,
-        item: rmcp::service::TxJsonRpcMessage<R>,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
-        if let Ok(json) = serde_json::to_string(&item) {
-            self.logger
-                .log(format!("[info] MCP: Sending request: {json}"));
-        }
-
-        let logger = self.logger.clone();
-        self.transport.send(item).map(move |result| {
-            if let Err(e) = &result {
-                logger.log(format!("[warn] MCP: Failed to send request: {e:#}"));
-            }
-            result
-        })
-    }
-
-    fn receive(
-        &mut self,
-    ) -> impl Future<Output = Option<rmcp::service::RxJsonRpcMessage<R>>> + Send {
-        let logger = self.logger.clone();
-        async move {
-            let result = self.transport.receive().await;
-            if let Some(item) = &result {
-                if let Ok(json) = serde_json::to_string(item) {
-                    logger.log(format!("[info] MCP: Received response: {json}"));
-                }
-            }
-            result
-        }
-    }
-
-    fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
-        self.transport.close()
     }
 }

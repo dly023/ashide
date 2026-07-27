@@ -109,27 +109,6 @@ fn active_flags_for_channel(channel: &str) -> HashSet<FeatureFlag> {
     flags
 }
 
-#[cfg(test)]
-mod tests {
-    use super::active_flags_for_channel;
-
-    #[test]
-    fn oss_settings_schema_uses_release_flags() {
-        assert_eq!(
-            active_flags_for_channel("oss"),
-            active_flags_for_channel("stable")
-        );
-    }
-
-    #[test]
-    fn local_settings_schema_uses_dev_flags() {
-        assert_eq!(
-            active_flags_for_channel("local"),
-            active_flags_for_channel("dev")
-        );
-    }
-}
-
 /// Creates intermediate hierarchy objects so that a setting at e.g.
 /// `appearance.text` is nested under `properties.appearance.properties.text.properties`.
 fn ensure_hierarchy<'a>(
@@ -285,5 +264,26 @@ fn main() {
         eprintln!("Wrote {entry_count} settings to {path}");
     } else {
         println!("{output}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::active_flags_for_channel;
+
+    #[test]
+    fn oss_settings_schema_uses_release_flags() {
+        assert_eq!(
+            active_flags_for_channel("oss"),
+            active_flags_for_channel("stable")
+        );
+    }
+
+    #[test]
+    fn local_settings_schema_uses_dev_flags() {
+        assert_eq!(
+            active_flags_for_channel("local"),
+            active_flags_for_channel("dev")
+        );
     }
 }

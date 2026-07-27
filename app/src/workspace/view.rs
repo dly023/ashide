@@ -21,10 +21,10 @@ use self::vertical_tabs::{render_detail_sidecar, VerticalTabsPanelState};
 use crate::workspace::cross_window_tab_drag::{
     AttachTarget, CrossWindowTabDrag, DragResult, DropResult, GhostState,
 };
-use crate::workspace::environment_backend::SessionRestoreFinalizeOutcome;
 use crate::workspace::environment_provider;
 use crate::workspace::environment_table::{
-    PendingMaterialization, PendingMaterializationStage, SessionRestoreFinalizeResult,
+    MaterializationCompletion, MaterializationError, MaterializationOutcome,
+    PendingMaterialization, PendingMaterializationStage,
 };
 pub(crate) use onboarding::OnboardingTutorial;
 
@@ -2529,7 +2529,7 @@ impl Workspace {
                 // Only update the title if it was actually changed. Otherwise, lets assume
                 // user's intend was to cancel the operation.
                 if view.display_title(ctx) != title {
-                    view.set_title(&title, ctx);
+                    view.set_title(title, ctx);
                     true
                 } else {
                     false
@@ -2738,8 +2738,7 @@ impl Workspace {
     fn build_auth_override_warning_modal(
         ctx: &mut ViewContext<Self>,
     ) -> ViewHandle<AuthOverrideWarningModal> {
-        let auth_override_warning_modal =
-            ctx.add_typed_action_view(|ctx| AuthOverrideWarningModal::new(ctx));
+        let auth_override_warning_modal = ctx.add_typed_action_view(AuthOverrideWarningModal::new);
 
         ctx.subscribe_to_view(&auth_override_warning_modal, |me, _, (), ctx| {
             me.current_workspace_state.is_auth_override_modal_open = false;
@@ -9092,7 +9091,7 @@ impl Workspace {
             ctx,
         );
 
-        if let Some(target) = self.environment_runtime_target_for_authority(&authority) {
+        if let Some(target) = self.environment_runtime_target_for_authority(authority) {
             let root = session
                 .cwd
                 .as_deref()
@@ -9316,29 +9315,15 @@ impl Workspace {
             return false;
         }
 
-        let Some(live_session) = self
-            .live_workspace_sessions(ctx)
-            .into_iter()
-            .find(|session| session.container_uuid.as_deref() == Some(container_uuid.as_slice()))
-        else {
-            log::error!(
-                "finalize_delivered_workspace_session_restore_container: bound container is absent from live projection"
-            );
-            return false;
-        };
         let mut session_keys = source.observed_identity_keys();
         session_keys.extend(source_identity_keys);
-        session_keys.extend(live_session.observed_identity_keys());
         session_keys.sort();
         session_keys.dedup();
-        self.dispatch_session_navigator_state_action(
-            session_navigator_reducer::SessionNavigatorAction::RestoreStarted {
-                session_keys,
-                selected_logical_key: Some(Self::workspace_session_logical_key(source)),
-            },
+        self.commit_session_navigator_restore_started_after_delivery(
+            session_keys,
+            Some(Self::workspace_session_logical_key(source)),
             ctx,
         );
-        self.sync_session_navigator_sessions(ctx);
         ctx.dispatch_global_action("workspace:save_app", ());
         true
     }
@@ -10635,25 +10620,25 @@ impl Workspace {
                         }
                         TerminalPaneReplacementPhase::RolledBack { terminal_pane_id } => {
                             let transition = environments
-                                .finalize_transition_for_pane(authority, terminal_pane_id)
+                                .completion_transition_for_pane(authority, terminal_pane_id)
                                 .expect(
-                                    "failed pane replacement must retain its exact finalize transition",
+                                    "failed pane replacement must retain its exact completion transition",
                                 );
-                            match environments.finalize_session_restore(
+                            match environments.complete_materialization(
                                 transition,
-                                SessionRestoreFinalizeOutcome::RetryableFailure {
+                                MaterializationOutcome::RetryableFailure {
                                     retryable_pane_id: target_pane_id,
                                 },
                             ) {
-                                SessionRestoreFinalizeResult::Applied(_) => {}
-                                SessionRestoreFinalizeResult::Stale => {
+                                MaterializationCompletion::Applied(_) => {}
+                                MaterializationCompletion::Stale => {
                                     panic!(
-                                        "failed pane replacement must not finalize a stale restore generation"
+                                        "failed pane replacement must not complete a stale materialization generation"
                                     );
                                 }
-                                SessionRestoreFinalizeResult::ModelBroken { reason } => {
+                                MaterializationCompletion::Failed(error) => {
                                     panic!(
-                                        "failed pane replacement violated the restore model: {reason}"
+                                        "failed pane replacement violated the materialization model: {error:?}"
                                     );
                                 }
                             }
@@ -10920,18 +10905,18 @@ impl Workspace {
         };
         let transition = self
             .environments
-            .finalize_transition_for_pane(&authority, pane_id)
-            .expect("validated materializing request must retain its exact finalize transition");
+            .completion_transition_for_pane(&authority, pane_id)
+            .expect("validated materialization must retain its exact completion transition");
         let pending = match self
             .environments
-            .finalize_session_restore(transition, SessionRestoreFinalizeOutcome::Success)
+            .complete_materialization(transition, MaterializationOutcome::Success)
         {
-            SessionRestoreFinalizeResult::Applied(pending) => pending,
-            SessionRestoreFinalizeResult::Stale => {
-                panic!("runtime terminal completion used a stale restore generation");
+            MaterializationCompletion::Applied(pending) => pending,
+            MaterializationCompletion::Stale => {
+                panic!("runtime terminal completion used a stale materialization generation");
             }
-            SessionRestoreFinalizeResult::ModelBroken { reason } => {
-                panic!("runtime terminal completion violated the restore model: {reason}");
+            MaterializationCompletion::Failed(error) => {
+                panic!("runtime terminal completion violated the materialization model: {error:?}");
             }
         };
         self.apply_pending_environment_runtime_entry_to_terminal(
@@ -10974,24 +10959,26 @@ impl Workspace {
                 pane_id,
                 |queued_pane_id| {
                     let transition = environments
-                        .finalize_transition_for_pane(&authority, pane_id)
+                        .completion_transition_for_pane(&authority, pane_id)
                         .expect(
-                            "failed runtime terminal must retain its exact finalize transition",
+                            "failed runtime terminal must retain its exact completion transition",
                         );
-                    match environments.finalize_session_restore(
+                    match environments.complete_materialization(
                         transition,
-                        SessionRestoreFinalizeOutcome::RetryableFailure {
+                        MaterializationOutcome::RetryableFailure {
                             retryable_pane_id: queued_pane_id,
                         },
                     ) {
-                        SessionRestoreFinalizeResult::Applied(_) => {}
-                        SessionRestoreFinalizeResult::Stale => {
+                        MaterializationCompletion::Applied(_) => {}
+                        MaterializationCompletion::Stale => {
                             panic!(
-                                "failed runtime terminal must not finalize a stale restore generation"
+                                "failed runtime terminal must not complete a stale materialization generation"
                             );
                         }
-                        SessionRestoreFinalizeResult::ModelBroken { reason } => {
-                            panic!("failed runtime terminal violated the restore model: {reason}");
+                        MaterializationCompletion::Failed(error) => {
+                            panic!(
+                                "failed runtime terminal violated the materialization model: {error:?}"
+                            );
                         }
                     }
                 },
@@ -11017,22 +11004,22 @@ impl Workspace {
     ) {
         let Some(transition) = self
             .environments
-            .finalize_transition_for_pane(authority, materialization_pane_id)
+            .completion_transition_for_pane(authority, materialization_pane_id)
         else {
             return;
         };
         match self
             .environments
-            .finalize_session_restore(transition, SessionRestoreFinalizeOutcome::CarrierMissing)
+            .complete_materialization(transition, MaterializationOutcome::CarrierMissing)
         {
-            SessionRestoreFinalizeResult::Applied(_) => {
-                panic!("carrier-missing restore transition must never consume canonical state");
+            MaterializationCompletion::Applied(_) => {
+                panic!("carrier-missing materialization must never consume canonical state");
             }
-            SessionRestoreFinalizeResult::Stale => {
-                panic!("carrier-missing restore transition used a stale generation");
+            MaterializationCompletion::Stale => {
+                panic!("carrier-missing materialization used a stale generation");
             }
-            SessionRestoreFinalizeResult::ModelBroken { reason } => {
-                panic!("discarding runtime materialization violated the restore model: {reason}");
+            MaterializationCompletion::Failed(MaterializationError::CarrierMissing) => {
+                panic!("runtime materialization lost its canonical carrier");
             }
         }
     }
@@ -11045,20 +11032,20 @@ impl Workspace {
     ) {
         let Some(transition) = self
             .environments
-            .finalize_transition_for_pane(authority, pane_id)
+            .completion_transition_for_pane(authority, pane_id)
         else {
             return;
         };
         let pending = match self
             .environments
-            .finalize_session_restore(transition, SessionRestoreFinalizeOutcome::Cancelled)
+            .complete_materialization(transition, MaterializationOutcome::Cancelled)
         {
-            SessionRestoreFinalizeResult::Applied(pending) => pending,
-            SessionRestoreFinalizeResult::Stale => {
-                panic!("explicit restore cancellation used a stale generation");
+            MaterializationCompletion::Applied(pending) => pending,
+            MaterializationCompletion::Stale => {
+                panic!("explicit materialization cancellation used a stale generation");
             }
-            SessionRestoreFinalizeResult::ModelBroken { reason } => {
-                panic!("cancelling runtime materialization violated the restore model: {reason}");
+            MaterializationCompletion::Failed(error) => {
+                panic!("cancelling materialization violated the model: {error:?}");
             }
         };
         self.clear_cancelled_pending_environment_runtime_side_effects(pending, ctx);
@@ -24620,7 +24607,7 @@ impl Workspace {
     fn current_environment_for_strip(&self, ctx: &AppContext) -> EnvironmentSnapshot {
         match self.current_environment().as_ref() {
             Some(environment)
-                if Self::should_preserve_current_environment_for_strip(&environment) =>
+                if Self::should_preserve_current_environment_for_strip(environment) =>
             {
                 let mut environment = environment.clone();
                 let sanitized_active_workspace_root =
@@ -24955,9 +24942,9 @@ impl Workspace {
 
         let hoverable = Hoverable::new(MouseStateHandle::default(), |state| {
             let icon_color = if is_active {
-                theme.main_text_color(theme.background()).into()
+                theme.main_text_color(theme.background())
             } else {
-                theme.sub_text_color(theme.background()).into()
+                theme.sub_text_color(theme.background())
             };
             let kind_icon = ConstrainedBox::new(kind_icon.to_warpui_icon(icon_color).finish())
                 .with_width(13.)
@@ -24982,7 +24969,7 @@ impl Workspace {
 
             if let Some(label) = label.clone() {
                 row.add_child(
-                    Text::new_inline(label, ui_font_family.clone(), 12.)
+                    Text::new_inline(label, ui_font_family, 12.)
                         .with_color(if is_active {
                             theme.main_text_color(theme.background()).into()
                         } else {
@@ -24997,7 +24984,7 @@ impl Workspace {
 
             if has_runtime_controls {
                 let disconnect_authority_key = authority_key.clone();
-                let disconnect_icon_color = theme.sub_text_color(theme.background()).into();
+                let disconnect_icon_color = theme.sub_text_color(theme.background());
                 let close_icon = ConstrainedBox::new(
                     icons::Icon::X
                         .to_warpui_icon(disconnect_icon_color)
@@ -25347,7 +25334,7 @@ impl Workspace {
                         appearance.ui_font_family(),
                         11.,
                     )
-                    .with_color(theme.ui_error_color().into())
+                    .with_color(theme.ui_error_color())
                     .finish(),
                 );
             }
@@ -25363,7 +25350,7 @@ impl Workspace {
                     appearance.ui_font_family(),
                     11.,
                 )
-                .with_color(theme.ui_error_color().into())
+                .with_color(theme.ui_error_color())
                 .finish(),
             );
         } else if is_loading {
@@ -25399,7 +25386,7 @@ impl Workspace {
                 .finish(),
         );
 
-        let popover = ConstrainedBox::new(
+        (ConstrainedBox::new(
             Container::new(list.finish())
                 .with_background(theme.surface_1())
                 .with_border(
@@ -25413,9 +25400,7 @@ impl Workspace {
                 .finish(),
         )
         .with_width(ENVIRONMENT_PROVIDER_PICKER_WIDTH)
-        .finish();
-
-        popover
+        .finish()) as _
     }
 
     fn render_environment_provider_picker_dismiss_target(
@@ -25458,9 +25443,9 @@ impl Workspace {
                 .clone(),
             move |state| {
                 let icon_color = if picker_open || state.is_hovered() {
-                    theme.main_text_color(theme.background()).into()
+                    theme.main_text_color(theme.background())
                 } else {
-                    theme.sub_text_color(theme.background()).into()
+                    theme.sub_text_color(theme.background())
                 };
                 let server_icon =
                     ConstrainedBox::new(icons::Icon::Server01.to_warpui_icon(icon_color).finish())
@@ -25468,7 +25453,7 @@ impl Workspace {
                         .with_height(13.)
                         .finish();
 
-                let chip = ConstrainedBox::new(
+                (ConstrainedBox::new(
                     Container::new(server_icon)
                         .with_background(if picker_open || state.is_hovered() {
                             if picker_open {
@@ -25495,8 +25480,7 @@ impl Workspace {
                 )
                 .with_width(ENVIRONMENT_STRIP_ADD_PROVIDER_CHIP_WIDTH)
                 .with_height(ENVIRONMENT_STRIP_CHIP_HEIGHT)
-                .finish();
-                chip
+                .finish()) as _
             },
         )
         .on_hover(|is_hovered, ctx, _, _| {

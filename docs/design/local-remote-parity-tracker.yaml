@@ -5299,35 +5299,35 @@ items:
     evidence: live_workspace_sessions 的 terminal 与 runtime placeholder 只投影 PaneConfiguration.session_binding；Started/SessionUpdated 先刷新同一 owner 再 dispatch workspace:save_app；旧 apply_registered_cli_agent_session_to_live_snapshot、placeholder metadata reconstruction 和 render-time enrichment 已删除
 - id: LR-177
   status: verified
-  category: workspace_session_restore_rollback
+  category: environment_entry_materialization_completion
   discovered_at: '2026-07-23'
-  summary: restore finalize 的多个 false/error 分支只记录日志或 return，未由统一 lifecycle owner rollback/requeue materializing placeholder；失败、取消与 carrier missing 可能留下不一致的 pending/visible state。
-  root_cause: deliver/materialize/finalize 分散持有完成语义，错误边界没有类型化 result 与唯一 cleanup transition。
-  target_invariant: local/runtime 共用 restore state machine；deliver 后每个 pending target 必有 canonical carrier；success 原子替换 carrier，failure 可重试地 requeue，cancel 显式移除，carrier missing 视为模型破坏而非静默 return。
+  summary: 通用 PendingMaterialization 可承载五类 EnvironmentEntryIntent，但完成协议错误命名为 SessionRestoreFinalize* 并部分定义在 backend trait 模块；caller 还能注入无生产语义的 ModelBroken outcome。
+  root_cause: 最初只为 restore 补 finalize 后把同一 primitive 扩展到全部 entry，却没有把类型 home 和名称迁到原子拥有 collection/generation 的 EnvironmentTable。
+  target_invariant: EnvironmentTable 唯一拥有 MaterializationTransition/Outcome/Completion/Error；协议覆盖全部 entry intent，CarrierMissing 是 owner 产生的 typed error，caller 不可注入任意 model-broken 状态。
   spec_path: docs/SESSION_NAVIGATOR_SPEC.yaml
-  spec_matrix_id: SN-RESTORE-ATOMIC-FINALIZE-ROLLBACK
-  capability_matrix: 'Workspace session restore: typed finalize rollback and carrier lifecycle'
+  spec_matrix_id: SN-MATERIALIZATION-ATOMIC-COMPLETION-ROLLBACK-61
+  capability_matrix: 'Environment entry materialization: typed completion rollback'
   static_check: script/check_local_remote_parity
   reused_abstractions:
   - EnvironmentBackend::deliver_entry
-  - deliver_workspace_session_restore shared high-level entry
+  - EnvironmentTable pending_materializations
   - Environment runtime placeholder carrier
   removed_parallel_paths:
-  - log_and_return_restore_finalize_failures
+  - SessionRestoreFinalize types
+  - caller_authored_ModelBroken_outcome
+  - log_and_return_finalize_failures
   - backend_specific_cleanup_decisions
-  - carrierless_pending_restore_state
+  - carrierless_pending_state
   shared_paths:
   - app/src/workspace/view.rs
-  - app/src/workspace/environment_backend.rs
-  - app/src/workspace/environment_runtime.rs
+  - app/src/workspace/environment_table.rs
   required_tests:
-  - local_and_runtime_restore_share_success_failure_cancel_transitions
-  - finalize_failure_requeues_original_placeholder_atomically
-  - carrier_missing_fails_closed_without_silent_return
+  - materialization_completion_success_consumes_only_exact_generation
+  - materialization_completion_retry_cancel_and_carrier_missing_are_distinct
   verification:
-    static_check: script/check_local_remote_parity 的 LR-177 gate 输出 finalize path:line/enclosing-function inventory，锁定唯一 EnvironmentTable primitive、全部生产 caller owner、typed outcome 与禁止 Stale 静默 return
-    focused_tests: session_restore_finalize_success_consumes_only_exact_generation；session_restore_finalize_retry_cancel_and_model_broken_are_distinct；test_environment_runtime_pending_materializations_are_pane_owned_queue
-    evidence: EnvironmentTable 原子持有 pending projection 与 monotonic generation；Success/RetryableFailure/Cancelled 各自完成 exact cleanup，CarrierMissing/ModelBroken 保留 canonical owner并 fail closed，生产 caller 无 fallback
+    static_check: pending_reverification
+    focused_tests: pending_reverification
+    evidence: EnvironmentTable 原子持有 pending projection/generation/transition/outcome/completion；全部 entry intent 共享协议，CarrierMissing typed error 保留 canonical owner。
 - id: LR-178
   status: verified
   category: pane_snapshot_impossible_state
@@ -5807,3 +5807,39 @@ items:
     focused_tests: '2026-07-26 `MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo test -p warp --lib --features gui,local_fs cli_agent_jsonl::tests::discovery_candidate_gate_ -- --nocapture` 3/3 通过：JSONL、Jcode/Omp 跨 bucket、Codex index 都在上限外返回 failure，不投影 directory-order partial result。'
     cargo_check: '2026-07-26 `MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs` 通过（仅仓库既有 dead-code/unused warnings）；`./script/run` 从当前 checkout 完整重建、装配并 ad-hoc 签名 target/debug/bundle/osx/AshideDev.app 成功。'
     gui_or_runtime: '2026-07-26 discovery physical-source gate 的行为正确性由三项 focused tests（JSONL / Jcode+Omp 跨 bucket / Codex index 均在上限外返回 typed failure 而非投影 directory-order partial）加 static gate 覆盖。运行时侧：当前活跃 AshideDev 实例对两个授权远端 authority 的 Session Navigator 扫描返回有界结果（分别为 45 与 14 个 sessions），未出现无界枚举或 partial subset 投影。为避免中断正在该实例内运行的 agent 会话（单实例锁），未强制以本次新构建重启覆盖旧进程；新 bundle 的 clean-launch 覆盖验证委托用户在方便时执行，不虚称已在新进程内观察到窗口像素。'
+- id: LR-190
+  status: in_progress
+  category: session_navigator_resume_main_thread_blocking
+  discovered_at: '2026-07-27'
+  summary: "Resume 点击在 UI action 内先调用 session_navigator_sessions_for_display_update，全量遍历 tabs/panes 并构造 terminal snapshots；delivery finalize 又重复 Refresh，pane 数量与 terminal 状态增长后长时间阻塞 UI。"
+  root_cause: "已渲染 action target 本已属于 committed SessionNavigatorModel，但 action 沿用了 source mutation 的 speculative refresh 边界；carrier delivery 后又把 identity bind 与 canonical sync 拆成两次全量 projection。半截修复只删了 activate 内的 display-update 调用，却把同样的 full Refresh 藏进 lifecycle dispatch 的 session_navigator_action_model，并把 live_or_pending 继续建在 live_workspace_sessions/PaneGroup::snapshot 上。"
+  target_invariant: "Resume 直接消费 committed model；Navigator live projection 只读 PaneConfiguration/tab Environment；lifecycle dispatch 不嵌套 action-time Refresh；backend delivery 后只做一次 canonical Refresh + RestoreStarted 原子提交。"
+  spec_path: docs/SESSION_NAVIGATOR_SPEC.yaml
+  spec_matrix_id: SN-RESUME-COMMITTED-ACTION-HOT-PATH-64
+  capability_matrix: 'Session Navigator Resume committed hot path'
+  static_check: script/check_local_remote_parity
+  reused_abstractions: [SessionNavigatorModel, EnvironmentTable, SessionNavigatorReducer, PaneSessionBinding, PaneConfiguration]
+  removed_parallel_paths: [session_navigator_sessions_for_display_update Resume path, lifecycle dispatch session_navigator_action_model, live_or_pending live_workspace_sessions, PaneGroup::snapshot Navigator live projection, duplicate post-delivery sync]
+  shared_paths: [app/src/workspace/view/session_navigator.rs, app/src/workspace/view.rs]
+  required_tests: [resume_action_consumes_committed_model_without_action_time_refresh]
+  verification:
+    static_check: '2026-07-27 `./script/check_local_remote_parity` LR-190 function-body gates pass：Activate/lifecycle dispatch 只读 committed model；live_workspace_sessions 禁止 PaneGroup::snapshot/from_tabs；live_or_pending 只读 PaneConfiguration binding；finalize 唯一走 commit_session_navigator_restore_started_after_delivery。completion gate 仍因 LR-190/191 未 GUI verified 保持 in_progress。'
+    focused_tests: '2026-07-27 `MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo test -p warp --lib resume_action_consumes_committed_model_without_action_time_refresh` 通过。'
+    cargo_check: '2026-07-27 `MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check` 通过。'
+    gui_or_runtime: pending
+- id: LR-191
+  status: in_progress
+  category: session_navigator_status_semantics
+  discovered_at: '2026-07-27'
+  summary: "v34 为避免 generic live 点被误解为 Agent running，直接删除 live/focused 状态，只保留 structured InProgress/Blocked；用户因此无法扫视哪些会话仍在运行容器中、哪个是当前活跃会话。"
+  root_cause: "把 existence/focus 与 Agent execution 的语义冲突用信息删除处理，没有建立正交 owner 与显式视觉优先级。"
+  target_invariant: "badge 穷尽表达 Restoring、Attention、Running、FocusedLive、BackgroundLive、HistoricalQuiet；execution 不从 live 推断，live/focus 也不因缺 structured status 消失。"
+  spec_path: docs/SESSION_NAVIGATOR_SPEC.yaml
+  spec_matrix_id: SN-LIVE-CLI-AGENT-ACTIVITY-63
+  capability_matrix: 'Session Navigator orthogonal status projection'
+  static_check: script/check_local_remote_parity
+  reused_abstractions: [PaneConfiguration.container_uuid, CLIAgentSessionsModel, WorkspaceSessionSnapshot.is_live_container, WorkspaceSessionSnapshot.is_active]
+  removed_parallel_paths: [structured-status-only badge suppression, ambiguous generic activity naming]
+  shared_paths: [app/src/workspace/view/vertical_tabs.rs, app/src/pane_group/mod.rs]
+  required_tests: [session_status_badge_has_explicit_semantic_precedence, activity_resolver_uses_container_identity_not_locator]
+  verification: {}

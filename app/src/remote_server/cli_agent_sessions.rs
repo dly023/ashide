@@ -197,7 +197,7 @@ fn ensure_allowed(path: &str, roots: &CliAgentStoreRoots) -> Result<PathBuf, Str
         return Ok(resolved);
     }
     for root in &allowed {
-        if resolved == *root || resolved.starts_with(&path_with_sep(root)) {
+        if resolved == *root || resolved.starts_with(path_with_sep(root)) {
             return Ok(resolved);
         }
     }

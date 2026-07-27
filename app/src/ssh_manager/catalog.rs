@@ -27,13 +27,6 @@ pub enum SshTargetCatalogEntry {
 }
 
 impl SshTargetCatalogEntry {
-    pub fn identity(&self) -> &str {
-        match self {
-            Self::Saved { server, .. } => server.node_id.as_str(),
-            Self::Config(candidate) => candidate.alias.as_str(),
-        }
-    }
-
     pub fn stable_identity(&self) -> String {
         match self {
             Self::Saved { server, .. } => format!("saved:{}", server.node_id),
@@ -45,13 +38,6 @@ impl SshTargetCatalogEntry {
         match self {
             Self::Saved { name, server } => Some((name, server)),
             Self::Config(_) => None,
-        }
-    }
-
-    pub fn config(&self) -> Option<&SshConfigCandidate> {
-        match self {
-            Self::Saved { .. } => None,
-            Self::Config(candidate) => Some(candidate),
         }
     }
 }
@@ -146,12 +132,9 @@ impl SshTargetCatalog {
         self.error.as_deref()
     }
 
+    #[cfg(test)]
     pub fn active_intent(&self) -> Option<SshTargetCatalogRefreshIntent> {
         self.active_intent
-    }
-
-    pub fn generation(&self) -> u64 {
-        self.committed_generation
     }
 
     pub fn config_open_target(&self) -> Option<&Path> {

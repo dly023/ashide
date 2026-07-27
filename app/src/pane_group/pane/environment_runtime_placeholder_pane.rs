@@ -205,7 +205,7 @@ impl View for EnvironmentRuntimePlaceholderView {
         let lifecycle_state = self.lifecycle_state(app);
         let (title, detail) = Self::placeholder_copy(lifecycle_state.as_ref());
         let title_color = if matches!(lifecycle_state, Some(EnvironmentLifecycleState::Error)) {
-            appearance.theme().ui_error_color().into()
+            appearance.theme().ui_error_color()
         } else {
             color.into()
         };

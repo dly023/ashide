@@ -680,12 +680,14 @@ fn same_host_session_churn_does_not_switch_buffer_connection() {
         let pushed_server_version = ContentVersion::from_raw(11);
         model.update(&mut app, |model, ctx| {
             model.handle_buffer_updated_push(
-                foreign_session_id,
-                &host_id,
-                environment_file_path.path.as_str(),
-                pushed_server_version.as_u64(),
-                0,
-                &[],
+                BufferUpdatedPush {
+                    session_id: foreign_session_id,
+                    host_id: &host_id,
+                    path: environment_file_path.path.as_str(),
+                    new_server_version: pushed_server_version.as_u64(),
+                    expected_client_version: 0,
+                    edits: &[],
+                },
                 ctx,
             );
         });
@@ -702,12 +704,14 @@ fn same_host_session_churn_does_not_switch_buffer_connection() {
 
         model.update(&mut app, |model, ctx| {
             model.handle_buffer_updated_push(
-                bound_session_id,
-                &host_id,
-                environment_file_path.path.as_str(),
-                pushed_server_version.as_u64(),
-                0,
-                &[],
+                BufferUpdatedPush {
+                    session_id: bound_session_id,
+                    host_id: &host_id,
+                    path: environment_file_path.path.as_str(),
+                    new_server_version: pushed_server_version.as_u64(),
+                    expected_client_version: 0,
+                    edits: &[],
+                },
                 ctx,
             );
         });

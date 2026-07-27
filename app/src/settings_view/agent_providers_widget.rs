@@ -1437,7 +1437,7 @@ impl AgentProvidersWidget {
                 appearance.ui_font_family(),
                 appearance.ui_font_size(),
             )
-            .with_color(appearance.theme().ansi_fg_green().into())
+            .with_color(appearance.theme().ansi_fg_green())
             .finish()
         } else if has_endpoint {
             Text::new(
@@ -1445,7 +1445,7 @@ impl AgentProvidersWidget {
                 appearance.ui_font_family(),
                 appearance.ui_font_size(),
             )
-            .with_color(appearance.theme().ansi_fg_green().into())
+            .with_color(appearance.theme().ansi_fg_green())
             .finish()
         } else {
             Text::new(

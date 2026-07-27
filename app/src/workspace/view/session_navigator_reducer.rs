@@ -701,7 +701,7 @@ fn decide_delete_effects(
     if let Some(info) = tab_info {
         if info.visible_pane_count > 1 {
             // 多 pane tab → focus 同 group 兄弟, ClosePane
-            let focus = info.prev_pane_locator.clone().or_else(|| {
+            let focus = info.prev_pane_locator.or_else(|| {
                 info.all_pane_locators.iter().find_map(|locator| {
                     if deleted_locator
                         .as_ref()
@@ -709,7 +709,7 @@ fn decide_delete_effects(
                     {
                         None
                     } else {
-                        Some(locator.clone())
+                        Some(*locator)
                     }
                 })
             });
@@ -829,7 +829,7 @@ pub fn reduce(
                             if leaf < info.all_pane_locators.len() {
                                 state.selected_row_id = Some(row_id.clone());
                                 state.restoring_row_ids.remove(&row_id);
-                                SideEffect::FocusPane(info.all_pane_locators[leaf].clone())
+                                SideEffect::FocusPane(info.all_pane_locators[leaf])
                             } else {
                                 SideEffect::None
                             }

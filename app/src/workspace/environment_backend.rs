@@ -35,7 +35,6 @@ use crate::ai::blocklist::agent_view::AgentViewEntryOrigin;
 use crate::app_state::PaneSessionBinding;
 use crate::app_state::{EnvironmentSnapshot, WorkspaceSessionSnapshot};
 use crate::environment_authority::ParsedEnvironmentAuthority;
-use crate::pane_group::PaneId;
 use crate::terminal::view::inline_banner::ZeroStatePromptSuggestionType;
 use crate::workspace::environment_runtime::{
     EnvironmentCliAgentSessionUserState, EnvironmentCliAgentSessionUserStateMutation,
@@ -110,25 +109,6 @@ pub(crate) struct SessionRestoreEntry {
     /// command shape: terminal-bootstrap prefixes cwd; runtime executes it in
     /// the already-rooted remote PTY.
     pub(crate) resume_command: Option<String>,
-}
-
-/// Exact completion token for one pane-owned restore delivery generation.
-/// Local and runtime backends differ only in when they submit this transition.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SessionRestoreFinalizeTransition {
-    pub(crate) authority: String,
-    pub(crate) pane_id: PaneId,
-    pub(crate) generation: u64,
-}
-
-/// The only legal terminal outcomes for a restore delivery attempt.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SessionRestoreFinalizeOutcome {
-    Success,
-    RetryableFailure { retryable_pane_id: PaneId },
-    Cancelled,
-    CarrierMissing,
-    ModelBroken { reason: &'static str },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

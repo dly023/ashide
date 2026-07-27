@@ -2415,12 +2415,9 @@ impl AuthOnboardingState {
         }
 
         // If we didn't transition to Onboarding, set the Terminal state.
-        match self {
-            AuthOnboardingState::Auth(ref args) => {
-                let workspace = args.clone().create_workspace(ctx);
-                *self = AuthOnboardingState::Terminal(workspace);
-            }
-            _ => {}
+        if let AuthOnboardingState::Auth(ref args) = self {
+            let workspace = args.clone().create_workspace(ctx);
+            *self = AuthOnboardingState::Terminal(workspace);
         };
         ctx.emit(RootViewEvent::AuthOnboardingStateChanged);
     }

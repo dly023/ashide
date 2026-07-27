@@ -1878,7 +1878,7 @@ impl ServerFileBrowserView {
             crate::t!("server-file-browser-delete-info-file")
         };
         let path = entry.path.clone();
-        let directory_identity = entry.directory_identity.clone();
+        let directory_identity = entry.directory_identity;
 
         let dialog = AlertDialogWithCallbacks::for_view(
             crate::t!("server-file-browser-delete-title", name = entry.name),
@@ -1890,7 +1890,7 @@ impl ServerFileBrowserView {
                         me.delete_entry_confirmed(
                             path.clone(),
                             is_directory,
-                            directory_identity.clone(),
+                            directory_identity,
                             ctx,
                         );
                     },

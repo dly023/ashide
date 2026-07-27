@@ -69,10 +69,10 @@ impl GetStartedView {
         let project_buttons = ctx.add_typed_action_view(ProjectButtons::new);
         ctx.subscribe_to_view(&project_buttons, Self::handle_project_buttons_event);
 
-        let create_project_view = ctx.add_typed_action_view(|ctx| CreateProjectView::new(ctx));
+        let create_project_view = ctx.add_typed_action_view(CreateProjectView::new);
         ctx.subscribe_to_view(&create_project_view, Self::handle_create_project_event);
 
-        let clone_repo_view = ctx.add_typed_action_view(|ctx| CloneRepoView::new(ctx));
+        let clone_repo_view = ctx.add_typed_action_view(CloneRepoView::new);
         ctx.subscribe_to_view(&clone_repo_view, Self::handle_clone_repo_event);
 
         Self {
@@ -368,9 +368,9 @@ impl BackingView for GetStartedView {
     }
 }
 
-fn update_active_terminal<F, S>(ctx: &mut ViewContext<GetStartedView>, func: F)
+fn update_active_terminal<F>(ctx: &mut ViewContext<GetStartedView>, func: F)
 where
-    F: FnOnce(&mut TerminalView, &mut ViewContext<TerminalView>) -> S,
+    F: FnOnce(&mut TerminalView, &mut ViewContext<TerminalView>),
 {
     let window_id = ctx.window_id();
     if let Some(workspaces) = ctx.views_of_type::<Workspace>(window_id) {

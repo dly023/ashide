@@ -1609,9 +1609,11 @@ impl DiffStateModel {
             .map(|line| format!("+{line}\n"))
             .collect::<String>();
         let line_count = Self::symlink_target_line_count(&target);
-        let no_trailing_newline = (!target.ends_with('\n'))
-            .then_some("\\ No newline at end of file\n")
-            .unwrap_or_default();
+        let no_trailing_newline = if !target.ends_with('\n') {
+            "\\ No newline at end of file\n"
+        } else {
+            Default::default()
+        };
 
         // 内部 patch 故意不插入真实路径：Git 路径允许换行，权威路径已由 FileDiff 单独保存。
         format!(

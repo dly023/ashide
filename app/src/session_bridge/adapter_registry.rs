@@ -64,10 +64,6 @@ const SESSION_BRIDGE_ADAPTERS: &[SessionBridgeAdapter] = &[SessionBridgeAdapter 
     label: "Ashide",
 }];
 
-pub(crate) fn session_bridge_adapters() -> &'static [SessionBridgeAdapter] {
-    SESSION_BRIDGE_ADAPTERS
-}
-
 pub(crate) fn session_bridge_adapter_for_target(
     target: SessionBridgeForkTarget,
 ) -> Option<&'static SessionBridgeAdapter> {

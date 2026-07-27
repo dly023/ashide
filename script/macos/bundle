@@ -153,9 +153,11 @@ function normalize_cargo_bundle_app() {
   local plist_path="$expected_bundle/Contents/Info.plist"
 
   if [[ -d "$cargo_bundle" ]]; then
-    echo "Normalizing cargo-bundle output $cargo_bundle to $expected_bundle"
-    rm -rf "$expected_bundle"
-    mv "$cargo_bundle" "$expected_bundle"
+    if [[ "$cargo_bundle" != "$expected_bundle" ]]; then
+      echo "Normalizing cargo-bundle output $cargo_bundle to $expected_bundle"
+      rm -rf "$expected_bundle"
+      mv "$cargo_bundle" "$expected_bundle"
+    fi
   elif [[ ! -d "$expected_bundle" ]]; then
     echo "Expected app bundle at $expected_bundle or $cargo_bundle" >&2
     exit 1

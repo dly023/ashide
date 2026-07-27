@@ -1170,9 +1170,9 @@ impl SftpBrowserView {
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
-                self.search_filter.as_ref().map_or(true, |filter| {
-                    entry.name.to_lowercase().contains(&filter.to_lowercase())
-                })
+                self.search_filter
+                    .as_ref()
+                    .is_none_or(|filter| entry.name.to_lowercase().contains(&filter.to_lowercase()))
             })
             .map(|(i, _)| i)
             .collect();

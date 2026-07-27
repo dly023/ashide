@@ -261,14 +261,14 @@ fn persisted_tool_result_payloads(
         })
         .into_iter()
         .flat_map(|task| task.messages())
-        .filter_map(|message| {
+        .filter(|message| {
             matches!(
                 message.message.as_ref(),
                 Some(message::Message::ToolCallResult(result))
                     if result.tool_call_id == tool_call_id
             )
-            .then(|| message.server_message_data.clone())
         })
+        .map(|message| message.server_message_data.clone())
         .collect()
 }
 

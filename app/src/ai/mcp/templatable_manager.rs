@@ -598,8 +598,7 @@ mod tests {
     ) -> String {
         rx.await
             .expect("reconnect sender should notify waiter")
-            .err()
-            .expect("reconnect should fail in this test")
+            .unwrap_err()
     }
 
     #[tokio::test]

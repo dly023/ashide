@@ -3,8 +3,8 @@
 # 跨 backend 的共享行为先在此定义，再进入 capability matrix、静态门禁和测试。
 # Session Navigator 的专用状态模型仍以 docs/SESSION_NAVIGATOR_SPEC.yaml 为权威。
 
-spec_version: 42
-last_updated: "2026-07-24"
+spec_version: 43
+last_updated: "2026-07-27"
 
 application_lifecycle_contracts:
   single_gui_process:
@@ -1538,14 +1538,14 @@ ux_matrix:
     negative_space: ["binding known before runtime", "native id arrives after start", "placeholder replacement", "cold restore", "layout reorder", "carrier missing", "save failure"]
     verification_rule: "static checker 禁止 Navigator 查询 session model enrichment；focused tests覆盖事件保存、placeholder/live相同投影和缺 binding fail closed。"
 
-  - id: SESSION-RESTORE-TYPED-FINALIZE-81
+  - id: ENVIRONMENT-MATERIALIZATION-TYPED-COMPLETION-81
     source: LR-177
-    capability: "shared typed restore finalize and rollback"
-    invariant: "EnvironmentTable 原子持有 pending projection 与 monotonic generation；local/runtime 共用 Allocated → Delivering → Live/Retryable/Cancelled 状态机。success 原子替换 carrier，failure 回到 retryable carrier，显式 cancel 移除并 cleanup，carrier missing 独立 fail closed且不消费 canonical owner。"
-    lifecycle: "EnvironmentBackend 只封装 delivery timing；finalize transition 必须包含 exact pane identity、generation 与 Success/RetryableFailure/Cancelled/CarrierMissing/ModelBroken outcome，旧 completion 不得提交且 caller 禁止静默 return。"
-    failure_rule: "禁止 log-and-return、false 表达多种失败、authority-wide drain、silent carrier missing 或 backend-specific rollback。"
-    negative_space: ["local synchronous success", "runtime async success", "delivery failure", "cancel", "stale success", "stale failure", "carrier closed", "unrelated pending carriers"]
-    verification_rule: "状态空间测试逐阶段检查 carrier、pending cardinality、selection 与 order；static checker锁定全部 finalize callers 和禁止静默 return。"
+    capability: "shared typed Environment entry materialization completion and rollback"
+    invariant: "EnvironmentTable 原子持有所有 EnvironmentEntryIntent 的 pending projection、monotonic generation、transition/outcome/completion 类型；local/runtime 共用 Allocated → Delivering → Live/Retryable/Cancelled 状态机。"
+    lifecycle: "Success 消费 exact pending；RetryableFailure 原子绑定 retryable carrier；Cancelled 显式移除；CarrierMissing 返回 typed error 并保留 canonical owner；Stale 不提交。协议类型归 EnvironmentTable，禁止通用 materialization 继续借用 SessionRestore 命名。"
+    failure_rule: "禁止 caller 注入 ModelBroken、log-and-return、false 表达多种失败、authority-wide drain、silent carrier missing、backend-specific rollback 或 backend trait 模块拥有 table transition。"
+    negative_space: ["PlainTerminal", "StartupCommand", "AgentView", "ForkedConversation", "SessionRestore", "local synchronous success", "runtime async success", "delivery failure", "cancel", "stale completion", "carrier closed", "unrelated pending carriers"]
+    verification_rule: "状态空间测试用至少两种非 restore intent 逐阶段检查 carrier、pending cardinality 和 generation；static checker 锁定唯一 EnvironmentTable primitive、全部 caller 与零 SessionRestoreFinalize/ModelBroken outcome。"
 
   - id: PANE-SNAPSHOT-FAIL-CLOSED-82
     source: LR-178
@@ -1611,10 +1611,19 @@ ux_matrix:
     verification_rule: "focused state tests 覆盖 same-key replacement、timer reset/stale generation、burst bounded、ActionRequired stays/dismissable、different-source independence、bounded overflow summary 与 keyed action accessibility contract；static checker 扫描完整生产 Rust 树，输出所有 toast API 的 path:line/enclosing-function inventory，并 fail closed 禁止 caller-selected lifetime、旧 wrapper、新文件或新包装绕路。"
 
   - id: SESSION-NAVIGATOR-LIVE-AGENT-ACTIVITY-87
-    source: LR-185
-    capability: "live CLI agent activity indicator projected onto the Session Navigator icon"
-    invariant: "Session Navigator 的 Agent 活动态只读取当前 live TerminalView 对应的 CLIAgentSessionsModel structured status；稳定 container UUID 是从 Navigator live row 定位 runtime carrier 的唯一身份。InProgress 显示 running，Blocked 显示 attention，Success 和无可信 structured status 均为 quiet/idle。历史 virtual row、普通 terminal、command-only detection 和 stale/missing runtime carrier 不得猜测 running 或 attention。local 与 Environment runtime 使用同一 TerminalView/CLIAgentSessionsModel 投影，差异只允许事件抵达时序。"
-    lifecycle: "PaneConfiguration container UUID → current PaneGroup terminal carrier → CLIAgentSessionsModel structured status → render-only icon indicator。Started/StatusChanged/Ended/SessionUpdated 已经驱动同一 Workspace refresh/notify；状态从 InProgress/Blocked 变为 Success、session 删除、container replacement 或 runtime carrier 缺失时，下一帧移除活动 indicator，不写入 WorkspaceSessionSnapshot、SQLite、alias、selection 或 order。Resume spinner 优先于 activity indicator。"
-    failure_rule: "禁止从 tab/leaf locator、native history metadata、命令文本、PTY 输出、常驻进程 exit 或扫描时间戳推断 agent activity；禁止把 runtime status 写入 PaneConfiguration/SQLite 或把 virtual history row 标成 idle/running；禁止为 local/runtime 新建两套 status registry、UI cache 或 polling loop。"
-    negative_space: ["historical virtual row", "plain terminal", "command-only detection", "unknown agent", "Success idle", "Blocked attention", "container UUID lookup miss", "matching container with agent mismatch", "remote event late arrival", "terminal replacement", "resume spinner", "two unrelated live agent panes"]
-    verification_rule: "focused tests 覆盖 status mapping、idle/virtual no-badge、container UUID-only runtime resolution、agent mismatch rejection 与 resume spinner precedence；static checker 锁定唯一 runtime lookup helper、禁止 activity resolver 使用 locator parser，并要求 Workspace CLI session event handler 继续观察 StatusChanged。"
+    source: LR-191
+    capability: "orthogonal live session and CLI agent execution status projected onto the Session Navigator icon"
+    invariant: "Session Navigator badge 按 Restoring > Attention > Running > FocusedLive > BackgroundLive > HistoricalQuiet 穷尽投影。Agent execution 只读取 stable container UUID 定位的 CLIAgentSessionsModel structured status；focused/live 只读取 committed row。Success 或无可信 structured status 不猜 running，但不得因此删除真实 live/focused 存在态。local/runtime 共用同一投影。"
+    lifecycle: "reducer restore lifecycle、CLIAgentSessionsModel execution、committed WorkspaceSessionSnapshot live/focus 三个 owner 正交输入同一个 render-only badge resolver；任一状态变化只重绘，不写入 SQLite、PaneConfiguration activity、alias、selection 或 order。"
+    failure_rule: "禁止用 live/selected 冒充 Agent running，也禁止为了避免误导而隐藏所有 live/focused 状态；禁止 locator/history/PTY/process inference、持久化 activity、backend-specific registry、polling/cache overlay。"
+    negative_space: ["historical virtual row", "plain live terminal", "command-only live Agent", "Success idle live Agent", "Blocked attention", "InProgress running", "focused live", "background live", "container lookup miss", "resume spinner", "two unrelated live panes"]
+    verification_rule: "focused tests 覆盖完整 badge 优先级、historical quiet、live/focused fallback、container UUID-only execution lookup、agent mismatch 与 Resume precedence；static checker 锁定唯一 resolver 和 StatusChanged refresh。"
+
+  - id: SESSION-NAVIGATOR-RESUME-COMMITTED-HOT-PATH-88
+    source: LR-190
+    capability: "Resume consumes the committed visible row without synchronous full-layout reprojection"
+    invariant: "用户点击已渲染 Resume row 时，action 必须直接消费 EnvironmentTable 已提交 SessionNavigatorModel；禁止在 WarpUI action 内重新遍历全部 tabs/panes、构造 LeafContents/TerminalPaneSnapshot 或重做 indexed/live/history merge。Navigator live projection 只能读取 PaneConfiguration + tab Environment（必要时做轻量 transport/conversation 查询），禁止 PaneGroup::snapshot。lifecycle dispatch（RestoreStarted/Finished、Selection、Pin 等）只读 committed model。delivery 后只允许一次 canonical Refresh+RestoreStarted 原子提交新 carrier 与 lifecycle。"
+    lifecycle: "committed render row → Activate reducer → backend delivery → one post-delivery Refresh/RestoreStarted commit；后台 source/live mutation 在产生可点击 row 前已经通过 sync 提交。"
+    failure_rule: "禁止 action-time speculative Refresh、display-update helper、lifecycle dispatch 内嵌 session_navigator_action_model、live_or_pending 全量 live_workspace_sessions、重复 post-delivery sync、debounce/sleep/list freeze；local/runtime 只允许 delivery timing 不同。"
+    negative_space: ["many tabs and panes", "large terminal block lists", "source changes after last render", "local synchronous carrier", "runtime placeholder", "failure/cancel", "target plus unrelated rows", "indirect live_workspace_sessions from Resume helpers"]
+    verification_rule: "源码测试锁定 Activate/lifecycle dispatch 只读 committed model、live projection 不调用 PaneGroup::snapshot、locator 只读 PaneConfiguration binding、finalize 只做一次 canonical Refresh+RestoreStarted；运行时采样必须证明 Resume 后 UI main thread 不被 pane snapshot/terminal snapshot 长时间占用。"

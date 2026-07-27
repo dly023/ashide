@@ -677,13 +677,8 @@ fn restoring_session_rows_do_not_render_active_like_background_when_idle() {
 }
 
 #[test]
-fn historical_and_idle_session_rows_render_without_activity_badge() {
-    assert_eq!(restored_session_activity_indicator(None), None);
-    assert_eq!(
-        restored_session_activity_indicator(Some(&CLIAgentSessionStatus::Success)),
-        None
-    );
-    assert_eq!(restored_session_icon_badge(false, None), None);
+fn historical_session_rows_render_without_status_badge() {
+    assert_eq!(restored_session_icon_badge(false, false, false, None), None);
 }
 
 #[test]
@@ -698,14 +693,43 @@ fn structured_cli_agent_activity_maps_running_and_attention_only() {
         })),
         Some(RestoredSessionActivityIndicator::Attention)
     );
+    assert_eq!(
+        restored_session_activity_indicator(Some(&CLIAgentSessionStatus::Success)),
+        None
+    );
 }
 
 #[test]
-fn resume_spinner_precedes_live_agent_activity_badge() {
+fn session_status_badge_has_explicit_semantic_precedence() {
     assert_eq!(
-        restored_session_icon_badge(true, Some(RestoredSessionActivityIndicator::Running),),
+        restored_session_icon_badge(
+            true,
+            true,
+            true,
+            Some(RestoredSessionActivityIndicator::Running),
+        ),
         Some(RestoredSessionIconBadge::Resuming)
     );
+    assert_eq!(
+        restored_session_icon_badge(
+            false,
+            true,
+            true,
+            Some(RestoredSessionActivityIndicator::Attention),
+        ),
+        Some(RestoredSessionIconBadge::Activity(
+            RestoredSessionActivityIndicator::Attention
+        ))
+    );
+    assert_eq!(
+        restored_session_icon_badge(false, true, true, None),
+        Some(RestoredSessionIconBadge::FocusedLive)
+    );
+    assert_eq!(
+        restored_session_icon_badge(false, true, false, None),
+        Some(RestoredSessionIconBadge::BackgroundLive)
+    );
+    assert_eq!(restored_session_icon_badge(false, false, false, None), None);
 }
 
 #[test]

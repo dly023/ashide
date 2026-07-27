@@ -475,8 +475,6 @@ fn parallel_conversions_do_not_cross_bind_target_identity() {
 fn local_and_runtime_share_lifecycle_and_split_only_at_transport() {
     use crate::terminal::CLIAgent;
 
-    use super::adapter_registry::SessionBridgeForkTarget;
-
     let source = sample_session();
     let target_id = "11111111-1111-4111-8111-111111111111".to_owned();
     let intent = SessionBridgeIntent::Attach {

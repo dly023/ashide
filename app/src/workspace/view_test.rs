@@ -9326,11 +9326,9 @@ fn test_environment_runtime_pending_materializations_are_pane_owned_queue() {
                 2
             );
 
-            let SessionRestoreFinalizeResult::Applied(consumed_second) =
-                workspace.environments.finalize_session_restore(
-                    second_transition,
-                    SessionRestoreFinalizeOutcome::Success,
-                )
+            let MaterializationCompletion::Applied(consumed_second) = workspace
+                .environments
+                .complete_materialization(second_transition, MaterializationOutcome::Success)
             else {
                 panic!("second pane may bootstrap independently of the first");
             };
@@ -9341,9 +9339,9 @@ fn test_environment_runtime_pending_materializations_are_pane_owned_queue() {
                     if restore.session.id == second_restore.session.id
             ));
 
-            let SessionRestoreFinalizeResult::Applied(consumed_first) = workspace
+            let MaterializationCompletion::Applied(consumed_first) = workspace
                 .environments
-                .finalize_session_restore(first_transition, SessionRestoreFinalizeOutcome::Success)
+                .complete_materialization(first_transition, MaterializationOutcome::Success)
             else {
                 panic!("first pane commits only after its own bootstrap");
             };
@@ -17671,6 +17669,92 @@ fn test_session_navigator_source_and_user_state_use_environment_backend() {
         .0;
     assert!(indexed.contains("self.environments"));
     assert!(!indexed.contains("uses_terminal_bootstrap"));
+}
+
+#[test]
+fn resume_action_consumes_committed_model_without_action_time_refresh() {
+    const NAVIGATOR_RS: &str = include_str!("view/session_navigator.rs");
+    const VIEW_RS: &str = include_str!("view.rs");
+
+    let activate = NAVIGATOR_RS
+        .split_once("fn activate_restored_workspace_session(")
+        .expect("Resume action boundary must exist")
+        .1
+        .split_once("fn spawn_virtual_workspace_session_from_activate(")
+        .expect("Resume action boundary must remain visible")
+        .0;
+    assert!(activate.contains("self.session_navigator_model()"));
+    assert!(!activate.contains("session_navigator_sessions_for_display_update"));
+    assert!(!activate.contains("session_navigator_action_model"));
+    assert!(!activate.contains("reduce_session_navigator_refresh"));
+    assert!(!activate.contains("live_workspace_sessions"));
+
+    let live_or_pending = NAVIGATOR_RS
+        .split_once("fn live_or_pending_workspace_session_locator(")
+        .expect("binding-only locator must exist")
+        .1
+        .split_once("fn live_durable_terminal_session_owners(")
+        .expect("locator boundary must remain visible")
+        .0;
+    assert!(live_or_pending.contains("session_binding_for_pane_id"));
+    assert!(!live_or_pending.contains("live_workspace_sessions"));
+    assert!(!live_or_pending.contains(".snapshot("));
+
+    let live_projection = NAVIGATOR_RS
+        .split_once("fn live_workspace_sessions(")
+        .expect("Navigator live projection must exist")
+        .1
+        .split_once("fn live_or_pending_workspace_session_locator(")
+        .expect("live projection boundary must remain visible")
+        .0;
+    assert!(live_projection.contains("session_binding_for_pane_id"));
+    assert!(live_projection.contains("container_uuid_for_pane_id"));
+    assert!(!live_projection.contains("pane_group.snapshot"));
+    assert!(!live_projection.contains("WorkspaceSessionSnapshot::from_tabs"));
+    assert!(!live_projection.contains("TabSnapshot"));
+
+    let dispatch = NAVIGATOR_RS
+        .split_once("fn dispatch_session_navigator_state_action(")
+        .expect("lifecycle dispatch must exist")
+        .1
+        .split_once("fn commit_session_navigator_restore_started_after_delivery(")
+        .expect("lifecycle dispatch boundary must remain visible")
+        .0;
+    assert!(dispatch.contains("self.session_navigator_model()"));
+    assert!(!dispatch.contains("session_navigator_action_model"));
+    assert!(!dispatch.contains("reduce_session_navigator_refresh"));
+
+    let post_delivery = NAVIGATOR_RS
+        .split_once("fn commit_session_navigator_restore_started_after_delivery(")
+        .expect("post-delivery RestoreStarted commit must exist")
+        .1
+        .split_once("fn snapshot_session_navigator_model(")
+        .expect("post-delivery commit boundary must remain visible")
+        .0;
+    assert!(post_delivery.contains("reduce_session_navigator_refresh"));
+    assert!(post_delivery.contains("SessionNavigatorAction::RestoreStarted"));
+    assert_eq!(
+        post_delivery.matches("reduce_session_navigator_refresh").count(),
+        1,
+        "post-delivery must perform exactly one canonical Refresh before RestoreStarted"
+    );
+
+    let finalize = VIEW_RS
+        .split_once("fn finalize_delivered_workspace_session_restore_container(")
+        .expect("restore finalize boundary must exist")
+        .1
+        .split_once("fn open_terminal_bootstrap_restored_session_terminal(")
+        .expect("restore finalize boundary must remain visible")
+        .0;
+    assert_eq!(
+        finalize
+            .matches("sync_session_navigator_sessions(ctx)")
+            .count(),
+        0,
+        "RestoreStarted commit must own the single canonical post-delivery refresh"
+    );
+    assert!(finalize.contains("commit_session_navigator_restore_started_after_delivery"));
+    assert!(!finalize.contains("dispatch_session_navigator_state_action"));
 }
 
 #[test]

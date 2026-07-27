@@ -48,7 +48,7 @@ pub fn render_breadcrumb(current_path: &PathBuf, appearance: &Appearance) -> Vec
         // 分隔符（第一段之后添加）
         if i > 0 {
             let sep_icon =
-                ConstrainedBox::new(Icon::ChevronRight.to_warpui_icon(sub_color.into()).finish())
+                ConstrainedBox::new(Icon::ChevronRight.to_warpui_icon(sub_color).finish())
                     .with_width(12.0)
                     .with_height(12.0)
                     .finish();
