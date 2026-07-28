@@ -603,9 +603,7 @@ fn collapse_materialized_session_rows(
         let existing = &mut collapsed[existing_index];
         let pinned = existing.is_pinned || session.is_pinned;
         if is_live(&session) && !is_live(existing) {
-            if session.label.is_none() {
-                session.label = existing.label.clone();
-            }
+            session.label = session.merged_label(existing, false, true, false);
             if session.updated_at_unix_ms.is_none() {
                 session.updated_at_unix_ms = existing.updated_at_unix_ms;
             }
@@ -613,9 +611,8 @@ fn collapse_materialized_session_rows(
             *existing = session;
         } else {
             existing.is_pinned = pinned;
-            if existing.label.is_none() {
-                existing.label = session.label;
-            }
+            existing.label =
+                existing.merged_label(&session, false, is_live(existing), is_live(&session));
             if existing.updated_at_unix_ms.is_none() {
                 existing.updated_at_unix_ms = session.updated_at_unix_ms;
             }

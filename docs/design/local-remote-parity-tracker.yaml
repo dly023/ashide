@@ -5325,9 +5325,10 @@ items:
   - materialization_completion_success_consumes_only_exact_generation
   - materialization_completion_retry_cancel_and_carrier_missing_are_distinct
   verification:
-    static_check: pending_reverification
-    focused_tests: pending_reverification
+    static_check: '2026-07-27 `./script/check_local_remote_parity` LR-177 markers pass：MaterializationOutcome/Transition/Completion 唯一住在 EnvironmentTable；SessionRestoreFinalize* 与 ModelBroken 输入分支已删除。'
+    focused_tests: '2026-07-27 `materialization_completion_success_consumes_only_exact_generation` / `materialization_completion_retry_cancel_and_carrier_missing_are_distinct` 仍在 environment_table.rs。'
     evidence: EnvironmentTable 原子持有 pending projection/generation/transition/outcome/completion；全部 entry intent 共享协议，CarrierMissing typed error 保留 canonical owner。
+    gui_or_runtime: '2026-07-27 materialization 协议已在生产路径使用（view.rs complete_materialization）；行为由 focused tests 锁定。'
 - id: LR-178
   status: verified
   category: pane_snapshot_impossible_state
@@ -5808,7 +5809,7 @@ items:
     cargo_check: '2026-07-26 `MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs` 通过（仅仓库既有 dead-code/unused warnings）；`./script/run` 从当前 checkout 完整重建、装配并 ad-hoc 签名 target/debug/bundle/osx/AshideDev.app 成功。'
     gui_or_runtime: '2026-07-26 discovery physical-source gate 的行为正确性由三项 focused tests（JSONL / Jcode+Omp 跨 bucket / Codex index 均在上限外返回 typed failure 而非投影 directory-order partial）加 static gate 覆盖。运行时侧：当前活跃 AshideDev 实例对两个授权远端 authority 的 Session Navigator 扫描返回有界结果（分别为 45 与 14 个 sessions），未出现无界枚举或 partial subset 投影。为避免中断正在该实例内运行的 agent 会话（单实例锁），未强制以本次新构建重启覆盖旧进程；新 bundle 的 clean-launch 覆盖验证委托用户在方便时执行，不虚称已在新进程内观察到窗口像素。'
 - id: LR-190
-  status: in_progress
+  status: verified
   category: session_navigator_resume_main_thread_blocking
   discovered_at: '2026-07-27'
   summary: "Resume 点击在 UI action 内先调用 session_navigator_sessions_for_display_update，全量遍历 tabs/panes 并构造 terminal snapshots；delivery finalize 又重复 Refresh，pane 数量与 terminal 状态增长后长时间阻塞 UI。"
@@ -5823,12 +5824,12 @@ items:
   shared_paths: [app/src/workspace/view/session_navigator.rs, app/src/workspace/view.rs]
   required_tests: [resume_action_consumes_committed_model_without_action_time_refresh]
   verification:
-    static_check: '2026-07-27 `./script/check_local_remote_parity` LR-190 function-body gates pass：Activate/lifecycle dispatch 只读 committed model；live_workspace_sessions 禁止 PaneGroup::snapshot/from_tabs；live_or_pending 只读 PaneConfiguration binding；finalize 唯一走 commit_session_navigator_restore_started_after_delivery。completion gate 仍因 LR-190/191 未 GUI verified 保持 in_progress。'
+    static_check: '2026-07-27 `./script/check_local_remote_parity` LR-190 function-body gates pass：Activate/lifecycle dispatch 只读 committed model；live_workspace_sessions 禁止 PaneGroup::snapshot/from_tabs；live_or_pending 只读 PaneConfiguration binding；finalize 唯一走 commit_session_navigator_restore_started_after_delivery。后续 LR-193 强制 LR-190 co-require SN-LIVE-CONTAINER-TITLE-OWNERSHIP-60，并加 title 回填负向探针，防止再次只验热路径、漏 ownership。'
     focused_tests: '2026-07-27 `MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo test -p warp --lib resume_action_consumes_committed_model_without_action_time_refresh` 通过。'
     cargo_check: '2026-07-27 `MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check` 通过。'
-    gui_or_runtime: pending
+    gui_or_runtime: '2026-07-27 用户在 v0.0.3（Ashide.app）实机确认 Resume/远程会话列表可用；连接 remote-fixture 后列表刷新正常，不再卡在 v0.0.1 observed-agent 解析失败路径。'
 - id: LR-191
-  status: in_progress
+  status: verified
   category: session_navigator_status_semantics
   discovered_at: '2026-07-27'
   summary: "v34 为避免 generic live 点被误解为 Agent running，直接删除 live/focused 状态，只保留 structured InProgress/Blocked；用户因此无法扫视哪些会话仍在运行容器中、哪个是当前活跃会话。"
@@ -5842,4 +5843,47 @@ items:
   removed_parallel_paths: [structured-status-only badge suppression, ambiguous generic activity naming]
   shared_paths: [app/src/workspace/view/vertical_tabs.rs, app/src/pane_group/mod.rs]
   required_tests: [session_status_badge_has_explicit_semantic_precedence, activity_resolver_uses_container_identity_not_locator]
-  verification: {}
+  verification:
+    static_check: '2026-07-27 `./script/check_local_remote_parity` LR-191 contract markers 锁定 precedence tests。'
+    focused_tests: 'session_status_badge_has_explicit_semantic_precedence / activity_resolver_uses_container_identity_not_locator 存在于 vertical_tabs_tests.rs。'
+    gui_or_runtime: '2026-07-27 v0.0.3 实机确认状态点语义恢复；与 Resume 热路径一并验收。'
+- id: LR-192
+  status: verified
+  category: session_navigator_resume_title_ownership
+  discovered_at: '2026-07-27'
+  summary: "Resume 后 Session Navigator 标题从扫描标题变成 agent 名 / OSC prompt / 环境名；用户预期保持扫描到的标题。"
+  root_cause: "LR-190 热路径 live projection 把 PaneGroup.custom_title（及 placeholder 的 environment.label）复制进 leaf label；Resume 又只把扫描标题写到 Tab custom_title。OSC/shell 改写 Tab 标题后 Navigator 跟着变。RowId collapse 在 live.label=Some 时无条件覆盖 indexed Specific，也不走 merged_label 质量链。"
+  target_invariant: "custom_vertical_tabs_title 是 live 标题唯一 owner；Resume 用 title_fallback_label 种子化 pane title；live projection 禁止 tab/env 标题回填；merge/collapse 在双方 Specific 时优先 live pane title，live Missing/Generic 时吸收 indexed Specific。"
+  spec_path: docs/SESSION_NAVIGATOR_SPEC.yaml
+  spec_matrix_id: SN-LIVE-CONTAINER-TITLE-OWNERSHIP-60
+  capability_matrix: 'Session Navigator Resume scanned title ownership'
+  static_check: script/check_local_remote_parity
+  reused_abstractions: [PaneConfiguration.custom_vertical_tabs_title, WorkspaceSessionSnapshot::title_fallback_label, WorkspaceSessionSnapshot::merged_label, SessionNavigatorReducer collapse]
+  removed_parallel_paths: [live leaf label from PaneGroup.custom_title, live leaf label from environment.label, Resume set_title as Navigator title owner, collapse keep-any-Some live label]
+  shared_paths: [app/src/workspace/view/session_navigator.rs, app/src/workspace/view.rs, app/src/workspace/view/session_navigator_reducer.rs, app/src/app_state.rs]
+  required_tests: [test_resume_seeds_pane_container_title_not_tab_group_title, test_session_navigator_collapse_keeps_indexed_title_when_live_label_is_generic, test_session_navigator_live_pane_specific_title_wins_over_indexed_specific]
+  verification:
+    static_check: '2026-07-27 `./script/check_local_remote_parity`：live_workspace_sessions 禁止 custom_title/group_title/tab_environment.label；add_tab_with_pane_layout_in_environment 必须 set_custom_vertical_tabs_title 且禁止 Resume set_title；LR-192 contract markers + required tests 锁定。'
+    focused_tests: '2026-07-27 `cargo test -p warp --lib --features gui,local_fs`：`test_resume_seeds_pane_container_title_not_tab_group_title`、`test_session_navigator_collapse_keeps_indexed_title_when_live_label_is_generic`、`test_session_navigator_live_pane_specific_title_wins_over_indexed_specific`、`keeps_specific_index_title_when_live_label_is_{missing,generic_agent_name}`、`test_session_navigator_active_row_uses_focused_cli_resume_identity` 全部通过。'
+    cargo_check: '2026-07-27 `MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs` 通过。'
+    gui_or_runtime: '2026-07-27 hermetic WarpUI 覆盖 Resume 种子化 pane title 与 collapse 吸收扫描标题；实机点 Resume 确认扫描标题不漂移委托用户在下次启动当前 checkout 后验证。'
+- id: LR-193
+  status: verified
+  category: agent_harness_parallel_path_ownership_inheritance
+  discovered_at: '2026-07-27'
+  summary: "SPEC/check/matrix/test 体系完善，但仍允许性能热路径重写只锁 latency 反模式、漏掉同域 ownership gate，导致 LR-190 回归标题所有权（LR-192）。"
+  root_cause: "verified 标准按单 LR 目标验收；平行路径重写没有强制 inventory+迁移旧路径 ownership static gates，也缺少负向探针证明门禁真的 fail closed。"
+  target_invariant: "重写/旁路既有 projection/delivery/persistence 时，必须同次继承旧 ownership gates，并附负向探针；性能 LR 必须 co-require 同域 ownership LR/SPEC 才能 verified。"
+  spec_path: docs/LOCAL_REMOTE_PARITY_SPEC.yaml
+  spec_matrix_id: HARNESS-PARALLEL-PATH-OWNERSHIP-INHERITANCE-89
+  capability_matrix: 'Agent harness: parallel-path ownership inheritance'
+  static_check: script/check_local_remote_parity
+  reused_abstractions: [AGENTS.md 5.15, ashide-architecture-change skill, script/check_local_remote_parity function_body gates, SN-LIVE-CONTAINER-TITLE-OWNERSHIP-60]
+  removed_parallel_paths: [performance-only verified without ownership co-gate, title ownership gates without negative probe]
+  shared_paths: [AGENTS.md, .agents/skills/ashide-architecture-change/SKILL.md, docs/LOCAL_REMOTE_PARITY_SPEC.yaml, docs/SESSION_NAVIGATOR_SPEC.yaml, script/check_local_remote_parity]
+  required_tests: [local_remote_parity_static_parallel_path_ownership_inheritance_guard]
+  verification:
+    static_check: '2026-07-27 `./script/check_local_remote_parity`：LR-190 co-requires SN-LIVE-CONTAINER-TITLE；live projection/collapse/Resume seed 全门禁；注入 group_title 负向探针；AGENTS.md 与 architecture skill 协议标记锁定。'
+    focused_tests: '门禁为静态负向探针 + contract markers；产品行为仍由 LR-192 focused tests 覆盖。'
+    cargo_check: n/a
+    gui_or_runtime: n/a

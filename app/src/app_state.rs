@@ -305,14 +305,17 @@ impl WorkspaceSessionTitleCandidate {
             .map(|candidate| candidate.quality)
             .unwrap_or(WorkspaceSessionLabelQuality::Missing);
 
+        // Both sides carry Specific titles: the live pane container owns the
+        // visible title (custom_vertical_tabs_title). Indexed/virtual Specific
+        // only fills Missing/Generic live labels below.
         if existing_is_live != source_is_live
             && matches!(existing_quality, WorkspaceSessionLabelQuality::Specific)
             && matches!(source_quality, WorkspaceSessionLabelQuality::Specific)
         {
             return if existing_is_live {
-                source.or(existing)
-            } else {
                 existing.or(source)
+            } else {
+                source.or(existing)
             };
         }
 
@@ -391,7 +394,7 @@ impl WorkspaceSessionSnapshot {
             .map(|candidate| candidate.text)
     }
 
-    fn merged_label(
+    pub(crate) fn merged_label(
         &self,
         source: &WorkspaceSessionSnapshot,
         source_is_preferred: bool,

@@ -403,6 +403,7 @@ Agent harness 只允许四层职责，禁止互相复制动态事实：
 5. 列出现有抽象复用点和将删除的平行/后补路径；只新增不删除通常说明仍在打补丁。
 6. 按 `SPEC → UX Matrix → static CHECK → failing TEST → IMPLEMENTATION → verify` 执行。
 7. 扫描到同类漏网立即追加 tracker；逐项实现并改为 verified。
+8. **平行路径所有权继承（高优先级）**：为性能/异步/热路径重写或旁路既有 projection、delivery、persistence 时，必须先 inventory 旧路径已有的 ownership static gates（identity/title/binding/collection/lifecycle），在同一次改动中为新路径加上等价 fail-closed 检查，并附负向探针（重新引入一个 forbidden token 时检查必须失败）。只为新目标（不卡 UI、少锁）加门禁而遗漏同域 ownership，不得把 tracker 标为 verified。典型漏网见 LR-190→LR-192：热路径禁 snapshot，却放开了 Tab/env 标题回填。
 
 调用方 static check 不得只锁调用次数或文件路径：必须同时输出只读 `path:line` inventory，并锁定每个调用点所属的 enclosing function 集合。这样代码移动不会误报，而在同一文件中“删一个合法调用、换一个非法调用”也必须 fail closed。
 

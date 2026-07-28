@@ -2215,7 +2215,7 @@ fn test_session_navigator_spec_matrix_is_complete_and_linked() {
     let cli_agent_session_index_tests = include_str!("../../terminal/cli_agent_session_index.rs");
     let cli_agent_session_ingress_tests =
         include_str!("../../terminal/cli_agent_sessions/mod_tests.rs");
-    let shared_cli_agent_jsonl_tests = include_str!("../../cli_agent_jsonl.rs");
+    let shared_cli_agent_jsonl_tests = include_str!("../../cli_agent_jsonl/tests.rs");
     let remote_cli_agent_session_tests = include_str!("../../remote_server/cli_agent_sessions.rs");
     let dev_remote_install_tests = include_str!("../../remote_server/dev_remote_install.rs");
     let session_bridge_cli_agent_reader_tests =
@@ -2808,6 +2808,61 @@ fn test_session_navigator_refresh_collapses_materialized_alias_to_live_row() {
         refreshed.state.selected_row_id.as_deref(),
         Some(source_row_id.as_str())
     );
+}
+
+#[test]
+fn test_session_navigator_collapse_keeps_indexed_title_when_live_label_is_generic() {
+    for environment in ["local", "ssh:remote-fixture-primary"] {
+        let mut virtual_session =
+            make_virtual_session("codex:scanned-title-source", environment, 2_000);
+        virtual_session.cli_agent = Some("Codex".to_owned());
+        virtual_session.cli_command = Some("codex".to_owned());
+        virtual_session.cli_agent_session_id = Some("codex-scanned-title".to_owned());
+        virtual_session.label = Some("扫描到的会话标题".to_owned());
+
+        let mut live_session = make_live_session("tab:5:leaf:0", environment, 0);
+        live_session.cli_agent = Some("Codex".to_owned());
+        live_session.cli_command = Some("codex".to_owned());
+        live_session.cli_agent_session_id = Some("codex-scanned-title".to_owned());
+        live_session.label = Some("Codex".to_owned());
+
+        let source_identity = virtual_session.logical_key();
+        let initial = reduce(
+            Vec::new(),
+            SessionNavigatorState::new(),
+            SessionNavigatorAction::Refresh {
+                new_sessions: vec![virtual_session.clone()],
+                pinned_identity_keys: HashSet::new(),
+            },
+            &PaneGroupInfo::new(),
+        );
+        let aliased = reduce(
+            initial.sessions,
+            initial.state,
+            SessionNavigatorAction::RestoreStarted {
+                session_keys: vec![source_identity, live_session.logical_key()],
+                selected_logical_key: Some(virtual_session.logical_key()),
+            },
+            &PaneGroupInfo::new(),
+        );
+        let refreshed = reduce(
+            aliased.sessions,
+            aliased.state,
+            SessionNavigatorAction::Refresh {
+                new_sessions: vec![virtual_session, live_session],
+                pinned_identity_keys: HashSet::new(),
+            },
+            &PaneGroupInfo::new(),
+        );
+
+        assert_eq!(refreshed.sessions.len(), 1);
+        assert!(refreshed.sessions[0].is_live_container);
+        assert_eq!(
+            refreshed.sessions[0].label.as_deref(),
+            Some("扫描到的会话标题"),
+            "collapse must absorb indexed Specific title when live label is only the generic agent name ({environment})"
+        );
+    }
 }
 
 #[test]

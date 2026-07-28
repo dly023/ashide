@@ -7,7 +7,7 @@ use bimap::BiMap;
 
 use futures_util::stream::AbortHandle;
 use string_offset::{ByteOffset, CharOffset};
-use warp_core::{features::FeatureFlag, SessionId};
+use warp_core::{features::FeatureFlag, HostId, SessionId};
 use warp_editor::content::buffer::{Buffer, ToBufferCharOffset};
 use warp_editor::content::diff::{text_diff, TextDiff};
 use warp_util::content_version::ContentVersion;
@@ -210,11 +210,43 @@ pub struct CharOffsetEdit {
 /// push 的语义字段收进一个借用的 params struct，避免函数参数过多。
 pub struct BufferUpdatedPush<'a> {
     pub session_id: SessionId,
-    pub host_id: &'a warp_core::HostId,
+    pub host_id: &'a HostId,
     pub path: &'a str,
     pub new_server_version: u64,
     pub expected_client_version: u64,
     pub edits: &'a [CharOffsetEdit],
+}
+
+/// Environment Runtime push 查找的稳定键：session binding + host + path。
+///
+/// `BufferLocation::EnvironmentRuntime` 只按 host+path 去重；push 还必须匹配
+/// 打开时绑定的 `binding_session_id`，因此单独维护这份 O(1) 索引。
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct EnvironmentRuntimeBufferKey {
+    session_id: SessionId,
+    host_id: HostId,
+    path: String,
+}
+
+impl EnvironmentRuntimeBufferKey {
+    fn new(session_id: SessionId, host_id: &HostId, path: &str) -> Self {
+        Self {
+            session_id,
+            host_id: host_id.clone(),
+            path: path.to_owned(),
+        }
+    }
+
+    fn from_environment_source(
+        binding_session_id: SessionId,
+        environment_file_path: &super::buffer_location::EnvironmentFilePath,
+    ) -> Self {
+        Self::new(
+            binding_session_id,
+            &environment_file_path.host_id,
+            environment_file_path.path.as_str(),
+        )
+    }
 }
 
 /// Global singleton model for managing shared buffers across editors.
@@ -223,6 +255,8 @@ pub struct BufferUpdatedPush<'a> {
 /// enabling consistent content synchronization and more efficient memory usage.
 pub struct GlobalBufferModel {
     location_to_id: BiMap<BufferLocation, FileId>,
+    /// session+host+path → FileId，供 Environment Runtime buffer push 直接定位。
+    environment_runtime_buffers: HashMap<EnvironmentRuntimeBufferKey, FileId>,
     buffers: HashMap<FileId, InternalBufferState>,
 }
 
@@ -233,8 +267,44 @@ impl GlobalBufferModel {
 
         Self {
             location_to_id: BiMap::new(),
+            environment_runtime_buffers: HashMap::new(),
             buffers: HashMap::new(),
         }
+    }
+
+    fn register_environment_runtime_buffer(
+        &mut self,
+        file_id: FileId,
+        binding_session_id: SessionId,
+        environment_file_path: &super::buffer_location::EnvironmentFilePath,
+    ) {
+        self.environment_runtime_buffers.insert(
+            EnvironmentRuntimeBufferKey::from_environment_source(
+                binding_session_id,
+                environment_file_path,
+            ),
+            file_id,
+        );
+    }
+
+    fn unregister_environment_runtime_buffer(&mut self, file_id: FileId) {
+        let Some(state) = self.buffers.get(&file_id) else {
+            return;
+        };
+        let BufferSource::EnvironmentRuntime {
+            environment_file_path,
+            binding_session_id,
+            ..
+        } = &state.source
+        else {
+            return;
+        };
+        self.environment_runtime_buffers.remove(
+            &EnvironmentRuntimeBufferKey::from_environment_source(
+                *binding_session_id,
+                environment_file_path,
+            ),
+        );
     }
 
     /// 客户端 app 专用:订阅 Environment Runtime 的 buffer push 事件,把 runtime
@@ -297,6 +367,7 @@ impl GlobalBufferModel {
         }
 
         for id in &ids_to_remove {
+            self.unregister_environment_runtime_buffer(*id);
             self.location_to_id.remove_by_right(id);
         }
 
@@ -322,6 +393,7 @@ impl GlobalBufferModel {
     }
 
     fn cleanup_file_id(&mut self, file_id: FileId, _ctx: &mut ModelContext<Self>) {
+        self.unregister_environment_runtime_buffer(file_id);
         self.location_to_id.remove_by_right(&file_id);
 
         self.buffers.remove(&file_id);
@@ -1119,6 +1191,11 @@ impl GlobalBufferModel {
                 },
             },
         );
+        self.register_environment_runtime_buffer(
+            file_id,
+            binding_session_id,
+            &environment_file_path,
+        );
 
         #[cfg(feature = "local_tty")]
         {
@@ -1293,23 +1370,10 @@ impl GlobalBufferModel {
             expected_client_version,
             edits,
         } = push;
-        // Find the buffer by scanning for an Environment Runtime source with matching host+path.
-        let file_id = self.buffers.iter().find_map(|(id, state)| {
-            if let BufferSource::EnvironmentRuntime {
-                environment_file_path,
-                binding_session_id,
-                ..
-            } = &state.source
-            {
-                if *binding_session_id == session_id
-                    && environment_file_path.host_id == *host_id
-                    && environment_file_path.path.as_str() == path
-                {
-                    return Some(*id);
-                }
-            }
-            None
-        });
+        let file_id = self
+            .environment_runtime_buffers
+            .get(&EnvironmentRuntimeBufferKey::new(session_id, host_id, path))
+            .copied();
 
         let Some(file_id) = file_id else {
             log::warn!("BufferUpdatedPush for unknown Environment Runtime buffer: {path}");

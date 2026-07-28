@@ -761,7 +761,7 @@ fn test_session_navigator_keeps_specific_index_title_when_live_label_is_generic_
 }
 
 #[test]
-fn test_session_navigator_keeps_specific_index_title_when_live_label_is_remote_prompt_title() {
+fn test_session_navigator_keeps_specific_index_title_when_live_label_is_missing() {
     let mut live_source = test_workspace_session_in_environment(
         "tab:0:leaf:0",
         Some("Codex"),
@@ -770,7 +770,7 @@ fn test_session_navigator_keeps_specific_index_title_when_live_label_is_remote_p
         Some(300),
         Some("ssh:root@remote-fixture-primary"),
     );
-    live_source.label = Some("root@remote-fixture-primary".to_string());
+    live_source.label = None;
     let mut index_source = test_workspace_session_in_environment(
         "external-index:Codex:index-a",
         Some("Codex"),
@@ -791,6 +791,32 @@ fn test_session_navigator_keeps_specific_index_title_when_live_label_is_remote_p
         sessions[0].label.as_deref(),
         Some("这台机器是不是有挂载Nas mnt 目录")
     );
+}
+
+#[test]
+fn test_session_navigator_live_pane_specific_title_wins_over_indexed_specific() {
+    let mut live_source = test_workspace_session(
+        "tab:0:leaf:0",
+        Some("Codex"),
+        Some("codex-session-1"),
+        true,
+        Some(300),
+    );
+    live_source.label = Some("User renamed pane".to_string());
+    let mut index_source = test_workspace_session(
+        "external-index:Codex:index-a",
+        Some("Codex"),
+        Some("codex-session-1"),
+        false,
+        Some(200),
+    );
+    index_source.label = Some("Indexed scanned title".to_string());
+
+    let sessions =
+        WorkspaceSessionSnapshot::merge_for_session_navigator(vec![live_source, index_source]);
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].label.as_deref(), Some("User renamed pane"));
 }
 
 #[test]

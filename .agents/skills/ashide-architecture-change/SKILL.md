@@ -25,6 +25,7 @@ input/action → owner model → lifecycle transition → projection/persistence
 6. 写外部原生格式时，为每个输出字段标注 provenance：`protocol constant / source-derived / target-config-derived / generated identity`。无法归类或 owner 不明确的字段禁止写出；target-config-derived 禁止默认值、fallback 和本机代填远端。
 7. 写出现有抽象复用表：owner、identity、intent、state machine、projection、persistence、verification。
 8. 明确 bug 是哪个既有阶段漏网，以及修复后删除哪条平行/后补路径。
+9. **若本次重写/旁路既有路径**：列出旧路径已执行的 ownership/static gates（identity、title、binding、collection、lifecycle），在同 PR 为新路径加上等价 fail-closed 检查 + 至少一条负向探针；否则不得标 verified。只锁 latency/snapshot 反模式而放开同域 ownership，视为体系漏网（见 `HARNESS-PARALLEL-PATH-OWNERSHIP-INHERITANCE-89` / LR-193）。
 
 ## 固定协议
 
@@ -40,6 +41,7 @@ SPEC → UX Matrix → static CHECK → failing TEST → IMPLEMENTATION
 - lifecycle state 与 canonical projection 必须由同一 owner 原子持有；看到 `clear()`、`Vec::new()`、`state = incoming`、`items = new_items`、`retain()` 时，必须证明“本轮未观察到”不会被误解为删除。
 - 单实体 fixture 不能证明集合稳定性；涉及列表/树/registry 的异步变更至少包含目标实体和两个无关实体，并逐阶段检查 cardinality、identity 与 order。
 - 调用方审计必须扫描整个生产源码树，并从真正产生副作用的 primitive 反向枚举 wrapper 与高层入口；只检查当前文件或只锁调用次数不算闭环。static check 应提供只读 `path:line` inventory，同时锁定 enclosing function owner 集合，防止同一文件内以非法调用替换合法调用后靠相同数量蒙混过关；并用负向探针证明新文件/新包装调用会 fail closed。
+- 热路径/平行路径重写必须继承旧路径 ownership gates，并用负向探针证明重新引入 forbidden pattern 会失败；性能 LR 不得在缺少 co-required ownership gate 时标 verified。
 
 ## 先复用、后扩展
 

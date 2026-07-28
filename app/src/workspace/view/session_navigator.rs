@@ -1206,33 +1206,28 @@ impl Workspace {
             } else {
                 None
             };
-            let group_title = pane_group.custom_title(ctx);
 
             for (pane_index, pane_id) in pane_group.visible_pane_ids().into_iter().enumerate() {
                 let container_uuid = pane_group
                     .container_uuid_for_pane_id(pane_id, ctx)
                     .expect("Navigator 可见 live pane 必须拥有稳定 container UUID");
-                let leaf_title = pane_group
-                    .pane_by_id(pane_id)
-                    .and_then(|pane| {
-                        pane.pane_configuration()
-                            .as_ref(ctx)
-                            .custom_vertical_tabs_title()
-                            .map(str::to_owned)
-                    })
-                    .or_else(|| group_title.clone());
+                let leaf_title = pane_group.pane_by_id(pane_id).and_then(|pane| {
+                    pane.pane_configuration()
+                        .as_ref(ctx)
+                        .custom_vertical_tabs_title()
+                        .map(str::to_owned)
+                });
 
                 if pane_group
                     .downcast_pane_by_id::<EnvironmentRuntimePlaceholderPane>(pane_id)
                     .is_some()
                 {
-                    let pane_session_binding =
-                        pane_group.session_binding_for_pane_id(pane_id, ctx);
+                    let pane_session_binding = pane_group.session_binding_for_pane_id(pane_id, ctx);
                     let mut session = WorkspaceSessionSnapshot {
                         id: format!("tab:{tab_index}:leaf:{pane_index}"),
                         container_uuid: Some(container_uuid),
                         kind: WorkspaceSessionKind::Terminal,
-                        label: leaf_title.or_else(|| Some(tab_environment.label.clone())),
+                        label: leaf_title,
                         environment_authority_key: Some(tab_environment.authority_key.clone()),
                         cwd: tab_environment.active_workspace_root.clone(),
                         startup_directory: None,
@@ -1309,14 +1304,16 @@ impl Workspace {
 
                 // Non-terminal / non-placeholder only. TerminalPane::snapshot locks
                 // TerminalModel and is forbidden on the Navigator hot path.
-                if let Some(startup_directory) = pane_group.pane_by_id(pane_id).and_then(|pane| {
-                    match pane.snapshot(ctx) {
-                        crate::app_state::LeafContents::Welcome { startup_directory } => {
-                            Some(startup_directory)
-                        }
-                        _ => None,
-                    }
-                }) {
+                if let Some(startup_directory) =
+                    pane_group
+                        .pane_by_id(pane_id)
+                        .and_then(|pane| match pane.snapshot(ctx) {
+                            crate::app_state::LeafContents::Welcome { startup_directory } => {
+                                Some(startup_directory)
+                            }
+                            _ => None,
+                        })
+                {
                     sessions.push(WorkspaceSessionSnapshot {
                         id: format!("tab:{tab_index}:leaf:{pane_index}"),
                         container_uuid: Some(container_uuid),

@@ -420,6 +420,11 @@ fn environment_buffer_operations_keep_opening_session_binding() {
                     },
                 },
             );
+            model.register_environment_runtime_buffer(
+                file_id,
+                opening_session_id,
+                &environment_file_path,
+            );
         });
 
         let reopened = model.update(&mut app, |model, ctx| {
@@ -660,6 +665,11 @@ fn same_host_session_churn_does_not_switch_buffer_connection() {
                     },
                 },
             );
+            model.register_environment_runtime_buffer(
+                file_id,
+                bound_session_id,
+                &environment_file_path,
+            );
         });
 
         let reopened = model.update(&mut app, |model, ctx| {
@@ -723,6 +733,31 @@ fn same_host_session_churn_does_not_switch_buffer_connection() {
             assert_eq!(
                 sync_clock.as_ref().unwrap().server_version,
                 pushed_server_version
+            );
+            assert_eq!(
+                model
+                    .environment_runtime_buffers
+                    .get(&EnvironmentRuntimeBufferKey::new(
+                        bound_session_id,
+                        &host_id,
+                        environment_file_path.path.as_str(),
+                    )),
+                Some(&file_id),
+                "push must resolve through the stable session+host+path index"
+            );
+        });
+        model.update(&mut app, |model, _ctx| {
+            model.unregister_environment_runtime_buffer(file_id);
+            assert!(
+                model
+                    .environment_runtime_buffers
+                    .get(&EnvironmentRuntimeBufferKey::new(
+                        bound_session_id,
+                        &host_id,
+                        environment_file_path.path.as_str(),
+                    ))
+                    .is_none(),
+                "unregister must drop the push index entry"
             );
         });
 

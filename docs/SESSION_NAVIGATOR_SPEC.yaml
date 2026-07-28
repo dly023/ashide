@@ -458,13 +458,14 @@ state_model:
     id: "SN-LIVE-CONTAINER-TITLE-OWNERSHIP-60"
     existing_abstractions: ["PaneConfiguration.container_uuid", "PaneConfiguration.custom_vertical_tabs_title", "LeafSnapshot.custom_vertical_tabs_title", "Workspace::rename_pane", "WorkspaceSessionSnapshot::is_live_container", "EnvironmentBackend session user state"]
     product_rule: "Session Navigator 一行代表一个 pane container；live row 的 Rename 必须编辑该 PaneConfiguration 的容器标题，virtual restore target 的 Rename 才编辑 durable session alias。菜单、inline editor、toast 与 clear/reset 文案必须明确当前对象，不得把两者都称为 session alias。"
-    title_rule: "PaneConfiguration.custom_vertical_tabs_title 是 live container 可见标题唯一 owner；PaneGroup.custom_title 只命名整个 Tab/pane group。WorkspaceSessionSnapshot::from_tabs 必须从每个 LeafSnapshot 读取自己的容器标题，禁止把 Tab custom_title 复制给所有 leaf。"
-    projection_rule: "authority-scoped alias enrichment 只作用于 virtual row；virtual source 被 live container consume 后，alias 不得覆盖 live container title。关闭 live carrier 后，同一 durable virtual row可继续显示自己的 alias。"
+    title_rule: "PaneConfiguration.custom_vertical_tabs_title 是 live container 可见标题唯一 owner；PaneGroup.custom_title 只命名整个 Tab/pane group。WorkspaceSessionSnapshot::from_tabs 与 Navigator live_workspace_sessions 必须从每个 leaf 的容器标题读取 label，禁止把 Tab custom_title、OSC/shell prompt 或 environment.label 复制给 leaf。"
+    resume_seed_rule: "Resume/materialize 必须把当前已可见的扫描标题（title_fallback_label，可含 virtual alias）种子化写入新 pane 的 custom_vertical_tabs_title；禁止只写 Tab custom_title。Resume 不负责加载 metadata，只转移已投影标题的 owner。"
+    projection_rule: "authority-scoped alias enrichment 只作用于 virtual row；virtual source 被 live container consume 后，alias 不得覆盖 live container title。双方均为 Specific 时 live pane title 优先于 indexed/virtual；live Missing/Generic 时仍吸收 indexed Specific。关闭 live carrier 后，同一 durable virtual row可继续显示自己的 alias。"
     identity_rule: "live rename 从 action locator 解析当前 PaneViewLocator，但 editor 生命周期继续由 container UUID/canonical RowId 识别；布局坐标只路由当次 action，不进入标题持久化。virtual alias 继续使用 stable_user_state_keys。"
     persistence_rule: "打开 Rename editor 与 Escape 取消不得保存；Enter 或 Blur commit 只有在规范化标题确实变化后才触发一次 App State save。Pane title 随 LeafSnapshot/SQLite 冷恢复；virtual alias 继续由统一 EnvironmentBackend 在底层分发到 local sidecar 或 runtime RPC。"
     parity_rule: "local 与 runtime live container 完全共用 PaneConfiguration mutation 与 App State save；只有 virtual alias persistence 在 EnvironmentBackend 最低层区分同步 sidecar 与异步 RPC。"
     empty_rule: "trim 后空标题表示清除当前对象的 override：live row 清除 pane container title，virtual row 清除 durable alias；不得创建空字符串 owner。"
-    forbidden_parallel_paths: ["live row authority alias mutation", "alias overrides live label", "tab custom_title copied to every leaf", "save when rename editor opens", "backend-specific live rename", "physical locator persisted as title identity"]
+    forbidden_parallel_paths: ["live row authority alias mutation", "alias overrides live label", "tab custom_title copied to every leaf", "environment.label as live session.label", "save when rename editor opens", "backend-specific live rename", "physical locator persisted as title identity"]
 
   live_cli_agent_activity_projection:
     id: "SN-LIVE-CLI-AGENT-ACTIVITY-63"
@@ -1777,8 +1778,10 @@ ux_contract_matrix:
       scope: "local_remote_parity"
       event: "User clicks Resume on a row already rendered from the committed SessionNavigatorModel"
       may_change: ["target_restore_lifecycle", "target_carrier", "focused_row"]
-      must_preserve: ["ui_thread_responsiveness", "unrelated_rows", "row_id", "display_order", "single_post_delivery_refresh", "no_action_time_full_pane_snapshot"]
+      must_preserve: ["ui_thread_responsiveness", "unrelated_rows", "row_id", "display_order", "single_post_delivery_refresh", "no_action_time_full_pane_snapshot", "scanned_live_container_title", "SN-LIVE-CONTAINER-TITLE-OWNERSHIP-60"]
       test: "resume_action_consumes_committed_model_without_action_time_refresh"
+      co_required_ownership: ["SN-LIVE-CONTAINER-TITLE-OWNERSHIP-60"]
+      inheritance_rule: "热路径重写 live projection 时必须同时继承 live container title ownership 的 static gate；禁止只为不卡 UI 加门禁而放开 tab/env 标题回填"
 
   check:
     parser_test: "test_session_navigator_spec_matrix_is_complete_and_linked"
@@ -1794,6 +1797,7 @@ ai_change_contract:
   canonical_identity: "代码和测试统一使用 EnvironmentKey/RowId/identity registry 概念；禁止把 authority alias、tab index、volatile pane id 当领域身份"
   projection_boundary: "focus/hover/spinner 等渲染输入不得回写持久 selection/order，除非 SPEC 明确授权"
   persistence_boundary: "pane 可恢复性只能由 PaneNodeSnapshot::into_persistable 归一化；container identity 只能走 PaneConfiguration → LeafSnapshot → pane_container_identities；禁止在 SQLite saver/loader 或单个 UI 调用点补第二套身份/过滤分支"
+  parallel_path_ownership_inheritance: "为性能/异步/热路径重写 projection、delivery 或 persistence 时，旧路径已执行的所有权门禁必须同次迁移到新路径的 static check，并附负向探针；只为新目标（不卡 UI、少锁）加门禁而遗漏同域 ownership 不得标 verified"
   live_identity_failure: "任何 is_live_container=true 的 WorkspaceSessionSnapshot 缺 container_uuid 必须立即失败；禁止为了容错退回 tab/leaf locator"
   stable_traceability: "每个用户可见契约使用稳定 matrix ID，并绑定一个真实存在的 test 函数"
   native_session_target_project_identity:
@@ -1840,6 +1844,13 @@ test_matrix:
         - "SQLite round-trip 后两个 leaf 标题按 container 恢复，Tab group title 仍独立"
         - "重命名 local 与 runtime virtual row → UI 共用 alias action，底层分别写 sidecar/RPC；materialize 后 alias 不覆盖 live title"
         - "空标题分别清除 live pane override 或 virtual alias，不生成空 owner"
+
+    - name: "Resume keeps scanned title on live container"
+      steps:
+        - "local 与 runtime 各有一条 indexed virtual row（Specific 扫描标题）与两个无关 virtual rows"
+        - "Resume 分配 placeholder/terminal → 种子写入 focused pane 的 custom_vertical_tabs_title，不写 Tab custom_title 作为 leaf label"
+        - "RestoreStarted alias + Refresh collapse 后 Navigator 主标题仍是扫描标题，不退化为 agent 名 / OSC prompt / environment.label"
+        - "用户再 Rename live row → Specific pane title 覆盖 indexed；清空 pane title 后再次吸收 indexed Specific"
 
     - name: "create → activate → pin → reorder → remove → restore focus"
       steps:

@@ -7468,7 +7468,9 @@ impl Workspace {
             return;
         };
 
-        let title = pending_restore.session.label.clone();
+        let title = pending_restore
+            .session
+            .title_fallback_label(self.workspace_session_alias(&pending_restore.session, ctx));
         let intent = EnvironmentEntryIntent::SessionRestore(pending_restore);
         let materialization_pane_id = self.allocate_environment_runtime_placeholder_tab(
             environment,
@@ -9362,9 +9364,11 @@ impl Workspace {
             false,
         );
         let environment = self.current_environment_for_strip(ctx);
+        let initial_pane_title =
+            session.title_fallback_label(self.workspace_session_alias(session, ctx));
         self.open_terminal_bootstrap_tab_in_environment(
             spawn,
-            session.label.clone(),
+            initial_pane_title,
             environment,
             initial_session_binding,
             ctx,
@@ -17374,7 +17378,7 @@ impl Workspace {
         let is_new_terminal = panes_layout.is_terminal_bootstrap();
         let is_restoration = panes_layout.is_snapshot_restoration();
         let new_pane_group = ctx.add_typed_action_view(|ctx| {
-            let mut pane_group = PaneGroup::new_with_panes_layout(
+            let pane_group = PaneGroup::new_with_panes_layout(
                 self.tips_completed.clone(),
                 self.user_default_shell_unsupported_banner_model_handle
                     .clone(),
@@ -17395,7 +17399,16 @@ impl Workspace {
                 );
             }
             if let Some(title) = custom_tab_title {
-                pane_group.set_title(&title, ctx);
+                let pane_id = pane_group.focused_pane_id(ctx);
+                let Some(pane) = pane_group.pane_by_id(pane_id) else {
+                    log::error!(
+                        "add_tab_with_pane_layout_in_environment: focused pane missing for title seed"
+                    );
+                    return pane_group;
+                };
+                pane.pane_configuration().update(ctx, |configuration, ctx| {
+                    configuration.set_custom_vertical_tabs_title(title, ctx);
+                });
             }
             pane_group
         });

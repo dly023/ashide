@@ -66,13 +66,57 @@ impl SshTargetCatalogSnapshot {
     }
 }
 
-pub struct SshTargetCatalog {
-    committed: SshTargetCatalogSnapshot,
+/// SSH catalog 刷新生命周期的唯一 owner：generation、intent、loading、error。
+///
+/// 与 [`SshTargetCatalogSnapshot`] 分离，避免把 committed 数据与 refresh
+/// controller 揉成一个扁平对象后继续长出并行状态字段。
+#[derive(Clone, Debug, Default)]
+struct SshTargetCatalogRefresh {
     requested_generation: u64,
     committed_generation: u64,
     active_intent: Option<SshTargetCatalogRefreshIntent>,
     loading: bool,
     error: Option<String>,
+}
+
+impl SshTargetCatalogRefresh {
+    fn begin(&mut self, intent: SshTargetCatalogRefreshIntent) -> u64 {
+        self.requested_generation = self.requested_generation.wrapping_add(1);
+        self.active_intent = Some(intent);
+        self.loading = true;
+        self.error = None;
+        self.requested_generation
+    }
+
+    fn finish(
+        &mut self,
+        generation: u64,
+        result: Result<SshTargetCatalogSnapshot, String>,
+        committed: &mut SshTargetCatalogSnapshot,
+    ) -> bool {
+        if generation != self.requested_generation {
+            return false;
+        }
+
+        self.loading = false;
+        self.active_intent = None;
+        match result {
+            Ok(snapshot) => {
+                *committed = snapshot;
+                self.committed_generation = generation;
+                self.error = None;
+            }
+            Err(error) => {
+                self.error = Some(error);
+            }
+        }
+        true
+    }
+}
+
+pub struct SshTargetCatalog {
+    committed: SshTargetCatalogSnapshot,
+    refresh: SshTargetCatalogRefresh,
 }
 
 impl SshTargetCatalog {
@@ -93,7 +137,7 @@ impl SshTargetCatalog {
                     empty_config_snapshot(),
                     Vec::new(),
                 ));
-                catalog.error = Some(error);
+                catalog.refresh.error = Some(error);
                 catalog
             }
         }
@@ -102,19 +146,18 @@ impl SshTargetCatalog {
     fn with_committed(committed: SshTargetCatalogSnapshot) -> Self {
         Self {
             committed,
-            requested_generation: 0,
-            committed_generation: 0,
-            active_intent: None,
-            loading: false,
-            error: None,
+            refresh: SshTargetCatalogRefresh::default(),
         }
     }
 
     pub fn refresh(&mut self, intent: SshTargetCatalogRefreshIntent, ctx: &mut ModelContext<Self>) {
-        let generation = self.begin_refresh(intent);
+        let generation = self.refresh.begin(intent);
         ctx.notify();
         ctx.spawn(async { load_snapshot() }, move |catalog, result, ctx| {
-            if catalog.finish_refresh(generation, result) {
+            if catalog
+                .refresh
+                .finish(generation, result, &mut catalog.committed)
+            {
                 ctx.notify();
             }
         });
@@ -125,16 +168,16 @@ impl SshTargetCatalog {
     }
 
     pub fn is_loading(&self) -> bool {
-        self.loading
+        self.refresh.loading
     }
 
     pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
+        self.refresh.error.as_deref()
     }
 
     #[cfg(test)]
     pub fn active_intent(&self) -> Option<SshTargetCatalogRefreshIntent> {
-        self.active_intent
+        self.refresh.active_intent
     }
 
     pub fn config_open_target(&self) -> Option<&Path> {
@@ -165,38 +208,6 @@ impl SshTargetCatalog {
             .find(|entry| entry.stable_identity() == stable_identity)
     }
 
-    fn begin_refresh(&mut self, intent: SshTargetCatalogRefreshIntent) -> u64 {
-        self.requested_generation = self.requested_generation.wrapping_add(1);
-        self.active_intent = Some(intent);
-        self.loading = true;
-        self.error = None;
-        self.requested_generation
-    }
-
-    fn finish_refresh(
-        &mut self,
-        generation: u64,
-        result: Result<SshTargetCatalogSnapshot, String>,
-    ) -> bool {
-        if generation != self.requested_generation {
-            return false;
-        }
-
-        self.loading = false;
-        self.active_intent = None;
-        match result {
-            Ok(snapshot) => {
-                self.committed = snapshot;
-                self.committed_generation = generation;
-                self.error = None;
-            }
-            Err(error) => {
-                self.error = Some(error);
-            }
-        }
-        true
-    }
-
     #[cfg(test)]
     pub(crate) fn with_snapshot(config: LoadResult) -> Self {
         Self::with_committed(SshTargetCatalogSnapshot::merge(config, Vec::new()))
@@ -209,7 +220,7 @@ impl SshTargetCatalog {
 
     #[cfg(test)]
     pub(crate) fn begin_refresh_for_test(&mut self, intent: SshTargetCatalogRefreshIntent) -> u64 {
-        self.begin_refresh(intent)
+        self.refresh.begin(intent)
     }
 
     #[cfg(test)]
@@ -218,7 +229,7 @@ impl SshTargetCatalog {
         generation: u64,
         result: Result<SshTargetCatalogSnapshot, String>,
     ) -> bool {
-        self.finish_refresh(generation, result)
+        self.refresh.finish(generation, result, &mut self.committed)
     }
 
     #[cfg(test)]
@@ -229,7 +240,7 @@ impl SshTargetCatalog {
     #[cfg(test)]
     pub(crate) fn commit_for_test(&mut self, config: LoadResult) {
         self.committed = SshTargetCatalogSnapshot::merge(config, Vec::new());
-        self.committed_generation = self.committed_generation.wrapping_add(1);
+        self.refresh.committed_generation = self.refresh.committed_generation.wrapping_add(1);
     }
 }
 

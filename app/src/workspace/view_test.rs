@@ -4435,6 +4435,65 @@ fn test_cross_window_pending_restore_reserves_durable_session_owner() {
 }
 
 #[test]
+fn test_resume_seeds_pane_container_title_not_tab_group_title() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        let server = test_ssh_server_for_environment_tests();
+        let environment =
+            crate::workspace::environment_provider::source_saved_ssh::runtime_transport_snapshot(
+                "resume-title-seed".to_string(),
+                &server,
+                Some("/root/project".to_string()),
+                EnvironmentLifecycleState::Connected,
+            );
+        let authority = environment.authority_key.clone();
+        let mut pending_restore = test_pending_environment_runtime_session_restore(&authority);
+        pending_restore.session.label = Some("扫描到的会话标题".to_string());
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.set_active_tab_environment(environment);
+            workspace.restore_environment_runtime_session(&authority, pending_restore, ctx);
+
+            let pane_group = workspace.active_tab_pane_group();
+            let (group_title, pane_title) = pane_group.read(ctx, |pane_group, ctx| {
+                let pane_id = pane_group.focused_pane_id(ctx);
+                let pane_title = pane_group
+                    .pane_by_id(pane_id)
+                    .expect("resume allocates a focused pane")
+                    .pane_configuration()
+                    .as_ref(ctx)
+                    .custom_vertical_tabs_title()
+                    .map(str::to_owned);
+                (pane_group.custom_title(ctx), pane_title)
+            });
+
+            assert_eq!(
+                pane_title.as_deref(),
+                Some("扫描到的会话标题"),
+                "Resume must seed PaneConfiguration.custom_vertical_tabs_title from the scanned title"
+            );
+            assert!(
+                group_title.is_none(),
+                "Resume must not copy the scanned title onto Tab/pane-group custom_title; group_title={group_title:?}"
+            );
+
+            let live = workspace
+                .live_workspace_sessions(ctx)
+                .into_iter()
+                .find(|session| session.is_live_container)
+                .expect("resume placeholder must project a live navigator row");
+            assert_eq!(
+                live.label.as_deref(),
+                Some("扫描到的会话标题"),
+                "Navigator live projection must read the pane container title, not tab/env fallbacks"
+            );
+        });
+    });
+}
+
+#[test]
 fn test_local_resume_preserves_full_navigator_cardinality() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
@@ -17734,7 +17793,9 @@ fn resume_action_consumes_committed_model_without_action_time_refresh() {
     assert!(post_delivery.contains("reduce_session_navigator_refresh"));
     assert!(post_delivery.contains("SessionNavigatorAction::RestoreStarted"));
     assert_eq!(
-        post_delivery.matches("reduce_session_navigator_refresh").count(),
+        post_delivery
+            .matches("reduce_session_navigator_refresh")
+            .count(),
         1,
         "post-delivery must perform exactly one canonical Refresh before RestoreStarted"
     );

@@ -27,6 +27,7 @@ rust_production_call_sites() {
         --glob '*.rs' \
         --glob '!**/*_test.rs' \
         --glob '!**/*_tests.rs' \
+        --glob '!**/tests.rs' \
         --glob '!**/tests/**' \
         "$pattern" \
         app/src crates \
@@ -46,9 +47,16 @@ function_pattern = re.compile(
     r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^\n>{};()]*>)?\s*\("
 )
 
+def is_test_path(path: Path) -> bool:
+    return (
+        "tests" in path.parts
+        or path.name in {"tests.rs", "test.rs"}
+        or path.name.endswith(("_test.rs", "_tests.rs"))
+    )
+
 for root in (Path("app/src"), Path("crates")):
     for path in sorted(root.rglob("*.rs")):
-        if "tests" in path.parts or path.name.endswith(("_test.rs", "_tests.rs")):
+        if is_test_path(path):
             continue
         text = path.read_text(errors="replace")
         cfg_test = re.search(r"(?m)^\s*#\[cfg\(test\)\]\s*\n\s*mod\s+tests\s*\{", text)
@@ -76,9 +84,17 @@ import sys
 from pathlib import Path
 
 pattern = re.compile(sys.argv[1])
+
+def is_test_path(path: Path) -> bool:
+    return (
+        "tests" in path.parts
+        or path.name in {"tests.rs", "test.rs"}
+        or path.name.endswith(("_test.rs", "_tests.rs"))
+    )
+
 for root in (Path("app/src"), Path("crates")):
     for path in sorted(root.rglob("*.rs")):
-        if "tests" in path.parts or path.name.endswith(("_test.rs", "_tests.rs")):
+        if is_test_path(path):
             continue
         text = path.read_text(errors="replace")
         cfg_test = re.search(r"(?m)^\s*#\[cfg\(test\)\]\s*\n\s*mod\s+tests\s*\{", text)
@@ -89,7 +105,6 @@ for root in (Path("app/src"), Path("crates")):
                 print(f"{path}:{line_number}:{line}")
 PY
 }
-
 require_rust_callsite_owners() {
     local contract_id="$1"
     local description="$2"
@@ -250,10 +265,10 @@ print_jcode_stage_a_inventory() {
     echo 'owners:'
     rust_production_callsite_owners '\bAgentSessionDiscoveryPlan::from_registry\('
     echo
-    echo 'Jcode/Omp native-store reader inventory (must stay in cli_agent_jsonl.rs):'
+    echo 'Jcode/Omp native-store reader inventory (must stay in cli_agent_jsonl/):'
     rg -n \
         '(\.jcode|\.omp/agent)' \
-        app/src/cli_agent_jsonl.rs \
+        app/src/cli_agent_jsonl/ \
         || true
 }
 
@@ -266,9 +281,17 @@ wire_pattern = re.compile(
     r'jcode_(?:app_core|protocol)|"type"\s*:\s*"(?:subscribe|resume_session|message|cancel)"',
     re.IGNORECASE,
 )
+
+def is_test_path(path: Path) -> bool:
+    return (
+        "tests" in path.parts
+        or path.name in {"tests.rs", "test.rs"}
+        or path.name.endswith(("_test.rs", "_tests.rs"))
+    )
+
 for root in (Path("app/src"), Path("crates")):
     for path in root.rglob("*.rs"):
-        if path.name.endswith(("_test.rs", "_tests.rs")) or "tests" in path.parts:
+        if is_test_path(path):
             continue
         text = path.read_text().split("\n#[cfg(test)]", maxsplit=1)[0]
         if "jcode" not in text.lower():
@@ -464,7 +487,7 @@ forbid_outside_shared_home() {
     local shared_home="$4"
     local matches
 
-    matches=$(rg -n "$pattern" app/src --glob '*.rs' --glob "!$shared_home" || true)
+    matches=$(rg -n "$pattern" app/src --glob '*.rs' --glob "!**/$shared_home" --glob "!$shared_home" || true)
     if [[ -n "$matches" ]]; then
         echo "[$id] $description" >&2
         echo "$matches" >&2
@@ -1119,7 +1142,7 @@ require_contract_marker "LR-122" "CLI-AGENT-STORE-ROOT-OPERATION-CONTEXT-31" doc
 require_contract_marker "LR-122" "SN-CLI-AGENT-STORE-ROOT-OPERATION-CONTEXT-31" docs/SESSION_NAVIGATOR_SPEC.yaml
 require_contract_marker "LR-122" "id: LR-122" docs/design/local-remote-parity-tracker.yaml
 require_contract_marker "LR-122" "CLI-agent stores: explicit operation-scoped target roots" docs/design/local-remote-capability-matrix.csv
-require_contract_marker "LR-122" "CliAgentStoreRoots" app/src/cli_agent_jsonl.rs
+require_contract_marker "LR-122" "CliAgentStoreRoots" app/src/cli_agent_jsonl/roots.rs
 require_contract_marker "LR-122" "CliAgentSessionStoreRoots" crates/remote_server/proto/remote_server.proto
 require_contract_marker "LR-122" "local_cli_agent_source_target_uses_shared_custom_codex_root" app/src/terminal/cli_agent_session_index.rs
 require_contract_marker "LR-122" "delete_codex_index_entry_uses_shared_custom_codex_root" app/src/terminal/cli_agent_session_index.rs
@@ -1486,17 +1509,17 @@ require_contract_marker "LR-039" "begin_write_file_transfer" app/src/sftp_manage
 require_contract_marker "LR-039" "begin_read_file_transfer" app/src/sftp_manager/daemon_backend.rs
 require_contract_marker "LR-039" "download_save_as_revalidates_stable_path_after_listing_reorder" app/src/sftp_manager/browser_tests.rs
 
-# LR-035/LR-036: transcript title metadata parser 只能由 cli_agent_jsonl.rs 定义。
+# LR-035/LR-036: transcript title metadata parser 只能由 cli_agent_jsonl/ 定义。
 forbid_outside_shared_home \
     "LR-035/LR-036" \
-    "CLI-agent transcript metadata parser was redefined outside cli_agent_jsonl.rs" \
+    "CLI-agent transcript metadata parser was redefined outside cli_agent_jsonl/" \
     'fn (codex_session_metadata|claude_session_metadata|codex_title_from_item|first_message_excerpt)\b' \
-    'cli_agent_jsonl.rs'
+    'cli_agent_jsonl/**'
 require_contract_marker "LR-035" "SN-INTRA-TITLE-PARSER-PARITY-01" docs/SESSION_NAVIGATOR_SPEC.yaml
 require_contract_marker "LR-035" "test_local_cli_agent_scan_uses_shared_first_user_message_title_fallback" app/src/terminal/cli_agent_session_index.rs
 require_contract_marker "LR-035" "test_remote_cli_agent_scan_uses_shared_first_user_message_title_fallback" app/src/remote_server/cli_agent_sessions.rs
-require_contract_marker "LR-035" "shared_codex_metadata_ignores_injected_user_content" app/src/cli_agent_jsonl.rs
-require_contract_marker "LR-035" "shared_provider_title_wins_over_first_user_message" app/src/cli_agent_jsonl.rs
+require_contract_marker "LR-035" "shared_codex_metadata_ignores_injected_user_content" app/src/cli_agent_jsonl/tests.rs
+require_contract_marker "LR-035" "shared_provider_title_wins_over_first_user_message" app/src/cli_agent_jsonl/tests.rs
 require_contract_marker "LR-036" "SN-INTRA-SESSION-BRIDGE-TITLE-01" docs/SESSION_NAVIGATOR_SPEC.yaml
 
 # LR-040: protobuf oneof result 是 required outcome，必须在 transport boundary 统一校验。
@@ -1591,8 +1614,8 @@ require_contract_marker "LR-041/LR-044" 'entries.sort_by(|a, b| a.name.cmp(&b.na
 # LR-042: CLI-agent history scan 必须 complete-or-error，且 cache 只提交完整 Success。
 require_contract_marker "LR-042" "SN-INTRA-SCAN-COMMIT-01" docs/SESSION_NAVIGATOR_SPEC.yaml
 require_contract_marker "LR-042" "id: LR-042" docs/design/local-remote-parity-tracker.yaml
-require_contract_marker "LR-042" "recent_jsonl_files" app/src/cli_agent_jsonl.rs
-require_contract_marker "LR-042" "recent_jsonl_scan_error_is_not_silently_dropped" app/src/cli_agent_jsonl.rs
+require_contract_marker "LR-042" "recent_jsonl_files" app/src/cli_agent_jsonl/discovery.rs
+require_contract_marker "LR-042" "recent_jsonl_scan_error_is_not_silently_dropped" app/src/cli_agent_jsonl/tests.rs
 require_contract_marker "LR-042" "session_refresh_scan_failure_preserves_cached_rows" app/src/workspace/view/session_navigator_scan_tests.rs
 require_contract_marker "LR-042" "remote_session_refresh_scan_failure_preserves_cached_rows" app/src/workspace/environment_table.rs
 require_contract_marker "LR-042" "commit_indexed_cli_agent_session_discovery" app/src/workspace/environment_table.rs
@@ -1611,8 +1634,8 @@ fi
 # LR-043: CLI-agent home 是 required value，unknown 不得伪装为空 store 或 `/`。
 require_contract_marker "LR-043" "SN-INTRA-HOME-RESOLUTION-01" docs/SESSION_NAVIGATOR_SPEC.yaml
 require_contract_marker "LR-043" "id: LR-043" docs/design/local-remote-parity-tracker.yaml
-require_contract_marker "LR-043" "require_cli_agent_home" app/src/cli_agent_jsonl.rs
-require_contract_marker "LR-043" "cli_agent_home_resolution_never_falls_back_to_filesystem_root" app/src/cli_agent_jsonl.rs
+require_contract_marker "LR-043" "require_cli_agent_home" app/src/cli_agent_jsonl/roots.rs
+require_contract_marker "LR-043" "cli_agent_home_resolution_never_falls_back_to_filesystem_root" app/src/cli_agent_jsonl/tests.rs
 require_contract_marker "LR-043" "local_cli_agent_scan_requires_resolved_home" app/src/terminal/cli_agent_session_index.rs
 require_contract_marker "LR-043" "local_cli_agent_delete_requires_resolved_home" app/src/terminal/cli_agent_session_index.rs
 require_contract_marker "LR-043" "local_cli_agent_source_target_requires_resolved_home" app/src/terminal/cli_agent_session_index.rs
@@ -1645,8 +1668,8 @@ fi
 # LR-045: CLI-agent cwd metadata 必须由两侧 scanner 复用唯一 host-scoped normalizer。
 require_contract_marker "LR-045" "SN-INTRA-CWD-PARSER-PARITY-01" docs/SESSION_NAVIGATOR_SPEC.yaml
 require_contract_marker "LR-045" "id: LR-045" docs/design/local-remote-parity-tracker.yaml
-require_contract_marker "LR-045" "normalize_cli_agent_session_cwd" app/src/cli_agent_jsonl.rs
-require_contract_marker "LR-045" "cli_agent_session_cwd_normalization_is_shared" app/src/cli_agent_jsonl.rs
+require_contract_marker "LR-045" "normalize_cli_agent_session_cwd" app/src/cli_agent_jsonl/roots.rs
+require_contract_marker "LR-045" "cli_agent_session_cwd_normalization_is_shared" app/src/cli_agent_jsonl/tests.rs
 require_contract_marker "LR-045" "test_local_cli_agent_scan_uses_shared_cwd_normalization" app/src/terminal/cli_agent_session_index.rs
 require_contract_marker "LR-045" "test_remote_cli_agent_scan_uses_shared_cwd_normalization" app/src/remote_server/cli_agent_sessions.rs
 
@@ -1662,8 +1685,8 @@ fi
 # LR-046: logical history quota 必须在 provider 聚合后由唯一 helper 全局应用。
 require_contract_marker "LR-046" "SN-INTRA-LOGICAL-LIMIT-PARITY-01" docs/SESSION_NAVIGATOR_SPEC.yaml
 require_contract_marker "LR-046" "id: LR-046" docs/design/local-remote-parity-tracker.yaml
-require_contract_marker "LR-046" "limit_cli_agent_session_sources" app/src/cli_agent_jsonl.rs
-require_contract_marker "LR-046" "cli_agent_logical_limit_is_shared_across_providers" app/src/cli_agent_jsonl.rs
+require_contract_marker "LR-046" "limit_cli_agent_session_sources" app/src/cli_agent_jsonl/policy.rs
+require_contract_marker "LR-046" "cli_agent_logical_limit_is_shared_across_providers" app/src/cli_agent_jsonl/tests.rs
 require_contract_marker "LR-046" "test_local_cli_agent_scan_applies_global_logical_limit" app/src/terminal/cli_agent_session_index.rs
 require_contract_marker "LR-046" "test_remote_cli_agent_scan_applies_global_logical_limit" app/src/remote_server/cli_agent_sessions.rs
 require_contract_marker "LR-046" "test_local_cli_agent_scan_preserves_shared_logical_order" app/src/terminal/cli_agent_session_index.rs
@@ -1681,8 +1704,8 @@ fi
 # LR-047: Codex session index 字段 fallback/timestamp 必须由唯一共享 parser 产生。
 require_contract_marker "LR-047" "SN-INTRA-CODEX-INDEX-PARSER-PARITY-01" docs/SESSION_NAVIGATOR_SPEC.yaml
 require_contract_marker "LR-047" "id: LR-047" docs/design/local-remote-parity-tracker.yaml
-require_contract_marker "LR-047" "codex_session_index_record" app/src/cli_agent_jsonl.rs
-require_contract_marker "LR-047" "codex_session_index_record_parser_is_shared" app/src/cli_agent_jsonl.rs
+require_contract_marker "LR-047" "codex_session_index_record" app/src/cli_agent_jsonl/parse.rs
+require_contract_marker "LR-047" "codex_session_index_record_parser_is_shared" app/src/cli_agent_jsonl/tests.rs
 require_contract_marker "LR-047" "test_local_codex_index_accepts_shared_session_id_fallback" app/src/terminal/cli_agent_session_index.rs
 require_contract_marker "LR-047" "test_remote_codex_index_accepts_shared_session_id_fallback" app/src/remote_server/cli_agent_sessions.rs
 
@@ -1806,8 +1829,8 @@ require_contract_marker "LR-053" "test_cross_window_pending_restore_reserves_dur
 require_contract_marker "LR-054" "SN-CODEX-CANONICAL-SESSION-ID-01" docs/SESSION_NAVIGATOR_SPEC.yaml
 require_contract_marker "LR-054" "id: LR-054" docs/design/local-remote-parity-tracker.yaml
 require_contract_marker "LR-054" "session navigator: canonical Codex provider session identity" docs/design/local-remote-capability-matrix.csv
-require_contract_marker "LR-054" "canonical_codex_session_id_rejects_runtime_object_ids" app/src/cli_agent_jsonl.rs
-require_contract_marker "LR-054" "shared_codex_metadata_never_promotes_response_item_message_id" app/src/cli_agent_jsonl.rs
+require_contract_marker "LR-054" "canonical_codex_session_id_rejects_runtime_object_ids" app/src/cli_agent_jsonl/tests.rs
+require_contract_marker "LR-054" "shared_codex_metadata_never_promotes_response_item_message_id" app/src/cli_agent_jsonl/tests.rs
 require_contract_marker "LR-054" "test_codex_explicit_resume_command_uses_cli_session_uuid" app/src/terminal/cli_agent_tests.rs
 require_contract_marker "LR-054" "canonical_codex_session_id" app/src/terminal/cli_agent.rs
 require_contract_marker "LR-054" "AgentSessionDiscoveryRecord" app/src/terminal/cli_agent_session_index.rs
@@ -1948,10 +1971,10 @@ if [[ -z "$singleton_claim_line" || -z "$shared_init_line" || "$singleton_claim_
 fi
 
 codex_non_meta_payload_identity_matches=$(sed -n \
-    '/fn codex_session_id(/,/^}/p' app/src/cli_agent_jsonl.rs | \
+    '/fn codex_session_id(/,/^}/p' app/src/cli_agent_jsonl/parse.rs | \
     rg -n 'nested_string\(value, &\["payload", "id"\]\)' || true)
 codex_session_meta_guard_matches=$(sed -n \
-    '/fn codex_session_id(/,/^}/p' app/src/cli_agent_jsonl.rs | \
+    '/fn codex_session_id(/,/^}/p' app/src/cli_agent_jsonl/parse.rs | \
     rg -n 'filter\(\|value\| string_field\(value, "type"\) == Some\("session_meta"\)\)' || true)
 if [[ -n "$codex_non_meta_payload_identity_matches" && -z "$codex_session_meta_guard_matches" ]]; then
     echo "[LR-054] Codex payload.id may only be read behind the session_meta type guard" >&2
@@ -3069,6 +3092,13 @@ require_contract_marker "LR-165" "custom_vertical_tabs_title.as_deref()" app/src
 require_contract_marker "LR-165" "fn finish_tab_rename" app/src/workspace/view.rs
 require_rust_test_name "LR-165" "test_live_pane_rename_commits_on_enter_or_blur_and_escape_keeps_container_title" app/src/workspace/view_test.rs
 require_rust_test_name "LR-165" "test_environment_runtime_live_placeholder_does_not_apply_durable_alias" app/src/workspace/view_test.rs
+require_rust_test_name "LR-192" "test_resume_seeds_pane_container_title_not_tab_group_title" app/src/workspace/view_test.rs
+require_rust_test_name "LR-192" "test_session_navigator_collapse_keeps_indexed_title_when_live_label_is_generic" app/src/workspace/view/session_navigator_reducer_tests.rs
+require_rust_test_name "LR-192" "test_session_navigator_live_pane_specific_title_wins_over_indexed_specific" app/src/app_state_tests.rs
+require_contract_marker "LR-192" "SN-LIVE-CONTAINER-TITLE-OWNERSHIP-60" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-192" "id: LR-192" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-192" "Session Navigator Resume scanned title ownership" docs/design/local-remote-capability-matrix.csv
+require_contract_marker "LR-192" "resume_seed_rule" docs/SESSION_NAVIGATOR_SPEC.yaml
 
 if rg -n 'collect_workspace_sessions_from_node\([^;]*tab\.custom_title|label: tab_title' app/src/app_state.rs; then
     echo "[LR-165] Tab group custom title is still copied into leaf/session labels" >&2
@@ -3448,15 +3478,15 @@ require_contract_marker "LR-174" "AGENT-SESSION-DISCOVERY-OWNER-78" docs/LOCAL_R
 require_contract_marker "LR-174" "id: LR-174" docs/design/local-remote-parity-tracker.yaml
 require_contract_marker "LR-174" "CLI Agent sessions: shared discovery owner" docs/design/local-remote-capability-matrix.csv
 require_contract_marker "LR-174" "AgentSessionDiscoveryPlan" app/src/terminal/cli_agent_session_index.rs
-require_rust_test_name "LR-174" "discovery_plan_distinguishes_source_missing_from_successful_empty_store" app/src/cli_agent_jsonl.rs
-require_rust_test_name "LR-174" "discovery_plan_rejects_partial_collection_on_scan_failure" app/src/cli_agent_jsonl.rs
-require_rust_test_name "LR-174" "discovery_cancel_has_explicit_preserve_transition" app/src/cli_agent_jsonl.rs
-require_rust_test_name "LR-174" "provider_outcomes_preserve_identity_and_order_until_explicit_permanent_deletion" app/src/cli_agent_jsonl.rs
+require_rust_test_name "LR-174" "discovery_plan_distinguishes_source_missing_from_successful_empty_store" app/src/cli_agent_jsonl/tests.rs
+require_rust_test_name "LR-174" "discovery_plan_rejects_partial_collection_on_scan_failure" app/src/cli_agent_jsonl/tests.rs
+require_rust_test_name "LR-174" "discovery_cancel_has_explicit_preserve_transition" app/src/cli_agent_jsonl/tests.rs
+require_rust_test_name "LR-174" "provider_outcomes_preserve_identity_and_order_until_explicit_permanent_deletion" app/src/cli_agent_jsonl/tests.rs
 require_rust_callsite_owners \
     "LR-174" \
     "shared provider scan primitive" \
     '\bscan_agent_session_provider\(' \
-    $'app/src/cli_agent_jsonl.rs:execute\napp/src/cli_agent_jsonl.rs:scan_agent_session_provider'
+    $'app/src/cli_agent_jsonl/discovery.rs:execute\napp/src/cli_agent_jsonl/discovery.rs:scan_agent_session_provider'
 require_rust_callsite_owners \
     "LR-174" \
     "shared discovery plan execution" \
@@ -3508,7 +3538,7 @@ require_rust_callsite_owners \
     "LR-175" \
     "typed native target-identity plan" \
     '\bplan_native_session_write_for_target_identity\(' \
-    $'app/src/session_bridge/native_writer.rs:stage_write\napp/src/session_bridge/native_writer.rs:plan_native_session_write_for_target_identity\napp/src/session_bridge/tests.rs:typed_native_writer_uses_only_matching_lifecycle_target_identity\napp/src/session_bridge/tests.rs:typed_native_writer_uses_only_matching_lifecycle_target_identity'
+    $'app/src/session_bridge/native_writer.rs:stage_write\napp/src/session_bridge/native_writer.rs:plan_native_session_write_for_target_identity'
 require_rust_callsite_owners \
     "LR-175" \
     "Ashide persistence side-effect primitive" \
@@ -3720,14 +3750,14 @@ require_rust_test_name "LR-179" "jcode_discovery_and_resume_do_not_require_a_dae
 require_rust_test_name "LR-179" "jcode_readonly_discovery_capabilities_are_separate_from_advanced_session_actions" app/src/terminal/cli_agent_tests.rs
 require_rust_test_name "LR-179" "omp_readonly_discovery_has_an_independent_explicit_resume_adapter" app/src/terminal/cli_agent_tests.rs
 require_rust_test_name "LR-179" "jcode_fork_edit_and_writeback_remain_disabled" app/src/terminal/cli_agent_tests.rs
-require_rust_test_name "LR-179" "jcode_discovery_reads_authoritative_session_json_and_uses_updated_at" app/src/cli_agent_jsonl.rs
-require_rust_test_name "LR-179" "jcode_discovery_rejects_filename_id_mismatch" app/src/cli_agent_jsonl.rs
-require_rust_test_name "LR-179" "jcode_discovery_filters_debug_and_empty_sessions_before_recency_limit" app/src/cli_agent_jsonl.rs
-require_rust_test_name "LR-179" "omp_discovery_reads_one_project_level_and_prefers_title_slot" app/src/cli_agent_jsonl.rs
-require_rust_test_name "LR-179" "omp_discovery_orders_by_mtime_and_rejects_filename_id_mismatch" app/src/cli_agent_jsonl.rs
-require_rust_test_name "LR-179" "explicit_target_roots_keep_jcode_and_omp_under_target_home" app/src/cli_agent_jsonl.rs
-require_rust_test_name "LR-179" "jcode_and_omp_are_file_backed_session_index_providers" app/src/cli_agent_jsonl.rs
-require_rust_test_name "LR-179" "discovery_plan_uses_only_enabled_unique_file_backed_agents" app/src/cli_agent_jsonl.rs
+require_rust_test_name "LR-179" "jcode_discovery_reads_authoritative_session_json_and_uses_updated_at" app/src/cli_agent_jsonl/tests.rs
+require_rust_test_name "LR-179" "jcode_discovery_rejects_filename_id_mismatch" app/src/cli_agent_jsonl/tests.rs
+require_rust_test_name "LR-179" "jcode_discovery_filters_debug_and_empty_sessions_before_recency_limit" app/src/cli_agent_jsonl/tests.rs
+require_rust_test_name "LR-179" "omp_discovery_reads_one_project_level_and_prefers_title_slot" app/src/cli_agent_jsonl/tests.rs
+require_rust_test_name "LR-179" "omp_discovery_orders_by_mtime_and_rejects_filename_id_mismatch" app/src/cli_agent_jsonl/tests.rs
+require_rust_test_name "LR-179" "explicit_target_roots_keep_jcode_and_omp_under_target_home" app/src/cli_agent_jsonl/tests.rs
+require_rust_test_name "LR-179" "jcode_and_omp_are_file_backed_session_index_providers" app/src/cli_agent_jsonl/tests.rs
+require_rust_test_name "LR-179" "discovery_plan_uses_only_enabled_unique_file_backed_agents" app/src/cli_agent_jsonl/tests.rs
 require_rust_test_name "LR-179" "local_jcode_and_omp_cold_scan_project_stable_rows_without_layout_identity" app/src/terminal/cli_agent_session_index.rs
 require_rust_test_name "LR-179" "test_cli_agent_history_enabled_agents_default_to_all_discoverable_native_resumers" app/src/settings/ai_tests.rs
 require_rust_test_name "LR-179" "test_cli_agent_history_enabled_agents_ignore_stale_names_and_deduplicate_selection" app/src/settings/ai_tests.rs
@@ -3744,7 +3774,7 @@ from pathlib import Path
 
 agent = Path("app/src/terminal/cli_agent.rs").read_text()
 icons = Path("crates/warp_core/src/ui/icons.rs").read_text()
-discovery = Path("app/src/cli_agent_jsonl.rs").read_text()
+discovery = "".join(path.read_text() for path in sorted(Path("app/src/cli_agent_jsonl").glob("*.rs")))
 settings = Path("app/src/settings/ai.rs").read_text()
 workspace = Path("app/src/workspace/view.rs").read_text()
 runtime = Path("app/src/workspace/environment_runtime.rs").read_text()
@@ -3818,8 +3848,8 @@ for path in Path("app/src").rglob("*.rs"):
     if path.name.endswith(("_test.rs", "_tests.rs")) or "tests" in path.parts:
         continue
     content = path.read_text().split("\n#[cfg(test)]", maxsplit=1)[0]
-    if path != Path("app/src/cli_agent_jsonl.rs") and (".jcode" in content or ".omp/agent" in content):
-        raise SystemExit(f"Jcode/Omp native store reader escaped cli_agent_jsonl.rs: {path}")
+    if path.parent != Path("app/src/cli_agent_jsonl") and (".jcode" in content or ".omp/agent" in content):
+        raise SystemExit(f"Jcode/Omp native store reader escaped cli_agent_jsonl/: {path}")
 for required in [
     'toml_path: "agents.third_party.history_enabled_agents"',
     'pub fn cli_agent_history_enabled_agents(&self) -> Vec<CLIAgent>',
@@ -4288,19 +4318,28 @@ then
     fail=1
 fi
 
-# LR-190/191: Resume consumes the committed visible model, while the status
-# badge keeps restore, structured execution, focus, and liveness orthogonal.
+# LR-190/191/192/193: Resume consumes the committed visible model; status badge
+# stays orthogonal; live title ownership must survive the hot-path rewrite; and
+# parallel-path ownership inheritance must keep a negative probe.
 require_contract_marker "LR-190" "SESSION-NAVIGATOR-RESUME-COMMITTED-HOT-PATH-88" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
 require_contract_marker "LR-190" "SN-RESUME-COMMITTED-ACTION-HOT-PATH-64" docs/SESSION_NAVIGATOR_SPEC.yaml
 require_contract_marker "LR-190" "id: LR-190" docs/design/local-remote-parity-tracker.yaml
 require_contract_marker "LR-190" "Session Navigator Resume committed hot path" docs/design/local-remote-capability-matrix.csv
 require_contract_marker "LR-190" "resume_action_consumes_committed_model_without_action_time_refresh" app/src/workspace/view_test.rs
+require_contract_marker "LR-190" "SN-LIVE-CONTAINER-TITLE-OWNERSHIP-60" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-190" "co_required_ownership" docs/SESSION_NAVIGATOR_SPEC.yaml
 require_contract_marker "LR-191" "SESSION-NAVIGATOR-LIVE-AGENT-ACTIVITY-87" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
 require_contract_marker "LR-191" "SN-LIVE-CLI-AGENT-ACTIVITY-63" docs/SESSION_NAVIGATOR_SPEC.yaml
 require_contract_marker "LR-191" "id: LR-191" docs/design/local-remote-parity-tracker.yaml
 require_contract_marker "LR-191" "Session Navigator orthogonal status projection" docs/design/local-remote-capability-matrix.csv
 require_contract_marker "LR-191" "session_status_badge_has_explicit_semantic_precedence" app/src/workspace/view/vertical_tabs_tests.rs
 require_contract_marker "LR-191" "activity_resolver_uses_container_identity_not_locator" app/src/workspace/view/vertical_tabs_tests.rs
+require_contract_marker "LR-193" "HARNESS-PARALLEL-PATH-OWNERSHIP-INHERITANCE-89" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
+require_contract_marker "LR-193" "id: LR-193" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-193" "Agent harness: parallel-path ownership inheritance" docs/design/local-remote-capability-matrix.csv
+require_contract_marker "LR-193" "parallel_path_ownership_inheritance" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-193" "平行路径所有权继承" AGENTS.md
+require_contract_marker "LR-193" "HARNESS-PARALLEL-PATH-OWNERSHIP-INHERITANCE-89" .agents/skills/ashide-architecture-change/SKILL.md
 require_rust_callsite_owners \
     "LR-191" \
     "stable container activity lookup" \
@@ -4330,56 +4369,136 @@ def function_body(path, name):
     raise SystemExit(f"unterminated function {path}:{name}")
 
 
+def assert_forbids(body, forbidden, context):
+    for token in forbidden:
+        if token in body:
+            raise SystemExit(f"{context} still contains forbidden token: {token}")
+
+
+def assert_requires(body, required, context):
+    for token in required:
+        if token not in body:
+            raise SystemExit(f"{context} is missing required token: {token}")
+
+
 activate = function_body(
     "app/src/workspace/view/session_navigator.rs",
     "activate_restored_workspace_session",
 )
-for required in ["self.session_navigator_model()", "SessionNavigatorAction::Activate"]:
-    if required not in activate:
-        raise SystemExit(f"Resume committed action path is missing: {required}")
-for forbidden in [
-    "session_navigator_sessions_for_display_update",
-    "session_navigator_action_model",
-    "reduce_session_navigator_refresh",
-    "live_workspace_sessions",
-]:
-    if forbidden in activate:
-        raise SystemExit(f"Resume action hot path still performs speculative projection: {forbidden}")
+assert_requires(
+    activate,
+    ["self.session_navigator_model()", "SessionNavigatorAction::Activate"],
+    "Resume committed action path",
+)
+assert_forbids(
+    activate,
+    [
+        "session_navigator_sessions_for_display_update",
+        "session_navigator_action_model",
+        "reduce_session_navigator_refresh",
+        "live_workspace_sessions",
+    ],
+    "Resume action hot path",
+)
 
 live_or_pending = function_body(
     "app/src/workspace/view/session_navigator.rs",
     "live_or_pending_workspace_session_locator",
 )
-if "session_binding_for_pane_id" not in live_or_pending:
-    raise SystemExit("Resume locator must resolve durable identity via PaneConfiguration binding")
-for forbidden in ["live_workspace_sessions", ".snapshot("]:
-    if forbidden in live_or_pending:
-        raise SystemExit(f"Resume locator still performs full live projection: {forbidden}")
+assert_requires(live_or_pending, ["session_binding_for_pane_id"], "Resume locator")
+assert_forbids(live_or_pending, ["live_workspace_sessions", ".snapshot("], "Resume locator")
 
 live_projection = function_body(
     "app/src/workspace/view/session_navigator.rs",
     "live_workspace_sessions",
 )
-for required in ["session_binding_for_pane_id", "container_uuid_for_pane_id"]:
-    if required not in live_projection:
-        raise SystemExit(f"Navigator live projection is missing: {required}")
-for forbidden in [
+assert_requires(
+    live_projection,
+    ["session_binding_for_pane_id", "container_uuid_for_pane_id", "custom_vertical_tabs_title"],
+    "Navigator live projection",
+)
+live_title_forbids = [
     "pane_group.snapshot",
     "WorkspaceSessionSnapshot::from_tabs",
     "TabSnapshot",
-]:
-    if forbidden in live_projection:
-        raise SystemExit(f"Navigator live projection still snapshots terminal panes: {forbidden}")
+    "custom_title(",
+    "group_title",
+    "tab_environment.label",
+]
+assert_forbids(live_projection, live_title_forbids, "Navigator live projection")
+
+# Negative probe: reintroducing a forbidden title source must be detectable.
+synthetic_polluted = live_projection + "\nlet _ = group_title;\n"
+detected = [
+    token
+    for token in live_title_forbids
+    if token in synthetic_polluted and token not in live_projection
+]
+if "group_title" not in detected:
+    raise SystemExit("negative probe failed to detect injected group_title pollution")
+
+allocate_tab = function_body(
+    "app/src/workspace/view.rs",
+    "add_tab_with_pane_layout_in_environment",
+)
+assert_requires(allocate_tab, ["set_custom_vertical_tabs_title"], "tab allocation title seed")
+assert_forbids(allocate_tab, ["set_title(&title", "set_title(title"], "tab allocation title seed")
+
+runtime_restore = function_body(
+    "app/src/workspace/view.rs",
+    "restore_environment_runtime_session",
+)
+assert_requires(
+    runtime_restore,
+    ["title_fallback_label", "allocate_environment_runtime_placeholder_tab"],
+    "runtime Resume title seed",
+)
+assert_forbids(runtime_restore, ["session.label.clone()"], "runtime Resume title seed")
+
+local_restore = function_body(
+    "app/src/workspace/view.rs",
+    "open_terminal_bootstrap_restored_session_terminal",
+)
+assert_requires(
+    local_restore,
+    ["title_fallback_label", "open_terminal_bootstrap_tab_in_environment"],
+    "local Resume title seed",
+)
+assert_forbids(local_restore, ["session.label.clone()"], "local Resume title seed")
+
+collapse = function_body(
+    "app/src/workspace/view/session_navigator_reducer.rs",
+    "collapse_materialized_session_rows",
+)
+assert_requires(collapse, ["merged_label"], "RowId collapse title merge")
+assert_forbids(
+    collapse,
+    ["session.label.is_none()", "existing.label.is_none()"],
+    "RowId collapse title merge",
+)
+
+leaf_from_tabs = function_body("app/src/app_state.rs", "workspace_session_from_leaf")
+assert_requires(
+    leaf_from_tabs,
+    ["container_title.map(str::to_string)"],
+    "from_tabs leaf title projection",
+)
+assert_forbids(
+    leaf_from_tabs,
+    ["custom_title", "environment.label", "group_title"],
+    "from_tabs leaf title projection",
+)
 
 dispatch = function_body(
     "app/src/workspace/view/session_navigator.rs",
     "dispatch_session_navigator_state_action",
 )
-if "self.session_navigator_model()" not in dispatch:
-    raise SystemExit("lifecycle dispatch must consume the committed SessionNavigatorModel")
-for forbidden in ["session_navigator_action_model", "reduce_session_navigator_refresh"]:
-    if forbidden in dispatch:
-        raise SystemExit(f"lifecycle dispatch still embeds speculative refresh: {forbidden}")
+assert_requires(dispatch, ["self.session_navigator_model()"], "lifecycle dispatch")
+assert_forbids(
+    dispatch,
+    ["session_navigator_action_model", "reduce_session_navigator_refresh"],
+    "lifecycle dispatch",
+)
 
 post_delivery = function_body(
     "app/src/workspace/view/session_navigator.rs",
@@ -4387,42 +4506,51 @@ post_delivery = function_body(
 )
 if post_delivery.count("reduce_session_navigator_refresh") != 1:
     raise SystemExit("post-delivery commit must perform exactly one canonical Refresh")
-if "SessionNavigatorAction::RestoreStarted" not in post_delivery:
-    raise SystemExit("post-delivery commit must apply RestoreStarted on the refreshed model")
+assert_requires(
+    post_delivery,
+    ["SessionNavigatorAction::RestoreStarted"],
+    "post-delivery commit",
+)
 
 finalize = function_body(
     "app/src/workspace/view.rs",
     "finalize_delivered_workspace_session_restore_container",
 )
-for forbidden in ["live_workspace_sessions", "sync_session_navigator_sessions", "dispatch_session_navigator_state_action"]:
-    if forbidden in finalize:
-        raise SystemExit(f"restore finalize still duplicates canonical projection: {forbidden}")
+assert_forbids(
+    finalize,
+    ["live_workspace_sessions", "sync_session_navigator_sessions", "dispatch_session_navigator_state_action"],
+    "restore finalize",
+)
 if finalize.count("commit_session_navigator_restore_started_after_delivery") != 1:
     raise SystemExit("restore finalize must submit exactly one canonical RestoreStarted commit")
 
 resolver = function_body(
     "app/src/workspace/view/vertical_tabs.rs", "live_cli_agent_activity_indicator"
 )
-for required in [
-    "session.is_live_container()",
-    ".container_uuid",
-    "terminal_view_id_for_container_uuid",
-    "CLIAgentSessionsModel::as_ref",
-    "session_supports_rich_status",
-    "cli_agent_session.agent != expected_agent",
-    "restored_session_activity_indicator",
-]:
-    if required not in resolver:
-        raise SystemExit(f"live activity resolver is missing: {required}")
-for forbidden in [
-    "locator_from_restored_session_id",
-    "session.id",
-    "updated_at_unix_ms",
-    "cli_agent_session_id",
-    "command_prefix",
-]:
-    if forbidden in resolver:
-        raise SystemExit(f"live activity resolver must not infer execution from: {forbidden}")
+assert_requires(
+    resolver,
+    [
+        "session.is_live_container()",
+        ".container_uuid",
+        "terminal_view_id_for_container_uuid",
+        "CLIAgentSessionsModel::as_ref",
+        "session_supports_rich_status",
+        "cli_agent_session.agent != expected_agent",
+        "restored_session_activity_indicator",
+    ],
+    "live activity resolver",
+)
+assert_forbids(
+    resolver,
+    [
+        "locator_from_restored_session_id",
+        "session.id",
+        "updated_at_unix_ms",
+        "cli_agent_session_id",
+        "command_prefix",
+    ],
+    "live activity resolver",
+)
 
 badge = function_body(
     "app/src/workspace/view/vertical_tabs.rs", "restored_session_icon_badge"
@@ -4440,20 +4568,33 @@ if any(position < 0 for position in positions) or positions != sorted(positions)
 lookup = function_body(
     "app/src/pane_group/mod.rs", "terminal_view_id_for_container_uuid"
 )
-for required in ["container_uuid", "downcast_pane_by_id::<TerminalPane>", "terminal_view(app).id()"]:
-    if required not in lookup:
-        raise SystemExit(f"container activity carrier lookup is missing: {required}")
-if "find_pane_id_for_terminal_view" in lookup:
-    raise SystemExit("container activity lookup must not reverse-resolve a runtime EntityId")
+assert_requires(
+    lookup,
+    ["container_uuid", "downcast_pane_by_id::<TerminalPane>", "terminal_view(app).id()"],
+    "container activity carrier lookup",
+)
+assert_forbids(lookup, ["find_pane_id_for_terminal_view"], "container activity lookup")
 
 handler = function_body(
     "app/src/workspace/view/session_navigator.rs", "handle_cli_agent_sessions_event"
 )
-if "CLIAgentSessionsModelEvent::StatusChanged" not in handler:
-    raise SystemExit("Workspace must refresh Navigator on CLI agent status changes")
+assert_requires(
+    handler,
+    ["CLIAgentSessionsModelEvent::StatusChanged"],
+    "Workspace CLI agent status refresh",
+)
+
+agents = Path("AGENTS.md").read_text()
+skill = Path(".agents/skills/ashide-architecture-change/SKILL.md").read_text()
+for required in ["平行路径所有权继承", "负向探针", "LR-190→LR-192"]:
+    if required not in agents:
+        raise SystemExit(f"AGENTS.md missing harness inheritance protocol marker: {required}")
+for required in ["HARNESS-PARALLEL-PATH-OWNERSHIP-INHERITANCE-89", "负向探针", "ownership/static gates"]:
+    if required not in skill:
+        raise SystemExit(f"architecture skill missing harness inheritance protocol marker: {required}")
 PY
 then
-    echo "[LR-190/191] Resume hot path or Session Navigator status ownership changed" >&2
+    echo "[LR-190/191/192/193] Resume hot path, title ownership inheritance, or harness protocol changed" >&2
     fail=1
 fi
 
@@ -4660,7 +4801,11 @@ if ! python3 - <<'PYCONTRACT'
 from pathlib import Path
 
 app_state = Path("app/src/app_state.rs").read_text()
-scanner = Path("app/src/cli_agent_jsonl.rs").read_text()
+cli_agent_jsonl = "".join(
+    path.read_text()
+    for path in sorted(Path("app/src/cli_agent_jsonl").glob("*.rs"))
+)
+scanner = Path("app/src/cli_agent_jsonl/discovery.rs").read_text()
 remote_reader = Path("app/src/remote_server/cli_agent_sessions.rs").read_text()
 session_bridge_reader = Path("app/src/session_bridge/cli_agent_reader.rs").read_text()
 
@@ -4688,11 +4833,11 @@ for required in [
     "fn read_jsonl_values_from_reader(",
     "CliAgentSessionScanError::discovery_candidate_limit",
 ]:
-    if required not in scanner:
+    if required not in cli_agent_jsonl:
         raise SystemExit(f"physical discovery scanner primitive missing: {required}")
 
 index_start = scanner.index("fn parse_codex_discovery_index(")
-index_end = scanner.index("/// Returns the canonical Codex", index_start)
+index_end = scanner.index("pub(crate) fn recent_jsonl_files(", index_start)
 index_reader = scanner[index_start:index_end]
 if "read_jsonl_values_from_path_with_physical_line_limit(path, physical_limit)" not in index_reader:
     raise SystemExit("Codex discovery index must use the bounded physical-line reader")
