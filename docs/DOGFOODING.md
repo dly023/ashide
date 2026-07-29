@@ -66,7 +66,7 @@ zip 内容，移除不应共享的敏感段落。Dogfooding 不启用自动上�
 
 ```markdown
 ### 标题
-一句话描述：例如“恢复 Jcode 会话后停在空白终端”。
+一句话描述：例如“恢复 Omp 会话后停在空白终端”。
 
 - Release / 版本：v0.0.1
 - 平台：macOS 版本、芯片架构
@@ -91,7 +91,7 @@ zip 内容，移除不应共享的敏感段落。Dogfooding 不启用自动上�
 |---|---|---|
 | P0 | 冷启动、退出、重启、异常退出后重开 | 不崩溃；窗口 / pane / 会话恢复符合预期 |
 | P0 | 新建终端、执行命令、长任务完成 | 输入和输出连续；完成 / 失败状态可辨认 |
-| P0 | 发现并恢复 Claude、Jcode、Omp 会话 | 仅发现已启用 provider；resume 使用原生会话，不改变 Navigator 顺序 |
+| P0 | 发现并恢复 Claude、Omp 会话 | 仅发现已启用 provider；resume 使用原生会话，不改变 Navigator 顺序 |
 | P1 | Session Navigator：切换、pin、重排、关闭、重启 | 选择 / pin / 别名不因 tab / pane 布局变化错绑 |
 | P1 | Agent running / idle / blocked 图标 | 状态变化及时且不覆盖真实会话身份 |
 | P1 | SSH target catalog：新增 / 修改 config 后刷新、连接与重连 | 列表刷新可见；不会错误使用历史 target 或本机替代远端配置 |

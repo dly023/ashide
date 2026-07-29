@@ -463,10 +463,14 @@ fn cli_agent_store_roots_from_request(
 ) -> Result<crate::cli_agent_jsonl::CliAgentStoreRoots, String> {
     let roots =
         roots.ok_or_else(|| "CLI-agent request is missing target store roots".to_owned())?;
-    crate::cli_agent_jsonl::CliAgentStoreRoots::from_explicit_target_paths(
+    crate::cli_agent_jsonl::CliAgentStoreRoots::from_explicit_target_store_roots(
         PathBuf::from(roots.home_dir),
         PathBuf::from(roots.claude_config_dir),
         PathBuf::from(roots.codex_home),
+        PathBuf::from(roots.opencode_data_dir),
+        PathBuf::from(roots.copilot_home),
+        PathBuf::from(roots.pi_agent_home),
+        PathBuf::from(roots.omp_agent_home),
     )
 }
 
@@ -2655,6 +2659,7 @@ impl ServerModel {
             roots,
             enabled_agents,
             previously_observed_agents,
+            scope_paths,
         } = msg;
         let result = decode_scan_cli_agent_wire_agents("enabled_agents", enabled_agents)
             .and_then(|enabled_agents| {
@@ -2671,6 +2676,7 @@ impl ServerModel {
                         limit as usize,
                         enabled_agents,
                         previously_observed_agents,
+                        scope_paths.into_iter().map(PathBuf::from),
                     )
                     .map_err(|error| error.to_string())
                 })

@@ -213,3 +213,94 @@ fn restored_session_snapshot_yields_searchable_prompt_and_restore_target() {
         Some("Fix the login bug")
     );
 }
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn full_text_session_search_reuses_published_projection_until_generation_changes() {
+    use super::{FullTextSessionSearcher, SessionSearcher};
+    use crate::session_management::{
+        CommandContext, SessionNavigationData, SessionNavigationPromptElements, SessionSource,
+    };
+    use crate::workspace::{PaneViewLocator, WorkspaceRegistry};
+    use warpui::{App, SingletonEntity, WindowId};
+
+    fn session(label: &str, window_id: WindowId) -> SessionNavigationData {
+        SessionNavigationData::new(
+            label.to_owned(),
+            SessionNavigationPromptElements::from_display_label(label.to_owned()),
+            CommandContext::None,
+            PaneViewLocator::placeholder(),
+            None,
+            false,
+            window_id,
+            Default::default(),
+        )
+    }
+
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| WorkspaceRegistry::new());
+        let source = app.add_model(|_| SessionSource::None);
+        let window_id = WindowId::from_usize(101);
+        WorkspaceRegistry::handle(&app).update(&mut app, |registry, _| {
+            registry.replace_session_search_documents(
+                window_id,
+                vec![session("first agent", window_id)],
+            );
+        });
+
+        let mut searcher = app.update(|ctx| FullTextSessionSearcher::new(source, ctx));
+        app.update(|ctx| {
+            assert_eq!(searcher.search("first", ctx).unwrap().len(), 1);
+            assert!(searcher.search("second", ctx).unwrap().is_empty());
+        });
+
+        WorkspaceRegistry::handle(&app).update(&mut app, |registry, _| {
+            registry.replace_session_search_documents(
+                window_id,
+                vec![session("second agent", window_id)],
+            );
+        });
+        app.update(|ctx| {
+            assert!(searcher.search("second", ctx).is_err());
+        });
+        app.update(|ctx| {
+            let generation = WorkspaceRegistry::as_ref(ctx).session_search_generation();
+            searcher.refresh_search_index(generation, ctx).unwrap();
+        });
+        app.update(|ctx| {
+            assert!(searcher.search("first", ctx).unwrap().is_empty());
+            assert_eq!(searcher.search("second", ctx).unwrap().len(), 1);
+        });
+    })
+}
+
+#[test]
+fn session_search_static_guard() {
+    let search = include_str!("search.rs");
+    let data_source = include_str!("data_source.rs");
+    let registry = include_str!("../../../workspace/registry.rs");
+    let navigator = include_str!("../../../workspace/view/session_navigator.rs");
+
+    assert!(search.contains("WorkspaceRegistry::as_ref(app).session_search_generation()"));
+    assert!(search.contains("fn refresh_search_index("));
+    assert!(!search.contains("SessionNavigationData::all_sessions("));
+    assert!(!search.contains("app.window_ids("));
+    assert!(!search.contains("app.views_of_type::<Workspace>("));
+
+    let full_text_query = search
+        .split("impl SessionSearcher for FullTextSessionSearcher {")
+        .nth(1)
+        .expect("full-text Session Navigator searcher must exist")
+        .split("fn active_session_id(")
+        .next()
+        .expect("full-text query must precede active-session lookup");
+    assert!(!full_text_query.contains("create_searcher("));
+    assert!(!full_text_query.contains("build_index("));
+
+    assert!(data_source.contains("subscribe_to_model("));
+    assert!(data_source.contains("WorkspaceRegistry::handle(ctx)"));
+    assert!(data_source.contains("refresh_search_index(*generation, ctx)"));
+    assert!(registry.contains("SessionSearchProjectionChanged"));
+    assert!(navigator.contains("publish_session_navigator_search_documents(ctx)"));
+    assert!(navigator.contains("SessionNavigationData::from_workspace_session_snapshot"));
+}

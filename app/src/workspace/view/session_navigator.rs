@@ -10,6 +10,7 @@
 //! 结果，不引入任何行为变更。
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use warpui::{AppContext, EntityId, SingletonEntity, UpdateView, ViewContext, ViewHandle};
 
@@ -18,6 +19,7 @@ use crate::environment_authority::{
     session_authority_matches, session_authority_or_terminal_bootstrap, ParsedEnvironmentAuthority,
 };
 use crate::pane_group::EnvironmentRuntimePlaceholderPane;
+use crate::session_management::SessionNavigationData;
 use crate::workspace::environment_backend::{
     EnvironmentBackendKind, EnvironmentNavigationActivationIntent, EnvironmentSessionRefreshIntent,
 };
@@ -27,14 +29,17 @@ use super::session_navigator_reducer::{
     self, DeleteCloseKind, DeleteEffects, PaneGroupInfo, ReduceResult, SessionNavigatorAction,
     SessionNavigatorModel, SessionNavigatorState, SideEffect, TabPaneInfo,
 };
+const WORKSPACE_SESSIONS_REFRESH_OPERATION_KEY: &str = "workspace-sessions-refresh";
+
 use super::{
     AgentActionSidecarSource, AlertDialogWithCallbacks, Appearance, CLIAgentInputState,
     CLIAgentSession, CLIAgentSessionContext, CLIAgentSessionStatus, CLIAgentSessionsModel,
     CLIAgentSessionsModelEvent, ContextFlag, DismissibleToast, EditorEvent, EditorView,
     EnvironmentCliAgentSessionSourceAction, MenuItem, MenuItemFields, ModalButton, PaneId,
     PaneViewLocator, SessionBridgeActionSource, SingleLineEditorOptions, TabContextMenuAnchor,
-    TerminalView, TextOptions, Vector2F, Workspace, WorkspaceAction, WorkspaceSessionActionTarget,
-    WorkspaceSessionKind, WorkspaceSessionSnapshot, WORKSPACE_SESSIONS_REFRESH_TOAST_ID,
+    TerminalView, TextOptions, Vector2F, Workspace, WorkspaceAction, WorkspaceRegistry,
+    WorkspaceRegistryEvent, WorkspaceSessionActionTarget, WorkspaceSessionKind,
+    WorkspaceSessionSnapshot,
 };
 
 #[derive(Debug)]
@@ -95,23 +100,33 @@ impl Workspace {
         self.snapshot_session_navigator_model()
     }
 
+    /// Render adapters that need to reconcile geometry may borrow the committed
+    /// Environment-owned model directly. They must not rebuild membership or
+    /// RowId state from live/provider sources in the UI hot path.
+    pub(super) fn committed_session_navigator_model(&self) -> Option<&SessionNavigatorModel> {
+        self.environments.active_session_navigator_model()
+    }
+
     pub(super) fn session_navigator_sessions(&self) -> Vec<WorkspaceSessionSnapshot> {
         self.session_navigator_model().sessions
     }
 
     pub(super) fn session_navigator_sessions_for_display_update(
         &mut self,
-        ctx: &AppContext,
+        ctx: &mut ViewContext<Self>,
     ) -> Vec<WorkspaceSessionSnapshot> {
         // 用户动作必须基于“屏幕上刚看到的那次 Refresh”提交状态，不能重新从空/旧
         // position state 开始。否则第一次点击 Resume 就可能把当前视觉顺序丢掉。
         let model = self.session_navigator_action_model(ctx);
         let sessions = model.sessions.clone();
-        self.apply_session_navigator_reduction(&ReduceResult {
-            sessions: model.sessions,
-            state: model.state,
-            side_effect: SideEffect::None,
-        });
+        self.apply_session_navigator_reduction(
+            &ReduceResult {
+                sessions: model.sessions,
+                state: model.state,
+                side_effect: SideEffect::None,
+            },
+            ctx,
+        );
         sessions
     }
 
@@ -518,6 +533,7 @@ impl Workspace {
     pub(super) fn try_scan_terminal_cli_agent_session_discovery(
         enabled_agents: Vec<crate::terminal::CLIAgent>,
         previously_observed_agents: &std::collections::HashSet<crate::terminal::CLIAgent>,
+        scope_paths: Vec<PathBuf>,
     ) -> Result<
         (
             crate::workspace::environment_table::IndexedCliAgentSessionScanOutcome,
@@ -529,6 +545,7 @@ impl Workspace {
             crate::app_state::WORKSPACE_SESSION_NAVIGATOR_LOGICAL_LIMIT,
             enabled_agents,
             previously_observed_agents,
+            scope_paths,
         )
         .map_err(|error| error.to_string())?;
         let user_state =
@@ -1043,7 +1060,7 @@ impl Workspace {
             self.refresh_terminal_pane_session_binding(terminal_view.id(), ctx);
         }
         let reduced = self.reduce_session_navigator_refresh(ctx);
-        self.apply_session_navigator_reduction(&reduced);
+        self.apply_session_navigator_reduction(&reduced, ctx);
         ctx.notify();
     }
 
@@ -1181,6 +1198,26 @@ impl Workspace {
 
     // ── 实时会话快照（来自当前窗口各 tab 的 pane group）─────────────────────
 
+    /// Session Navigator 的 local membership 只接受带有原生 agent 或 Ashide
+    /// conversation 语义的 live pane。普通 local shell 仍是正常的工作区 tab，
+    /// 但不是可恢复历史；runtime Environment 的 terminal 则保留原有投影语义。
+    fn session_navigator_live_session_is_member(
+        environment: &crate::app_state::EnvironmentSnapshot,
+        session: &WorkspaceSessionSnapshot,
+    ) -> bool {
+        if !ParsedEnvironmentAuthority::parse(&environment.authority_key).uses_terminal_bootstrap()
+        {
+            return true;
+        }
+
+        match session.kind {
+            WorkspaceSessionKind::AgentTerminal => true,
+            WorkspaceSessionKind::Terminal
+            | WorkspaceSessionKind::Welcome
+            | WorkspaceSessionKind::Other => false,
+        }
+    }
+
     /// Navigator live projection. Reads PaneConfiguration / tab Environment only.
     /// Must not call `PaneGroup::snapshot` or walk TerminalPane LeafContents — those
     /// lock every TerminalModel and belong to persistence, not Session Navigator.
@@ -1245,7 +1282,9 @@ impl Workspace {
                     if let Some(binding) = pane_session_binding.as_ref() {
                         binding.apply_to_workspace_session(&mut session);
                     }
-                    sessions.push(session);
+                    if Self::session_navigator_live_session_is_member(&tab_environment, &session) {
+                        sessions.push(session);
+                    }
                     continue;
                 }
 
@@ -1298,7 +1337,9 @@ impl Workspace {
                     if let Some(binding) = pane_session_binding.as_ref() {
                         binding.apply_to_workspace_session(&mut session);
                     }
-                    sessions.push(session);
+                    if Self::session_navigator_live_session_is_member(&tab_environment, &session) {
+                        sessions.push(session);
+                    }
                     continue;
                 }
 
@@ -1513,7 +1554,7 @@ impl Workspace {
             .set_cli_agent_session_user_state(authority.to_owned(), Default::default());
     }
 
-    // ── 刷新生命周期 · 刷新/反馈 toast ─────────────────────────────────────
+    // ── 刷新生命周期 · 当前 Navigator header 局部反馈 ─────────────────────
 
     pub(super) fn refresh_workspace_sessions(&mut self, ctx: &mut ViewContext<Self>) {
         let refresh_generation = self.begin_workspace_sessions_refresh(ctx);
@@ -1530,7 +1571,7 @@ impl Workspace {
             Err(error) => {
                 self.fail_workspace_sessions_refresh_if_current(
                     refresh_generation,
-                    format!("刷新会话列表失败，已保留原会话：{error}"),
+                    format!("刷新会话列表失败，已保留上次结果：{error}"),
                     ctx,
                 );
                 return;
@@ -1540,12 +1581,28 @@ impl Workspace {
         self.prune_restored_workspace_sessions_with_missing_cli_sources();
         self.open_vertical_tabs_panel_for_recoverable_sessions(ctx);
         self.sync_session_navigator_sessions(ctx);
-        let session_count = self.session_navigator_sessions().len();
-        self.finish_workspace_sessions_refresh_if_current(
-            refresh_generation,
-            format!("已刷新会话列表：{session_count} 个会话"),
+        self.finish_workspace_sessions_refresh_if_current(refresh_generation, ctx);
+    }
+
+    pub(super) fn refresh_workspace_sessions_passively(&mut self, ctx: &mut ViewContext<Self>) {
+        let current_authority = self.current_environment_authority_key(ctx);
+        match self.refresh_indexed_sessions_for_authority(
+            &current_authority,
+            EnvironmentSessionRefreshIntent::PassiveProjection,
             ctx,
-        );
+        ) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                log::warn!(
+                    "Session Navigator passive refresh failed for {current_authority}; preserving committed rows: {error}"
+                );
+                return;
+            }
+        }
+
+        self.prune_restored_workspace_sessions_with_missing_cli_sources();
+        self.sync_session_navigator_sessions(ctx);
     }
 
     pub(super) fn refresh_indexed_sessions_for_authority(
@@ -1555,6 +1612,17 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) -> Result<bool, String> {
         self.environments.entry_target_snapshot(authority);
+        if matches!(intent, EnvironmentSessionRefreshIntent::PassiveProjection)
+            && self
+                .environments
+                .has_indexed_cli_agent_session_scan_in_flight(authority)
+        {
+            // Terminal bootstrap、source mutation 与 runtime reconciliation 都可能
+            // 连续触发同一个 authority 的被动刷新。它们不能不断替换 token，
+            // 否则每个后台结果都会被判 stale，最终没有任何结果能提交。
+            // 显式用户刷新不走该分支，仍可抢占一个停滞的旧 worker。
+            return Ok(true);
+        }
         crate::workspace::environment_backend::EnvironmentBackendKind::for_authority(authority)
             .backend()
             .refresh_indexed_sessions(self, authority, intent, ctx)
@@ -1724,10 +1792,11 @@ impl Workspace {
     }
 
     pub(super) fn workspace_sessions_refresh_tooltip(&self) -> String {
-        self.workspace_sessions_refresh_state
-            .message
-            .clone()
-            .unwrap_or_else(|| "刷新会话列表".to_owned())
+        if self.workspace_sessions_refresh_state.is_refreshing {
+            "正在刷新会话列表…".to_owned()
+        } else {
+            "刷新会话列表".to_owned()
+        }
     }
 
     pub(super) fn begin_workspace_sessions_refresh(&mut self, ctx: &mut ViewContext<Self>) -> u64 {
@@ -1736,12 +1805,6 @@ impl Workspace {
             .generation
             .saturating_add(1);
         self.workspace_sessions_refresh_state.is_refreshing = true;
-        self.workspace_sessions_refresh_state.message = Some("正在刷新会话列表…".to_owned());
-        self.show_workspace_sessions_refresh_toast(
-            DismissibleToast::default("正在刷新会话列表…".to_owned()),
-            false,
-            ctx,
-        );
         ctx.notify();
         self.workspace_sessions_refresh_state.generation
     }
@@ -1749,15 +1812,12 @@ impl Workspace {
     pub(super) fn finish_workspace_sessions_refresh_if_current(
         &mut self,
         generation: u64,
-        message: String,
         ctx: &mut ViewContext<Self>,
     ) {
         if self.workspace_sessions_refresh_state.generation != generation {
             return;
         }
         self.workspace_sessions_refresh_state.is_refreshing = false;
-        self.workspace_sessions_refresh_state.message = Some(message.clone());
-        self.show_workspace_sessions_refresh_toast(DismissibleToast::success(message), false, ctx);
         ctx.notify();
     }
 
@@ -1771,25 +1831,15 @@ impl Workspace {
             return;
         }
         self.workspace_sessions_refresh_state.is_refreshing = false;
-        self.workspace_sessions_refresh_state.message = Some(message.clone());
-        self.show_workspace_sessions_refresh_toast(DismissibleToast::error(message), true, ctx);
-        ctx.notify();
-    }
-
-    pub(super) fn show_workspace_sessions_refresh_toast(
-        &self,
-        toast: DismissibleToast<WorkspaceAction>,
-        persistent: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        let toast = toast.with_object_id(WORKSPACE_SESSIONS_REFRESH_TOAST_ID.to_owned());
         self.toast_stack.update(ctx, |toast_stack, ctx| {
-            if persistent {
-                toast_stack.add_transient_toast(toast, ctx);
-            } else {
-                toast_stack.add_transient_toast(toast, ctx);
-            }
+            toast_stack.add_operation_toast(
+                DismissibleToast::error(message),
+                "session-navigator",
+                WORKSPACE_SESSIONS_REFRESH_OPERATION_KEY,
+                ctx,
+            );
         });
+        ctx.notify();
     }
 
     pub(super) fn show_workspace_session_success_toast(
@@ -1882,7 +1932,9 @@ impl Workspace {
         }
         // v3: Pin action must not change focus (reducer yields WriteUserState only).
         let pane_info = self.snapshot_pane_group_info(ctx);
-        let SessionNavigatorModel { sessions, state } = self.session_navigator_action_model(ctx);
+        let SessionNavigatorModel {
+            sessions, state, ..
+        } = self.session_navigator_action_model(ctx);
         let reduced = session_navigator_reducer::reduce(
             sessions,
             state,
@@ -1893,8 +1945,7 @@ impl Workspace {
             &pane_info,
         );
         debug_assert!(matches!(reduced.side_effect, SideEffect::WriteUserState));
-        self.apply_session_navigator_reduction(&reduced);
-        self.refresh_workspace_sessions(ctx);
+        self.apply_session_navigator_reduction(&reduced, ctx);
     }
 
     /// EC-08: reorder navigator rows by logical_key while keeping focus/active.
@@ -1904,7 +1955,9 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         let pane_info = self.snapshot_pane_group_info(ctx);
-        let SessionNavigatorModel { sessions, state } = self.session_navigator_action_model(ctx);
+        let SessionNavigatorModel {
+            sessions, state, ..
+        } = self.session_navigator_action_model(ctx);
         let action = SessionNavigatorAction::Reorder {
             ordered_logical_keys: ordered_logical_keys.clone(),
         };
@@ -1921,7 +1974,7 @@ impl Workspace {
             log::warn!("session_navigator reorder validate_transition: {error}");
             return;
         }
-        self.apply_session_navigator_reduction(&reduced);
+        self.apply_session_navigator_reduction(&reduced, ctx);
         self.sync_session_navigator_sessions(ctx);
         ctx.notify();
     }
@@ -2016,7 +2069,9 @@ impl Workspace {
         if let Some(_locator) = locator {
             // v3: Activate live via reducer (FocusPane side effect).
             let pane_info = self.snapshot_pane_group_info(ctx);
-            let SessionNavigatorModel { sessions, state } = navigator_model;
+            let SessionNavigatorModel {
+                sessions, state, ..
+            } = navigator_model;
             let reduced = session_navigator_reducer::reduce(
                 sessions,
                 state,
@@ -2027,7 +2082,7 @@ impl Workspace {
                 },
                 &pane_info,
             );
-            self.apply_session_navigator_reduction(&reduced);
+            self.apply_session_navigator_reduction(&reduced, ctx);
             let _ = self.apply_session_navigator_side_effect(&reduced.side_effect, None, ctx);
             self.clear_workspace_session_restoring(&session, ctx);
             ctx.notify();
@@ -2072,7 +2127,9 @@ impl Workspace {
 
         // virtual Activate 由 reducer 原子设置 restoring、selection 和 SpawnTerminal。
         let pane_info = self.snapshot_pane_group_info(ctx);
-        let SessionNavigatorModel { sessions, state } = navigator_model;
+        let SessionNavigatorModel {
+            sessions, state, ..
+        } = navigator_model;
         let reduced = session_navigator_reducer::reduce(
             sessions,
             state,
@@ -2083,7 +2140,7 @@ impl Workspace {
             },
             &pane_info,
         );
-        self.apply_session_navigator_reduction(&reduced);
+        self.apply_session_navigator_reduction(&reduced, ctx);
         let _ = self.apply_session_navigator_side_effect(&reduced.side_effect, Some(&session), ctx);
     }
 
@@ -2192,14 +2249,16 @@ impl Workspace {
     pub(super) fn dispatch_session_navigator_state_action(
         &mut self,
         action: SessionNavigatorAction,
-        ctx: &AppContext,
+        ctx: &mut ViewContext<Self>,
     ) -> bool {
         // Lifecycle / selection / pin mutations consume the committed render model.
         // Source membership changes must go through sync_session_navigator_sessions
         // or commit_session_navigator_restore_started_after_delivery — never through
         // a speculative action-time Refresh smuggled into this helper.
         let pane_info = self.snapshot_pane_group_info(ctx);
-        let SessionNavigatorModel { sessions, state } = self.session_navigator_model();
+        let SessionNavigatorModel {
+            sessions, state, ..
+        } = self.session_navigator_model();
         let before = ReduceResult {
             sessions: sessions.clone(),
             state: state.clone(),
@@ -2214,7 +2273,7 @@ impl Workspace {
             debug_assert!(false, "session_navigator state action rejected: {error}");
             return false;
         }
-        self.apply_session_navigator_reduction(&reduced);
+        self.apply_session_navigator_reduction(&reduced, ctx);
         true
     }
 
@@ -2225,7 +2284,7 @@ impl Workspace {
         &mut self,
         session_keys: Vec<String>,
         selected_logical_key: Option<String>,
-        ctx: &AppContext,
+        ctx: &mut ViewContext<Self>,
     ) {
         let pane_info = self.snapshot_pane_group_info(ctx);
         let refreshed = self.reduce_session_navigator_refresh(ctx);
@@ -2254,7 +2313,7 @@ impl Workspace {
             );
             return;
         }
-        self.apply_session_navigator_reduction(&reduced);
+        self.apply_session_navigator_reduction(&reduced, ctx);
     }
 
     pub(super) fn snapshot_session_navigator_model(&self) -> SessionNavigatorModel {
@@ -2294,7 +2353,10 @@ impl Workspace {
     /// 普通 tab/pane focus 只能改变 active projection，不能写 selection；但用户点击
     /// “新建会话”表达了新的持久选择意图。远程 placeholder 尚未 materialize 时这里会
     /// 先清掉旧 selection，真正 terminal 创建完成后再以 live identity 绑定新 RowId。
-    pub(super) fn select_explicitly_created_session_in_navigator(&mut self, ctx: &AppContext) {
+    pub(super) fn select_explicitly_created_session_in_navigator(
+        &mut self,
+        ctx: &mut ViewContext<Self>,
+    ) {
         let session_logical_key = self.logical_key_for_focused_live_pane(ctx);
         self.dispatch_session_navigator_state_action(
             SessionNavigatorAction::SelectionChanged {
@@ -2332,14 +2394,56 @@ impl Workspace {
         } else {
             after_tab
         };
-        self.apply_session_navigator_reduction(&reduced);
+        self.apply_session_navigator_reduction(&reduced, ctx);
     }
 
-    fn apply_session_navigator_reduction(&mut self, reduced: &ReduceResult) {
+    fn apply_session_navigator_reduction(
+        &mut self,
+        reduced: &ReduceResult,
+        ctx: &mut ViewContext<Self>,
+    ) {
         if let Some(environment_model) = self.environments.active_session_navigator_model_mut() {
-            *environment_model =
-                SessionNavigatorModel::new(reduced.sessions.clone(), reduced.state.clone());
+            *environment_model = SessionNavigatorModel {
+                revision: environment_model.revision.wrapping_add(1),
+                sessions: reduced.sessions.clone(),
+                state: reduced.state.clone(),
+            };
         }
+        self.publish_session_navigator_search_documents(ctx);
+    }
+
+    /// Publishes only the already-committed Navigator membership to the global
+    /// search projection. Live terminal data may enrich the matching row's
+    /// prompt, but may not add/remove a row or choose its identity.
+    fn publish_session_navigator_search_documents(&self, ctx: &mut ViewContext<Self>) {
+        let window_id = ctx.window_id();
+        let mut live_by_pane_id = self
+            .workspace_sessions(window_id, ctx)
+            .map(|session| (session.pane_view_locator().pane_id, session))
+            .collect::<HashMap<_, _>>();
+        let documents = self
+            .committed_session_navigator_model()
+            .into_iter()
+            .flat_map(|model| model.sessions.iter())
+            .map(|session| {
+                if session.is_live_container() {
+                    self.locator_for_workspace_session_snapshot(session, ctx)
+                        .and_then(|locator| live_by_pane_id.remove(&locator.pane_id))
+                        .unwrap_or_else(|| {
+                            SessionNavigationData::from_workspace_session_snapshot(
+                                session, window_id,
+                            )
+                        })
+                } else {
+                    SessionNavigationData::from_workspace_session_snapshot(session, window_id)
+                }
+            })
+            .collect();
+        WorkspaceRegistry::handle(ctx).update(ctx, |registry, registry_ctx| {
+            let generation = registry.replace_session_search_documents(window_id, documents);
+            registry_ctx
+                .emit(WorkspaceRegistryEvent::SessionSearchProjectionChanged { generation });
+        });
     }
 
     pub(super) fn snapshot_pane_group_info(&self, ctx: &AppContext) -> PaneGroupInfo {
@@ -2650,6 +2754,7 @@ impl Workspace {
         let SessionNavigatorModel {
             sessions: sessions_before,
             state: navigator_state,
+            ..
         } = self.session_navigator_action_model(ctx);
         let action = SessionNavigatorAction::Delete {
             session_logical_key: Self::workspace_session_logical_key(&plan.requested_session),
@@ -2673,7 +2778,7 @@ impl Workspace {
         {
             log::warn!("session_navigator delete validate_transition: {error}");
         }
-        self.apply_session_navigator_reduction(&reduced);
+        self.apply_session_navigator_reduction(&reduced, ctx);
 
         let applied = forced_side_effect_result.unwrap_or_else(|| {
             self.apply_session_navigator_side_effect(
@@ -2685,7 +2790,7 @@ impl Workspace {
         if !applied {
             // Delete reducer 已经预计算 selection/lifecycle，但物理关闭被拒绝时必须
             // 原子回滚，不能留下“行消失 / selection 丢失”的半事务状态。
-            self.apply_session_navigator_reduction(&before);
+            self.apply_session_navigator_reduction(&before, ctx);
             self.sync_session_navigator_sessions(ctx);
             self.show_workspace_session_error_toast(
                 "无法关闭当前唯一会话窗口，删除已取消".to_owned(),
@@ -2847,7 +2952,7 @@ impl Workspace {
     pub(super) fn clear_workspace_session_restoring(
         &mut self,
         session: &WorkspaceSessionSnapshot,
-        ctx: &AppContext,
+        ctx: &mut ViewContext<Self>,
     ) {
         self.dispatch_session_navigator_state_action(
             SessionNavigatorAction::RestoreFinished {

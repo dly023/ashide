@@ -239,8 +239,7 @@ pub(crate) fn plugin_manager_for_with_shell(
         CLIAgent::DeepSeek if FeatureFlag::HOANotifications.is_enabled() => {
             Some(Box::new(DeepSeekPluginManager))
         }
-        CLIAgent::Jcode
-        | CLIAgent::OpenCode
+        CLIAgent::OpenCode
         | CLIAgent::Codex
         | CLIAgent::DeepSeek
         | CLIAgent::Amp

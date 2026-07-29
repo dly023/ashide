@@ -21,8 +21,8 @@ use crate::settings_view::SettingsSection;
 use crate::tab::SelectedTabColor;
 use crate::terminal::{CLIAgent, ShellLaunchData};
 use crate::themes::theme::AnsiColorIdentifier;
-use crate::workspace::view::left_panel::ToolPanelView;
 use crate::workspace::WorkspaceRegistry;
+use crate::workspace::view::left_panel::ToolPanelView;
 use warpui::SingletonEntity as _;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -565,6 +565,16 @@ impl WorkspaceSessionSnapshot {
     /// restored session recording which pane it would materialize into).
     pub fn is_live_container(&self) -> bool {
         self.is_live_container
+    }
+
+    /// Window snapshots only retain virtual recovery targets that carry a stable
+    /// native CLI-agent identity or an Ashide conversation identity. A layout
+    /// locator, generic terminal, welcome pane, or live container must never be
+    /// promoted into persisted Navigator history.
+    pub fn is_persistable_navigator_history(&self) -> bool {
+        !self.is_live_container()
+            && matches!(self.kind, WorkspaceSessionKind::AgentTerminal)
+            && self.durable_identity_key().is_some()
     }
 
     pub fn merge_for_session_navigator(

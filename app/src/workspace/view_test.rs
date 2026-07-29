@@ -2705,7 +2705,6 @@ fn test_unified_new_session_menu_lists_each_coding_agent_directly() {
                     model.set_installed_agents_for_test([
                         CLIAgent::Claude,
                         CLIAgent::Codex,
-                        CLIAgent::Jcode,
                         CLIAgent::Omp,
                     ]);
                 },
@@ -2715,7 +2714,6 @@ fn test_unified_new_session_menu_lists_each_coding_agent_directly() {
                     vec![
                         CLIAgent::Claude.to_serialized_name(),
                         CLIAgent::Codex.to_serialized_name(),
-                        CLIAgent::Jcode.to_serialized_name(),
                         CLIAgent::Omp.to_serialized_name(),
                     ],
                     ctx,
@@ -2731,12 +2729,7 @@ fn test_unified_new_session_menu_lists_each_coding_agent_directly() {
             assert!(!labels
                 .iter()
                 .any(|label| *label == crate::t!("workspace-coding-agent-actions")));
-            for agent in [
-                CLIAgent::Claude,
-                CLIAgent::Codex,
-                CLIAgent::Jcode,
-                CLIAgent::Omp,
-            ] {
+            for agent in [CLIAgent::Claude, CLIAgent::Codex, CLIAgent::Omp] {
                 let expected_label = format!("New {} session", agent.display_name());
                 assert!(labels.iter().any(|label| label == &expected_label));
             }
@@ -2750,12 +2743,7 @@ fn test_unified_new_session_menu_lists_each_coding_agent_directly() {
                 .collect::<Vec<_>>();
             assert_eq!(
                 direct_agents,
-                vec![
-                    CLIAgent::Claude,
-                    CLIAgent::Codex,
-                    CLIAgent::Jcode,
-                    CLIAgent::Omp
-                ]
+                vec![CLIAgent::Claude, CLIAgent::Codex, CLIAgent::Omp]
             );
         });
     });
@@ -2774,7 +2762,6 @@ fn test_unified_new_session_menu_projects_history_discovery_selection() {
                     model.set_installed_agents_for_test([
                         CLIAgent::Claude,
                         CLIAgent::Codex,
-                        CLIAgent::Jcode,
                         CLIAgent::Omp,
                     ]);
                 },
@@ -2782,15 +2769,15 @@ fn test_unified_new_session_menu_projects_history_discovery_selection() {
 
             for (enabled, expected_direct_agents, expects_domain) in [
                 (Vec::new(), Vec::new(), false),
-                (vec![CLIAgent::Jcode], vec![CLIAgent::Jcode], false),
+                (vec![CLIAgent::Omp], vec![CLIAgent::Omp], false),
                 (
                     vec![CLIAgent::Claude, CLIAgent::Omp],
                     vec![CLIAgent::Claude, CLIAgent::Omp],
                     false,
                 ),
                 (
-                    vec![CLIAgent::Claude, CLIAgent::Codex, CLIAgent::Jcode],
-                    vec![CLIAgent::Claude, CLIAgent::Codex, CLIAgent::Jcode],
+                    vec![CLIAgent::Claude, CLIAgent::Codex, CLIAgent::Omp],
+                    vec![CLIAgent::Claude, CLIAgent::Codex, CLIAgent::Omp],
                     false,
                 ),
             ] {
@@ -2843,7 +2830,6 @@ fn test_unified_new_session_menu_has_one_coding_agent_domain_not_provider_rows()
                     model.set_installed_agents_for_test([
                         CLIAgent::Claude,
                         CLIAgent::Codex,
-                        CLIAgent::Jcode,
                         CLIAgent::Omp,
                     ]);
                 },
@@ -2853,7 +2839,6 @@ fn test_unified_new_session_menu_has_one_coding_agent_domain_not_provider_rows()
                     vec![
                         CLIAgent::Claude.to_serialized_name(),
                         CLIAgent::Codex.to_serialized_name(),
-                        CLIAgent::Jcode.to_serialized_name(),
                         CLIAgent::Omp.to_serialized_name(),
                     ],
                     ctx,
@@ -2877,7 +2862,6 @@ fn test_unified_new_session_menu_has_one_coding_agent_domain_not_provider_rows()
                 vec![
                     CLIAgent::Claude,
                     CLIAgent::Codex,
-                    CLIAgent::Jcode,
                     CLIAgent::Omp
                 ],
                 "each enabled coding agent must contribute exactly one direct row, not a provider×action grid"
@@ -8143,7 +8127,75 @@ fn test_add_terminal_tab_from_environment_runtime_syncs_active_session_row() {
 }
 
 #[test]
-fn test_workspace_sessions_refresh_state_reports_progress_success_and_failure() {
+fn local_generic_terminal_is_excluded_from_navigator_but_agent_bound_live_pane_survives() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let initial_live = workspace.live_workspace_sessions(ctx);
+            assert!(
+                initial_live.iter().all(|session| {
+                    !matches!(session.kind, WorkspaceSessionKind::Terminal)
+                        || session.environment_authority_key.as_deref() != Some("local")
+                }),
+                "ordinary local terminal must not enter the canonical Navigator live projection: {initial_live:#?}"
+            );
+
+            let terminal_view = workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .active_session_view(ctx)
+                .expect("mock workspace starts with a local terminal");
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                sessions.set_session(
+                    terminal_view.id(),
+                    CLIAgentSession {
+                        agent: CLIAgent::Codex,
+                        status: CLIAgentSessionStatus::InProgress,
+                        session_context: CLIAgentSessionContext {
+                            session_id: Some("local-membership-codex-session".to_owned()),
+                            ..Default::default()
+                        },
+                        input_state: CLIAgentInputState::Closed,
+                        should_auto_toggle_input: false,
+                        listener: None,
+                        plugin_version: None,
+                        environment_host_key: None,
+                        draft_text: None,
+                        custom_command_prefix: None,
+                    },
+                    ctx,
+                );
+            });
+            assert!(workspace.refresh_terminal_pane_session_binding(terminal_view.id(), ctx));
+
+            let bound_live = workspace.live_workspace_sessions(ctx);
+            let bound = bound_live
+                .iter()
+                .filter(|session| {
+                    session.cli_agent_session_id.as_deref()
+                        == Some("local-membership-codex-session")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(bound.len(), 1, "bound live rows={bound_live:#?}");
+            assert!(matches!(bound[0].kind, WorkspaceSessionKind::AgentTerminal));
+            assert!(bound[0].is_live_container);
+
+            // A passive projection refresh cannot erase the PaneConfiguration binding
+            // merely because the terminal has no new structured agent event yet.
+            workspace.sync_session_navigator_sessions(ctx);
+            assert!(workspace.live_workspace_sessions(ctx).iter().any(|session| {
+                session.cli_agent_session_id.as_deref()
+                    == Some("local-membership-codex-session")
+                    && matches!(session.kind, WorkspaceSessionKind::AgentTerminal)
+            }));
+        });
+    });
+}
+
+#[test]
+fn test_workspace_sessions_refresh_state_reports_local_progress_and_keyed_failure() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
 
@@ -8155,6 +8207,12 @@ fn test_workspace_sessions_refresh_state_reports_progress_success_and_failure() 
                 workspace.workspace_sessions_refresh_tooltip(),
                 "刷新会话列表"
             );
+            assert!(
+                !workspace
+                    .toast_stack
+                    .read(ctx, |toast_stack, _| toast_stack.has_toasts()),
+                "initial Navigator refresh feedback must not occupy the global toast stack"
+            );
 
             let first_generation = workspace.begin_workspace_sessions_refresh(ctx);
             assert!(workspace.is_workspace_sessions_refreshing());
@@ -8162,41 +8220,86 @@ fn test_workspace_sessions_refresh_state_reports_progress_success_and_failure() 
                 workspace.workspace_sessions_refresh_tooltip(),
                 "正在刷新会话列表…"
             );
-
-            workspace.finish_workspace_sessions_refresh_if_current(
-                first_generation,
-                "已刷新会话列表：41 个会话".to_owned(),
-                ctx,
+            assert!(
+                !workspace
+                    .toast_stack
+                    .read(ctx, |toast_stack, _| toast_stack.has_toasts()),
+                "start progress belongs only to the Navigator header"
             );
+
+            workspace.finish_workspace_sessions_refresh_if_current(first_generation, ctx);
             assert!(!workspace.is_workspace_sessions_refreshing());
             assert_eq!(
                 workspace.workspace_sessions_refresh_tooltip(),
-                "已刷新会话列表：41 个会话"
+                "刷新会话列表"
+            );
+            assert!(
+                !workspace
+                    .toast_stack
+                    .read(ctx, |toast_stack, _| toast_stack.has_toasts()),
+                "complete refresh must be silent"
             );
 
             let second_generation = workspace.begin_workspace_sessions_refresh(ctx);
             workspace.fail_workspace_sessions_refresh_if_current(
                 second_generation,
-                "刷新会话列表失败：runtime unavailable".to_owned(),
+                "刷新会话列表失败：runtime unavailable；已保留上次结果".to_owned(),
                 ctx,
             );
             assert!(!workspace.is_workspace_sessions_refreshing());
             assert_eq!(
                 workspace.workspace_sessions_refresh_tooltip(),
-                "刷新会话列表失败：runtime unavailable"
+                "刷新会话列表"
+            );
+            assert!(
+                workspace
+                    .toast_stack
+                    .read(ctx, |toast_stack, _| toast_stack.has_toasts()),
+                "only the explicit refresh failure may reach the global toast stack"
             );
 
             workspace.finish_workspace_sessions_refresh_if_current(
                 second_generation.saturating_sub(1),
-                "stale success must be ignored".to_owned(),
                 ctx,
             );
             assert_eq!(
                 workspace.workspace_sessions_refresh_tooltip(),
-                "刷新会话列表失败：runtime unavailable"
+                "刷新会话列表"
             );
         });
     });
+}
+
+#[test]
+fn passive_refresh_does_not_mutate_user_refresh_generation() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let user_generation = workspace.begin_workspace_sessions_refresh(ctx);
+            workspace.refresh_workspace_sessions_passively(ctx);
+
+            assert!(workspace.is_workspace_sessions_refreshing());
+            assert_eq!(
+                workspace.workspace_sessions_refresh_tooltip(),
+                "正在刷新会话列表…"
+            );
+            workspace.finish_workspace_sessions_refresh_if_current(user_generation, ctx);
+            assert!(!workspace.is_workspace_sessions_refreshing());
+        });
+    });
+}
+
+#[test]
+fn session_navigator_refresh_feedback_static_guard() {
+    let navigator = include_str!("view/session_navigator.rs");
+    let view = include_str!("view.rs");
+
+    assert!(!navigator.contains("show_workspace_sessions_refresh_toast"));
+    assert!(!navigator.contains("WORKSPACE_SESSIONS_REFRESH_TOAST_ID"));
+    assert!(!view.contains("me.refresh_workspace_sessions(ctx);"));
+    assert!(navigator.contains("add_operation_toast"));
 }
 
 #[test]
@@ -18498,10 +18601,26 @@ fn local_cli_agent_session_refresh_runs_blocking_scan_off_ui_thread() {
         "local provider-store discovery must not start before the worker boundary"
     );
     assert!(refresh.contains("ctx.spawn("));
-    assert!(refresh.contains("commit_indexed_environment_cli_agent_session_discovery"));
-    assert!(refresh.contains("if refresh_generation.is_some() {\n                    workspace.prune_restored_workspace_sessions_with_missing_cli_sources();\n                }"));
-    assert!(refresh.contains("finish_workspace_sessions_refresh_if_current"));
-    assert!(refresh.contains("fail_workspace_sessions_refresh_if_current"));
+    assert!(refresh.contains("LocalCliAgentSessionScanKey::new("));
+    assert!(refresh.contains("registry.request_local_cli_agent_session_scan("));
+    assert!(
+        refresh.contains("registry.complete_local_cli_agent_session_scan(&scan_key, generation)")
+    );
+    assert!(refresh.contains(
+        "workspace.finish_local_cli_agent_session_scan(own_participant, result.clone(), ctx)"
+    ));
+    assert!(refresh.contains("workspace_handle.update(ctx, |workspace, ctx|"));
+    let finish_helper = VIEW_RS
+        .split_once("fn finish_local_cli_agent_session_scan(")
+        .expect("local recipient commit helper must exist")
+        .1
+        .split_once("impl EnvironmentBackend for TerminalBootstrapEnvironmentBackend")
+        .expect("local recipient helper must end before the local backend")
+        .0;
+    assert!(finish_helper.contains("commit_indexed_environment_cli_agent_session_discovery"));
+    assert!(finish_helper.contains("finish_workspace_sessions_refresh_if_current"));
+    assert!(finish_helper.contains("fail_workspace_sessions_refresh_if_current"));
+    assert!(finish_helper.contains("if refresh_generation.is_some() {\n            self.prune_restored_workspace_sessions_with_missing_cli_sources();\n        }"));
     assert!(refresh.contains("Ok(true)"));
     assert!(
         NAVIGATOR_RS.contains(
@@ -18509,4 +18628,403 @@ fn local_cli_agent_session_refresh_runs_blocking_scan_off_ui_thread() {
         ),
         "the blocking scan helper must consume captured data rather than an AppContext"
     );
+}
+
+#[test]
+fn local_agent_binding_survives_passive_refresh_and_tab_close_requests_native_history_refresh() {
+    const NAVIGATOR_RS: &str = include_str!("view/session_navigator.rs");
+    const VIEW_RS: &str = include_str!("view.rs");
+
+    let binding_refresh = NAVIGATOR_RS
+        .split_once("pub(super) fn sync_session_navigator_sessions(")
+        .expect("canonical Navigator sync must exist")
+        .1
+        .split_once("pub(super) fn clear_session_navigator_selection_key_if_present")
+        .expect("sync boundary must stay narrow")
+        .0;
+    assert!(binding_refresh.contains("refresh_terminal_pane_session_binding"));
+    assert!(
+        !binding_refresh.contains("clear_session_binding"),
+        "passive Navigator sync must not erase a pane-owned agent binding"
+    );
+
+    let remove_tab = VIEW_RS
+        .split_once("fn remove_tab(")
+        .expect("tab removal boundary must exist")
+        .1
+        .split_once("fn reconcile_workspace_state_after_tab_collection_changed")
+        .expect("tab removal boundary must end before reconciliation helper")
+        .0;
+    let removed = remove_tab
+        .find("self.tabs.remove(index)")
+        .expect("tab carrier must be removed");
+    let refresh = remove_tab
+        .find("refresh_indexed_sessions_for_authority(")
+        .expect("tab close must refresh native Agent history");
+    assert!(
+        removed < refresh,
+        "close refresh must happen after live carrier removal"
+    );
+    assert!(remove_tab.contains("closed_tab_has_agent_history"));
+    assert!(remove_tab.contains("EnvironmentSessionRefreshIntent::PassiveProjection"));
+}
+
+#[test]
+fn local_agent_history_membership_static_guard() {
+    const NAVIGATOR_RS: &str = include_str!("view/session_navigator.rs");
+
+    let predicate = NAVIGATOR_RS
+        .split_once("fn session_navigator_live_session_is_member(")
+        .expect("canonical local membership predicate must exist")
+        .1
+        .split_once("pub(super) fn live_workspace_sessions")
+        .expect("membership predicate must directly precede live projection")
+        .0;
+    assert!(predicate.contains("uses_terminal_bootstrap"));
+    assert!(predicate.contains("WorkspaceSessionKind::Terminal"));
+    assert!(predicate.contains("WorkspaceSessionKind::AgentTerminal"));
+
+    let projection = NAVIGATOR_RS
+        .split_once("pub(super) fn live_workspace_sessions")
+        .expect("live projection must exist")
+        .1
+        .split_once("pub(crate) fn live_or_pending_workspace_session_locator")
+        .expect("live projection boundary must stay narrow")
+        .0;
+    assert_eq!(
+        projection
+            .matches("session_navigator_live_session_is_member")
+            .count(),
+        2,
+        "both terminal and placeholder carriers must share the canonical membership gate"
+    );
+    assert!(projection.contains(
+        "binding.apply_to_workspace_session(&mut session);\n                    }\n                    if Self::session_navigator_live_session_is_member"
+    ));
+    assert!(!projection.contains("sessions.push(session);\n                    continue;"));
+}
+
+#[test]
+fn passive_cli_agent_session_refresh_coalesces_before_backend_delivery() {
+    const NAVIGATOR_RS: &str = include_str!("view/session_navigator.rs");
+    const ENVIRONMENT_TABLE_RS: &str = include_str!("environment_table.rs");
+
+    let refresh = NAVIGATOR_RS
+        .split_once("pub(super) fn refresh_indexed_sessions_for_authority(")
+        .expect("Workspace must own the shared refresh dispatcher")
+        .1
+        .split_once("fn remove_workspace_session_from_cached_sources")
+        .expect("refresh dispatcher must end before cached-source mutation")
+        .0;
+    let coalesce = refresh
+        .find("has_indexed_cli_agent_session_scan_in_flight(authority)")
+        .expect("passive refresh must reuse a current authority-scoped scan");
+    let backend_delivery = refresh
+        .find("EnvironmentBackendKind::for_authority(authority)")
+        .expect("refresh dispatcher must still use the shared backend path");
+
+    assert!(
+        coalesce < backend_delivery,
+        "passive coalescing must run before either local or runtime delivery begins"
+    );
+    assert!(refresh.contains("EnvironmentSessionRefreshIntent::PassiveProjection"));
+    assert!(refresh.contains("return Ok(true);"));
+    assert_eq!(
+        ENVIRONMENT_TABLE_RS
+            .matches("pub(crate) fn has_indexed_cli_agent_session_scan_in_flight")
+            .count(),
+        1,
+        "EnvironmentTable must remain the sole owner of in-flight scan state"
+    );
+}
+
+#[test]
+fn generic_terminal_bootstrap_does_not_trigger_provider_history_scan() {
+    const VIEW_RS: &str = include_str!("view.rs");
+
+    let handler = VIEW_RS
+        .split_once("pane_group::Event::TerminalSessionBootstrapped { pane_id } => {")
+        .expect("terminal bootstrap handler must exist")
+        .1
+        .split_once("pane_group::Event::TerminalSessionBootstrapFailed")
+        .expect("terminal bootstrap handler must remain bounded")
+        .0;
+
+    assert!(handler.contains("complete_environment_runtime_terminal_materialization"));
+    assert!(
+        !handler.contains("refresh_indexed_sessions_for_authority"),
+        "generic PTY readiness cannot imply that a provider history source changed"
+    );
+    assert!(
+        !handler.contains("EnvironmentSessionRefreshIntent::PassiveProjection"),
+        "split/new-terminal bootstrap must update live projection without provider discovery"
+    );
+}
+
+#[test]
+fn environment_provider_quick_picker_filter_and_selection_are_stable() {
+    use crate::workspace::environment_provider::EnvironmentProviderCandidate;
+
+    let candidates = vec![
+        EnvironmentProviderCandidate {
+            alias: "config:staging".to_owned(),
+            authority_key: "ssh:staging".to_owned(),
+            title: "Staging API".to_owned(),
+            detail: "deploy@staging.internal".to_owned(),
+        },
+        EnvironmentProviderCandidate {
+            alias: "saved:prod-node".to_owned(),
+            authority_key: "ssh:prod-node".to_owned(),
+            title: "Production".to_owned(),
+            detail: "root@remote-fixture-prod".to_owned(),
+        },
+        EnvironmentProviderCandidate {
+            alias: "config:analytics".to_owned(),
+            authority_key: "ssh:analytics".to_owned(),
+            title: "Analytics".to_owned(),
+            detail: "analyst@warehouse.internal".to_owned(),
+        },
+    ];
+
+    let filtered = environment_provider_picker_filtered_candidates(&candidates, "PROD");
+    assert_eq!(
+        filtered
+            .iter()
+            .map(|candidate| candidate.alias.as_str())
+            .collect::<Vec<_>>(),
+        vec!["saved:prod-node"]
+    );
+    assert_eq!(
+        environment_provider_picker_normalized_selected_alias(&filtered, Some("config:staging"),)
+            .as_deref(),
+        Some("saved:prod-node")
+    );
+
+    let refreshed = environment_provider_picker_filtered_candidates(&candidates, "internal");
+    assert_eq!(
+        environment_provider_picker_normalized_selected_alias(
+            &refreshed,
+            Some("config:analytics"),
+        )
+        .as_deref(),
+        Some("config:analytics")
+    );
+    assert_eq!(
+        environment_provider_picker_normalized_selected_alias(&[], Some("config:analytics")),
+        None
+    );
+}
+
+#[test]
+fn environment_provider_quick_picker_static_guard() {
+    const VIEW_RS: &str = include_str!("view.rs");
+
+    let strip = VIEW_RS
+        .split_once("fn render_environment_strip_add_provider_chip(")
+        .expect("Environment Strip provider entry must exist")
+        .1
+        .split_once("fn render_tab_bar_contents(")
+        .expect("Environment Strip provider entry must end before tab rendering")
+        .0;
+    assert!(strip.contains("on_left_mouse_down"));
+    assert!(
+        !strip.contains(".on_hover("),
+        "hover must not open the provider picker or trigger I/O"
+    );
+
+    let picker_action = VIEW_RS
+        .split_once("SetEnvironmentProviderPickerOpen { open } => {")
+        .expect("provider picker action handler must exist")
+        .1
+        .split_once("RefreshEnvironmentSshTargets => {")
+        .expect("explicit provider refresh action must remain separate")
+        .0;
+    assert!(picker_action.contains("self.open_environment_provider_picker(ctx)"));
+    assert!(picker_action.contains("self.close_environment_provider_picker_and_restore_focus(ctx)"));
+
+    let open_picker = VIEW_RS
+        .split_once("fn open_environment_provider_picker(")
+        .expect("picker opening must have one Workspace-owned lifecycle boundary")
+        .1
+        .split_once("fn dismiss_environment_provider_picker(")
+        .expect("picker dismissal lifecycle boundary must follow opening")
+        .0;
+    assert!(open_picker.contains("clear_environment_provider_picker_ephemeral_state"));
+    assert!(open_picker.contains("ctx.focus(&self.environment_provider_picker_search_editor)"));
+
+    let dismiss_picker = VIEW_RS
+        .split_once("fn dismiss_environment_provider_picker(")
+        .expect("picker dismissal must be centralized")
+        .1
+        .split_once("fn close_environment_provider_picker_and_restore_focus(")
+        .expect("Escape close lifecycle boundary must follow dismissal")
+        .0;
+    assert!(dismiss_picker.contains("clear_environment_provider_picker_ephemeral_state"));
+
+    let catalog_subscription = VIEW_RS
+        .rsplit_once("&crate::ssh_manager::SshTargetCatalog::handle(ctx)")
+        .expect("Workspace must subscribe to committed SSH catalog changes")
+        .1
+        .split_once("ctx.subscribe_to_model(&OneTimeModalModel::handle(ctx)")
+        .expect("catalog subscription must stay bounded before later model subscriptions")
+        .0;
+    assert!(catalog_subscription.contains("is_environment_provider_picker_open"));
+    assert!(catalog_subscription.contains("normalize_environment_provider_picker_selection(ctx)"));
+
+    assert!(
+        !picker_action.contains("catalog.refresh("),
+        "opening the picker must consume only the committed catalog snapshot"
+    );
+
+    let refresh_action = VIEW_RS
+        .split_once("RefreshEnvironmentSshTargets => {")
+        .expect("explicit provider refresh action must exist")
+        .1
+        .split_once("OpenEnvironmentProviderCandidate { alias } => {")
+        .expect("provider activation action must follow explicit refresh")
+        .0;
+    assert!(refresh_action.contains("SshTargetCatalogRefreshIntent::ExplicitRefresh"));
+    assert!(
+        VIEW_RS.contains("WorkspaceAction::OpenEnvironmentProviderCandidate {"),
+        "keyboard confirmation must route through the existing typed activation action"
+    );
+}
+
+#[test]
+fn session_navigator_keyboard_cursor_normalizes_by_stable_identity() {
+    use super::session_navigator::SessionNavigatorRowIdentity;
+    use super::vertical_tabs::{
+        session_navigator_keyboard_cursor_navigate, session_navigator_keyboard_cursor_normalized,
+    };
+
+    let local_alpha = SessionNavigatorRowIdentity {
+        row_id: "row-alpha".to_owned(),
+        environment_navigation_key: "local".to_owned(),
+    };
+    let remote_beta = SessionNavigatorRowIdentity {
+        row_id: "row-beta".to_owned(),
+        environment_navigation_key: "ssh:beta".to_owned(),
+    };
+    let local_gamma = SessionNavigatorRowIdentity {
+        row_id: "row-gamma".to_owned(),
+        environment_navigation_key: "local".to_owned(),
+    };
+    let reordered = vec![
+        remote_beta.clone(),
+        local_gamma.clone(),
+        local_alpha.clone(),
+    ];
+
+    assert_eq!(
+        session_navigator_keyboard_cursor_normalized(&reordered, Some(&local_alpha)),
+        Some(local_alpha.clone()),
+        "pin/order changes must preserve cursor by RowId + authority, never by prior index",
+    );
+    assert_eq!(
+        session_navigator_keyboard_cursor_normalized(
+            &reordered,
+            Some(&SessionNavigatorRowIdentity {
+                row_id: "row-alpha".to_owned(),
+                environment_navigation_key: "ssh:other".to_owned(),
+            })
+        ),
+        None,
+        "same RowId in another Environment is not the same keyboard cursor",
+    );
+    assert_eq!(
+        session_navigator_keyboard_cursor_normalized(&[remote_beta.clone()], Some(&local_alpha)),
+        None,
+        "query/source removal clears the transient cursor instead of retargeting by index",
+    );
+    assert_eq!(
+        session_navigator_keyboard_cursor_navigate(&reordered, None, true),
+        Some(remote_beta.clone()),
+    );
+    assert_eq!(
+        session_navigator_keyboard_cursor_navigate(&reordered, None, false),
+        Some(local_alpha.clone()),
+    );
+    assert_eq!(
+        session_navigator_keyboard_cursor_navigate(&reordered, Some(&remote_beta), true),
+        Some(local_gamma.clone()),
+    );
+    assert_eq!(
+        session_navigator_keyboard_cursor_navigate(&reordered, Some(&local_alpha), true),
+        Some(local_alpha),
+        "movement clamps at the visible boundary rather than wrapping to a different session",
+    );
+}
+
+#[test]
+fn session_navigator_keyboard_cursor_static_guard() {
+    const VERTICAL_TABS_RS: &str = include_str!("view/vertical_tabs.rs");
+    const VIEW_RS: &str = include_str!("view.rs");
+
+    let state = VERTICAL_TABS_RS
+        .split_once("pub(super) struct VerticalTabsPanelState {")
+        .expect("VerticalTabs state must own the Navigator keyboard cursor")
+        .1
+        .split_once("impl Default for VerticalTabsPanelState")
+        .expect("VerticalTabs default boundary must exist")
+        .0;
+    assert!(state.contains(
+        "session_navigator_keyboard_cursor: RefCell<Option<SessionNavigatorRowIdentity>>"
+    ));
+    assert!(!state.contains("keyboard_cursor_index"));
+
+    let panel_impl = VERTICAL_TABS_RS
+        .split_once("impl VerticalTabsPanelState {")
+        .expect("VerticalTabs lifecycle must exist")
+        .1
+        .split_once("fn render_control_bar(")
+        .expect("VerticalTabs lifecycle boundary must precede rendering")
+        .0;
+    for required in [
+        "normalize_session_navigator_keyboard_cursor",
+        "navigate_session_navigator_keyboard_cursor",
+        "activate_session_navigator_keyboard_cursor",
+        "clear_session_navigator_keyboard_cursor",
+        "self.session_navigator_list_state.scroll_to(",
+    ] {
+        assert!(
+            panel_impl.contains(required),
+            "missing cursor lifecycle: {required}"
+        );
+    }
+    assert!(
+        !panel_impl.contains("selected_row_id"),
+        "keyboard cursor must not overwrite Environment-owned Navigator selection"
+    );
+
+    let search_editor = VIEW_RS
+        .split_once("fn vertical_tabs_search_input(")
+        .expect("Navigator search editor must exist")
+        .1
+        .split_once("fn tab_rename_editor(")
+        .expect("search editor boundary must be stable")
+        .0;
+    for required in [
+        "PropagateAndNoOpNavigationKeys::Always",
+        "EditorEvent::Navigate(NavigationKey::Up)",
+        "EditorEvent::Navigate(NavigationKey::Down)",
+        "EditorEvent::Enter",
+        "navigate_session_navigator_keyboard_cursor",
+        "activate_session_navigator_keyboard_cursor",
+        "editor_view.update(ctx, |editor, ctx| editor.clear_buffer(ctx))",
+    ] {
+        assert!(
+            search_editor.contains(required),
+            "missing keyboard route: {required}"
+        );
+    }
+
+    let activate = panel_impl
+        .split_once("fn activate_session_navigator_keyboard_cursor(")
+        .expect("Enter activation boundary must exist")
+        .1
+        .split_once("fn clear_session_navigator_keyboard_cursor(")
+        .expect("cursor clearing boundary must follow activation")
+        .0;
+    assert!(activate
+        .contains("ctx.dispatch_typed_action(&WorkspaceAction::ActivateRestoredWorkspaceSession"));
 }

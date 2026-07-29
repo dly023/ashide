@@ -76,13 +76,21 @@ impl Default for SessionNavigatorState {
 /// 否则异步 Resume 在 source 已消费、live pane 尚未 materialize 的中间帧会丢行。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionNavigatorModel {
+    /// Canonical Environment-owned projection revision. Render adapters may use
+    /// this to update derived viewport geometry without diffing or cloning the
+    /// complete session collection on every UI frame.
+    pub revision: u64,
     pub sessions: Vec<WorkspaceSessionSnapshot>,
     pub state: SessionNavigatorState,
 }
 
 impl SessionNavigatorModel {
     pub fn new(sessions: Vec<WorkspaceSessionSnapshot>, state: SessionNavigatorState) -> Self {
-        Self { sessions, state }
+        Self {
+            revision: 0,
+            sessions,
+            state,
+        }
     }
 }
 

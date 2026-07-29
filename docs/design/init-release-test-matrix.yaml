@@ -880,3 +880,10 @@ release_regression_checks:
       - real_windows_config_open_and_alias_connection
     focused_evidence: "2026-07-22 static parity inventory proves the only production load_candidates call is SshConfigCatalog::load_snapshot and forbids UI path/home/IO/platform ownership. Focused catalog, candidate, runtime lookup and Windows path tests pass 15/15; locked macOS cargo check and x86_64-pc-windows-msvc release-feature cargo-xwin check pass."
     result: wontfix_current_macos_linux_only_release_scope_windows_runtime_is_not_a_release_gate
+
+  - id: SESSION-NAVIGATOR-EXPANDED-PROVIDER-DISCOVERY
+    source: LR-196
+    requirement: "Droid/OpenCode/Copilot/Pi/Cursor/Antigravity 必须通过既有 Agent registry 与 AgentSessionDiscoveryPlan 进入 EnvironmentTable 正本列表；local/runtime 共享 parser、scope-old-session 保底、完整失败保留和原生 exact-session Resume，且不创建第二套 AI Vault。"
+    gates: [expanded_provider_discovery_is_registry_owned_complete_and_scope_preserving, expanded_provider_parsers_extract_native_identity_title_and_cwd, opencode_legacy_and_sqlite_discovery_prefers_sqlite_identity, expanded_provider_failure_preserves_committed_collection, expanded_provider_resume_commands_use_public_native_contracts, expanded_provider_real_stores_match_current_native_formats, local_remote_parity_static_expanded_provider_discovery_guard, cargo_check_warp_gui_local_fs]
+    focused_evidence: "2026-07-28 discovery 22/22、remote scan 10/10、remote_server 94/94、cargo check 通过；ignored real-HOME smoke 读取实际 OpenCode SQLite、Cursor JSONL 与 Antigravity transcript stores，并修复真实 Cursor nested message.content array 标题解析。当前 bundle 已构建签名，但单实例转发且用户取消退出旧实例，因此未虚报当前 bundle GUI/remote 视觉证据。"
+    result: verified

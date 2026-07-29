@@ -1578,13 +1578,21 @@ fn environment_cli_agent_store_roots_from_probe_stdout(
     let home_dir = next_path("home_dir")?;
     let claude_config_dir = next_path("claude_config_dir")?;
     let codex_home = next_path("codex_home")?;
+    let opencode_data_dir = next_path("opencode_data_dir")?;
+    let copilot_home = next_path("copilot_home")?;
+    let pi_agent_home = next_path("pi_agent_home")?;
+    let omp_agent_home = next_path("omp_agent_home")?;
     if fields.any(|field| !field.is_empty()) {
         return Err("environment CLI-agent root probe returned unexpected extra fields".to_owned());
     }
-    CliAgentStoreRoots::from_explicit_target_paths(
+    CliAgentStoreRoots::from_explicit_target_store_roots(
         PathBuf::from(home_dir),
         PathBuf::from(claude_config_dir),
         PathBuf::from(codex_home),
+        PathBuf::from(opencode_data_dir),
+        PathBuf::from(copilot_home),
+        PathBuf::from(pi_agent_home),
+        PathBuf::from(omp_agent_home),
     )
 }
 
@@ -1595,6 +1603,10 @@ fn environment_cli_agent_store_roots_to_proto(
         home_dir: roots.home_dir.to_string_lossy().into_owned(),
         claude_config_dir: roots.claude_config_dir.to_string_lossy().into_owned(),
         codex_home: roots.codex_home.to_string_lossy().into_owned(),
+        opencode_data_dir: roots.opencode_data_dir.to_string_lossy().into_owned(),
+        copilot_home: roots.copilot_home.to_string_lossy().into_owned(),
+        pi_agent_home: roots.pi_agent_home.to_string_lossy().into_owned(),
+        omp_agent_home: roots.omp_agent_home.to_string_lossy().into_owned(),
     }
 }
 
@@ -1602,11 +1614,13 @@ fn environment_cli_agent_store_roots_probe_command() -> &'static str {
     "test \"${ASHIDE_SESSION_EXECUTION_CONTEXT:-}\" = 1 || { echo 'target session execution context is unavailable' >&2; exit 1; }; \
      home=${HOME:?target session HOME is unavailable}; pwd_root=$(pwd -P) || exit $?; \
      case \"$home\" in /*) ;; *) home=\"$pwd_root/$home\";; esac; \
-     claude=${CLAUDE_CONFIG_DIR:-$home/.claude}; \
-     case \"$claude\" in /*) ;; *) claude=\"$pwd_root/$claude\";; esac; \
-     codex=${CODEX_HOME:-$home/.codex}; \
-     case \"$codex\" in /*) ;; *) codex=\"$pwd_root/$codex\";; esac; \
-     printf '%s\\0%s\\0%s\\0' \"$home\" \"$claude\" \"$codex\""
+     claude=${CLAUDE_CONFIG_DIR:-$home/.claude}; case \"$claude\" in /*) ;; *) claude=\"$pwd_root/$claude\";; esac; \
+     codex=${CODEX_HOME:-$home/.codex}; case \"$codex\" in /*) ;; *) codex=\"$pwd_root/$codex\";; esac; \
+     opencode=${OPENCODE_CONFIG_DIR:-$home/.local/share/opencode}; case \"$opencode\" in /*) ;; *) opencode=\"$pwd_root/$opencode\";; esac; \
+     copilot=${COPILOT_HOME:-$home/.copilot}; case \"$copilot\" in /*) ;; *) copilot=\"$pwd_root/$copilot\";; esac; \
+     pi=${PI_CODING_AGENT_DIR:-$home/.pi/agent}; case \"$pi\" in /*) ;; *) pi=\"$pwd_root/$pi\";; esac; \
+     omp=${OMP_CODING_AGENT_DIR:-$home/.omp/agent}; case \"$omp\" in /*) ;; *) omp=\"$pwd_root/$omp\";; esac; \
+     printf '%s\\0%s\\0%s\\0%s\\0%s\\0%s\\0%s\\0' \"$home\" \"$claude\" \"$codex\" \"$opencode\" \"$copilot\" \"$pi\" \"$omp\""
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -2131,6 +2145,7 @@ pub(crate) async fn scan_environment_cli_agent_sessions(
     session_id: SessionId,
     enabled_agents: &[crate::terminal::CLIAgent],
     previously_observed_agents: &HashSet<CLIAgent>,
+    scope_paths: &[PathBuf],
 ) -> Result<EnvironmentCliAgentSessionDiscovery, String> {
     let roots = resolve_environment_cli_agent_store_roots(&client, session_id).await?;
     scan_environment_cli_agent_sessions_with_roots(
@@ -2138,6 +2153,7 @@ pub(crate) async fn scan_environment_cli_agent_sessions(
         roots,
         enabled_agents,
         previously_observed_agents,
+        scope_paths,
     )
     .await
 }
@@ -2148,6 +2164,7 @@ pub(crate) async fn scan_environment_cli_agent_sessions_with_roots(
     roots: CliAgentStoreRoots,
     enabled_agents: &[crate::terminal::CLIAgent],
     previously_observed_agents: &HashSet<CLIAgent>,
+    scope_paths: &[PathBuf],
 ) -> Result<EnvironmentCliAgentSessionDiscovery, String> {
     let roots = environment_cli_agent_store_roots_to_proto(&roots);
     let response = client
@@ -2161,6 +2178,10 @@ pub(crate) async fn scan_environment_cli_agent_sessions_with_roots(
             previously_observed_agents
                 .iter()
                 .map(crate::terminal::CLIAgent::to_serialized_name)
+                .collect(),
+            scope_paths
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
                 .collect(),
         )
         .await
@@ -3319,7 +3340,7 @@ mod tests {
 
         let error = decode_environment_cli_agent_scan_success(ScanCliAgentSessionsSuccess {
             records: Vec::new(),
-            observed_agents: vec![CLIAgent::Jcode.to_serialized_name()],
+            observed_agents: vec![CLIAgent::Claude.to_serialized_name()],
             source_missing_agent: Some(CLIAgent::Omp.to_serialized_name()),
         })
         .expect_err("source-missing transitions must not carry a partial complete result");
@@ -3343,7 +3364,7 @@ mod tests {
                 cwd: None,
                 modified_epoch_millis: Some(1),
             }],
-            observed_agents: vec![CLIAgent::Jcode.to_serialized_name()],
+            observed_agents: vec![CLIAgent::Claude.to_serialized_name()],
             source_missing_agent: None,
         })
         .expect_err("records must be owned by one provider observed in this generation");
@@ -3384,33 +3405,41 @@ mod tests {
     #[test]
     fn environment_cli_agent_store_roots_are_shared_by_scan_read_mutate_and_fork() {
         let roots = environment_cli_agent_store_roots_from_probe_stdout(
-            b"/home/target\0/srv/claude-config\0/srv/codex-home\0".to_vec(),
+            b"/home/target\0/srv/claude-config\0/srv/codex-home\0/srv/opencode\0/srv/copilot\0/srv/pi-agent\0/srv/omp-agent\0".to_vec(),
         )
         .expect("parse target Environment roots");
 
         assert_eq!(roots.home_dir, PathBuf::from("/home/target"));
         assert_eq!(roots.claude_config_dir, PathBuf::from("/srv/claude-config"));
         assert_eq!(roots.codex_home, PathBuf::from("/srv/codex-home"));
+        assert_eq!(roots.opencode_data_dir, PathBuf::from("/srv/opencode"));
+        assert_eq!(roots.copilot_home, PathBuf::from("/srv/copilot"));
+        assert_eq!(roots.pi_agent_home, PathBuf::from("/srv/pi-agent"));
+        assert_eq!(roots.omp_agent_home, PathBuf::from("/srv/omp-agent"));
 
         let proto = environment_cli_agent_store_roots_to_proto(&roots);
         assert_eq!(proto.home_dir, "/home/target");
         assert_eq!(proto.claude_config_dir, "/srv/claude-config");
         assert_eq!(proto.codex_home, "/srv/codex-home");
+        assert_eq!(proto.opencode_data_dir, "/srv/opencode");
+        assert_eq!(proto.copilot_home, "/srv/copilot");
+        assert_eq!(proto.pi_agent_home, "/srv/pi-agent");
+        assert_eq!(proto.omp_agent_home, "/srv/omp-agent");
     }
 
     #[test]
     fn environment_cli_agent_store_root_probe_rejects_relative_or_missing_paths() {
         let relative = environment_cli_agent_store_roots_from_probe_stdout(
-            b"/home/target\0relative-claude\0/srv/codex\0".to_vec(),
+            b"/home/target\0relative-claude\0/srv/codex\0/srv/opencode\0/srv/copilot\0/srv/pi\0/srv/omp\0".to_vec(),
         )
         .expect_err("relative target roots must fail before RPC");
         assert!(relative.contains("claude_config_dir is not absolute"));
 
         let missing = environment_cli_agent_store_roots_from_probe_stdout(
-            b"/home/target\0/srv/claude\0".to_vec(),
+            b"/home/target\0/srv/claude\0/srv/codex\0".to_vec(),
         )
         .expect_err("incomplete root snapshots must fail before RPC");
-        assert!(missing.contains("codex_home"));
+        assert!(missing.contains("opencode_data_dir"));
     }
 
     #[cfg(not(target_family = "wasm"))]

@@ -259,59 +259,6 @@ print_session_binding_snapshot_inventory() {
     rust_production_callsite_owners 'Uuid::new_v4'
 }
 
-print_jcode_stage_a_inventory() {
-    echo 'Jcode shared discovery plan references:'
-    rust_production_call_sites '\bAgentSessionDiscoveryPlan::from_registry\('
-    echo 'owners:'
-    rust_production_callsite_owners '\bAgentSessionDiscoveryPlan::from_registry\('
-    echo
-    echo 'Jcode/Omp native-store reader inventory (must stay in cli_agent_jsonl/):'
-    rg -n \
-        '(\.jcode|\.omp/agent)' \
-        app/src/cli_agent_jsonl/ \
-        || true
-}
-
-jcode_internal_wire_references() {
-    python3 - <<'PY'
-import re
-from pathlib import Path
-
-wire_pattern = re.compile(
-    r'jcode_(?:app_core|protocol)|"type"\s*:\s*"(?:subscribe|resume_session|message|cancel)"',
-    re.IGNORECASE,
-)
-
-def is_test_path(path: Path) -> bool:
-    return (
-        "tests" in path.parts
-        or path.name in {"tests.rs", "test.rs"}
-        or path.name.endswith(("_test.rs", "_tests.rs"))
-    )
-
-for root in (Path("app/src"), Path("crates")):
-    for path in root.rglob("*.rs"):
-        if is_test_path(path):
-            continue
-        text = path.read_text().split("\n#[cfg(test)]", maxsplit=1)[0]
-        if "jcode" not in text.lower():
-            continue
-        for line_number, line in enumerate(text.splitlines(), start=1):
-            if wire_pattern.search(line):
-                print(f"{path}:{line_number}:{line}")
-PY
-}
-
-print_jcode_stage_b_inventory() {
-    echo 'Jcode public realtime façade references:'
-    rust_production_call_sites 'session control|JcodeRealtime|jcode_realtime'
-    echo 'owners:'
-    rust_production_callsite_owners 'session control|JcodeRealtime|jcode_realtime'
-    echo
-    echo 'Jcode internal wire references in Jcode-owning production sources (must remain empty):'
-    jcode_internal_wire_references
-}
-
 check_completion_gate() {
     local tracker_path="$1"
     local capability_matrix_path="$2"
@@ -1196,12 +1143,12 @@ require_rust_test_name "LR-123" "initialize_rejects_wrong_server_protocol_revisi
 require_rust_test_name "LR-123" "initialize_rejects_wrong_client_protocol_revision_before_auth_mutation" app/src/remote_server/server_model_tests.rs
 require_rust_test_name "LR-123" "protocol_round_trip_preserves_revision" crates/remote_server/src/protocol_tests.rs
 require_contract_marker "LR-123" 'format!("dev-pty-v{}", crate::REMOTE_SERVER_PROTOCOL_REVISION)' crates/remote_server/src/setup.rs
-require_rust_test_name "LR-123" "oss_source_build_remote_server_binary_uses_dev_protocol_slot_v6" crates/remote_server/src/setup_tests.rs
+require_rust_test_name "LR-123" "oss_source_build_remote_server_binary_uses_dev_protocol_slot_v7" crates/remote_server/src/setup_tests.rs
 require_contract_marker "LR-123" 'format!("{version}-pty-v{}", crate::REMOTE_SERVER_PROTOCOL_REVISION)' crates/remote_server/src/setup.rs
 require_rust_test_name "LR-123" "release_remote_server_slot_includes_protocol_revision" crates/remote_server/src/setup_tests.rs
 require_rust_test_name "LR-123" "real_remote_helper_current_revision_initialize_pty_and_server_file_browser" app/src/remote_server/ssh_transport.rs
-if rg -n 'pty-v5' crates/remote_server/src app/src/remote_server >/dev/null 2>&1; then
-    echo "[LR-123] active source must not retain the obsolete v5 helper slot after protocol revision 6" >&2
+if rg -n 'pty-v6' crates/remote_server/src app/src/remote_server >/dev/null 2>&1; then
+    echo "[LR-123] active source must not retain the obsolete v6 helper slot after protocol revision 7" >&2
     fail=1
 fi
 initialize_handler=$(sed -n '/fn handle_initialize(/,/fn handle_authenticate(/p' app/src/remote_server/server_model.rs)
@@ -1617,7 +1564,7 @@ require_contract_marker "LR-042" "id: LR-042" docs/design/local-remote-parity-tr
 require_contract_marker "LR-042" "recent_jsonl_files" app/src/cli_agent_jsonl/discovery.rs
 require_contract_marker "LR-042" "recent_jsonl_scan_error_is_not_silently_dropped" app/src/cli_agent_jsonl/tests.rs
 require_contract_marker "LR-042" "session_refresh_scan_failure_preserves_cached_rows" app/src/workspace/view/session_navigator_scan_tests.rs
-require_contract_marker "LR-042" "remote_session_refresh_scan_failure_preserves_cached_rows" app/src/workspace/environment_table.rs
+require_contract_marker "LR-042" "expanded_provider_failure_preserves_committed_collection" app/src/workspace/environment_table.rs
 require_contract_marker "LR-042" "commit_indexed_cli_agent_session_discovery" app/src/workspace/environment_table.rs
 require_contract_marker "LR-042" "remote_cli_agent_scan_failure_is_an_error_result" app/src/remote_server/cli_agent_sessions.rs
 require_contract_marker "LR-042" "scan_cli_agent_sessions_response::Result::Error" app/src/remote_server/server_model.rs
@@ -2614,7 +2561,7 @@ require_contract_marker "LR-144" "terminal runtime: session-owned command execut
 require_contract_marker "LR-144" "optional string working_directory = 4;" crates/remote_server/proto/remote_server.proto
 require_contract_marker "LR-144" "map<string, string> environment_variables = 5;" crates/remote_server/proto/remote_server.proto
 require_contract_marker "LR-144" "SessionExecutionContextDeregistered session_execution_context_deregistered = 39;" crates/remote_server/proto/remote_server.proto
-require_contract_marker "LR-144" "REMOTE_SERVER_PROTOCOL_REVISION: u32 = 6" crates/remote_server/src/lib.rs
+require_contract_marker "LR-144" "REMOTE_SERVER_PROTOCOL_REVISION: u32 = 7" crates/remote_server/src/lib.rs
 require_contract_marker "LR-144" "working_directory" app/assets/bundled/bootstrap/bash_body.sh app/assets/bundled/bootstrap/zsh_body.sh app/assets/bundled/bootstrap/fish.sh app/assets/bundled/bootstrap/pwsh.ps1
 require_contract_marker "LR-144" "codex_home" app/assets/bundled/bootstrap/bash_body.sh app/assets/bundled/bootstrap/zsh_body.sh app/assets/bundled/bootstrap/fish.sh app/assets/bundled/bootstrap/pwsh.ps1
 require_contract_marker "LR-144" "claude_config_dir" app/assets/bundled/bootstrap/bash_body.sh app/assets/bundled/bootstrap/zsh_body.sh app/assets/bundled/bootstrap/fish.sh app/assets/bundled/bootstrap/pwsh.ps1
@@ -3735,172 +3682,59 @@ then
     fail=1
 fi
 
-# LR-179: Jcode/Omp discovery is a read-only native-metadata projection. Resume is
-# independent and always emits the provider-native command; realtime/mutations are intentionally unsupported.
-require_contract_marker "LR-179" "JCODE-PHASED-CONTROL-PLANE-83" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
+# LR-179: Omp discovery is a bounded, read-only native-metadata projection. Resume
+# remains an independent provider-native command; Jcode is intentionally not an Ashide provider.
+require_contract_marker "LR-179" "OMP-NATIVE-DISCOVERY-RESUME-86" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
 require_contract_marker "LR-179" "id: LR-179" docs/design/local-remote-parity-tracker.yaml
 require_contract_marker "LR-179" "status: verified" docs/design/local-remote-parity-tracker.yaml
-require_contract_marker "LR-179" "Jcode/Omp Agent discovery and native resume" docs/design/local-remote-capability-matrix.csv
-require_contract_marker "LR-179" "Jcode Agent Stage B: realtime daemon control (scope excluded)" docs/design/local-remote-capability-matrix.csv
-require_contract_marker "LR-179" "Jcode Agent advanced mutations (scope excluded)" docs/design/local-remote-capability-matrix.csv
-require_rust_test_name "LR-179" "jcode_is_a_first_class_detectable_cli_agent" app/src/terminal/cli_agent_tests.rs
-require_rust_test_name "LR-179" "jcode_uses_its_official_icon_in_all_agent_entrypoints" app/src/terminal/cli_agent_tests.rs
-require_rust_test_name "LR-179" "jcode_explicit_resume_command_uses_public_cli_contract" app/src/terminal/cli_agent_tests.rs
-require_rust_test_name "LR-179" "jcode_discovery_and_resume_do_not_require_a_daemon_handshake" app/src/terminal/cli_agent_tests.rs
-require_rust_test_name "LR-179" "jcode_readonly_discovery_capabilities_are_separate_from_advanced_session_actions" app/src/terminal/cli_agent_tests.rs
+require_contract_marker "LR-179" "Omp Agent discovery and native resume" docs/design/local-remote-capability-matrix.csv
+require_rust_test_name "LR-179" "omp_is_a_first_class_detectable_cli_agent" app/src/terminal/cli_agent_tests.rs
 require_rust_test_name "LR-179" "omp_readonly_discovery_has_an_independent_explicit_resume_adapter" app/src/terminal/cli_agent_tests.rs
-require_rust_test_name "LR-179" "jcode_fork_edit_and_writeback_remain_disabled" app/src/terminal/cli_agent_tests.rs
-require_rust_test_name "LR-179" "jcode_discovery_reads_authoritative_session_json_and_uses_updated_at" app/src/cli_agent_jsonl/tests.rs
-require_rust_test_name "LR-179" "jcode_discovery_rejects_filename_id_mismatch" app/src/cli_agent_jsonl/tests.rs
-require_rust_test_name "LR-179" "jcode_discovery_filters_debug_and_empty_sessions_before_recency_limit" app/src/cli_agent_jsonl/tests.rs
 require_rust_test_name "LR-179" "omp_discovery_reads_one_project_level_and_prefers_title_slot" app/src/cli_agent_jsonl/tests.rs
 require_rust_test_name "LR-179" "omp_discovery_orders_by_mtime_and_rejects_filename_id_mismatch" app/src/cli_agent_jsonl/tests.rs
-require_rust_test_name "LR-179" "explicit_target_roots_keep_jcode_and_omp_under_target_home" app/src/cli_agent_jsonl/tests.rs
-require_rust_test_name "LR-179" "jcode_and_omp_are_file_backed_session_index_providers" app/src/cli_agent_jsonl/tests.rs
-require_rust_test_name "LR-179" "discovery_plan_uses_only_enabled_unique_file_backed_agents" app/src/cli_agent_jsonl/tests.rs
-require_rust_test_name "LR-179" "local_jcode_and_omp_cold_scan_project_stable_rows_without_layout_identity" app/src/terminal/cli_agent_session_index.rs
-require_rust_test_name "LR-179" "test_cli_agent_history_enabled_agents_default_to_all_discoverable_native_resumers" app/src/settings/ai_tests.rs
-require_rust_test_name "LR-179" "test_cli_agent_history_enabled_agents_ignore_stale_names_and_deduplicate_selection" app/src/settings/ai_tests.rs
-require_rust_test_name "LR-179" "test_unified_new_session_menu_projects_history_discovery_selection" app/src/workspace/view_test.rs
-require_rust_test_name "LR-179" "test_remote_scan_respects_explicit_enabled_agents" app/src/remote_server/cli_agent_sessions.rs
-require_rust_callsite_owners \
-    "LR-179" \
-    "settings-selected shared Agent discovery plan" \
-    '\bAgentSessionDiscoveryPlan::from_enabled_agents\(' \
-    $'app/src/remote_server/cli_agent_sessions.rs:scan_sessions
-app/src/terminal/cli_agent_session_index.rs:try_scan_current_app_cli_agent_session_discovery'
-if ! python3 - <<'JCODE_OMP_GUARD'
+require_rust_test_name "LR-179" "local_omp_cold_scan_projects_stable_rows_without_layout_identity" app/src/terminal/cli_agent_session_index.rs
+if ! python3 - <<'OMP_DISCOVERY_GUARD'
 from pathlib import Path
 
 agent = Path("app/src/terminal/cli_agent.rs").read_text()
+discovery = Path("app/src/cli_agent_jsonl/discovery.rs").read_text()
+roots = Path("app/src/cli_agent_jsonl/roots.rs").read_text()
+remote = Path("app/src/remote_server/cli_agent_sessions.rs").read_text()
 icons = Path("crates/warp_core/src/ui/icons.rs").read_text()
-discovery = "".join(path.read_text() for path in sorted(Path("app/src/cli_agent_jsonl").glob("*.rs")))
-settings = Path("app/src/settings/ai.rs").read_text()
-workspace = Path("app/src/workspace/view.rs").read_text()
-runtime = Path("app/src/workspace/environment_runtime.rs").read_text()
-remote_server = Path("app/src/remote_server/server_model.rs").read_text()
-remote_sessions = Path("app/src/remote_server/cli_agent_sessions.rs").read_text()
-proto = Path("crates/remote_server/proto/remote_server.proto").read_text()
 
-record_start = agent.index("CLIAgent::Jcode | CLIAgent::Omp => AgentCapabilities {")
-record_end = agent.index("CLIAgent::Claude | CLIAgent::Codex =>", record_start)
-record = agent[record_start:record_end]
-for capability in [
-    "can_index_sessions: true",
-    "can_list_sessions: true",
-    "can_cold_restore: true",
-    "can_resume: true",
-    "can_read_session_ir: false",
-    "can_fork: false",
-    "can_edit_preview: false",
-    "can_write_native_history: false",
-    "can_launch_derived_session: false",
-]:
-    if capability not in record:
-        raise SystemExit(f"Jcode/Omp discovery-resume capability contract changed: {capability}")
-for provider in [
-    "CLIAgent::Jcode => Some(AgentSessionDiscoveryProvider::Jcode)",
-    "CLIAgent::Omp => Some(AgentSessionDiscoveryProvider::Omp)",
-]:
-    if provider not in agent:
-        raise SystemExit(f"Jcode/Omp must remain in the shared discovery registry: {provider}")
 for required in [
-    "CLIAgent::Jcode => Some(Icon::JcodeLogo)",
-    "Icon::JcodeLogo => \"bundled/svg/jcode.svg\"",
+    'CLIAgent::Omp => AgentCapabilities {',
+    'CLIAgent::Omp => Some(AgentSessionDiscoveryProvider::Omp)',
+    'CLIAgent::Omp => Some(Icon::OmpLogo)',
+    'format!("omp --resume {}", shell_words::quote(&session_id))',
 ]:
-    if required not in (agent + icons):
-        raise SystemExit(f"Jcode official icon mapping missing: {required}")
+    if required not in agent:
+        raise SystemExit(f"Omp discovery-resume capability contract changed: {required}")
 for required in [
-    "recent_jcode_session_files",
-    "parse_jcode_discovery_record",
-    "recent_omp_session_files",
-    "parse_omp_discovery_record",
-    "read_jsonl_prefix_values(&file.path, 8 * 1024)",
+    'Self::Omp => CLIAgent::Omp',
+    'AgentSessionDiscoveryProvider::Omp => vec![roots.omp_sessions()]',
+    'AgentSessionDiscoveryProvider::Omp => recent_omp_session_files(',
+    '.par_iter()',
+    'scan_agent_session_provider(*provider, roots, self.logical_limit)',
 ]:
     if required not in discovery:
-        raise SystemExit(f"read-only Jcode/Omp discovery reader missing: {required}")
-jcode_parser_start = discovery.index("fn parse_jcode_discovery_record(")
-jcode_parser_end = discovery.index("fn parse_omp_discovery_record(", jcode_parser_start)
-jcode_parser = discovery[jcode_parser_start:jcode_parser_end]
-for required in [
-    "JcodeDiscoveryMetadata",
-    "jcode_session_is_default_discoverable(&metadata)",
-    "fn jcode_session_is_default_discoverable(",
-    "fn jcode_session_has_structural_messages(",
-    "metadata.is_debug",
-    "metadata.messages.as_deref()",
-    "IgnoredAny",
-]:
-    if required not in discovery:
-        raise SystemExit(f"Jcode default discovery visibility guard missing: {required}")
-if '"parent_id"' in jcode_parser:
-    raise SystemExit("Jcode discovery must not classify parent_id as a subagent visibility filter")
-for forbidden in [
-    "JcodePublicList",
-    "parse_jcode_session_list",
-    '"session",\n            "list",',
-    "write_jcode",
-    "write_omp",
-]:
-    if forbidden in discovery:
-        raise SystemExit(f"unsupported Jcode/Omp writer or machine-list adapter remains: {forbidden}")
-for path in Path("app/src").rglob("*.rs"):
-    if path.name.endswith(("_test.rs", "_tests.rs")) or "tests" in path.parts:
-        continue
-    content = path.read_text().split("\n#[cfg(test)]", maxsplit=1)[0]
-    if path.parent != Path("app/src/cli_agent_jsonl") and (".jcode" in content or ".omp/agent" in content):
-        raise SystemExit(f"Jcode/Omp native store reader escaped cli_agent_jsonl/: {path}")
-for required in [
-    'toml_path: "agents.third_party.history_enabled_agents"',
-    'pub fn cli_agent_history_enabled_agents(&self) -> Vec<CLIAgent>',
-    'pub fn is_cli_agent_history_enabled(&self, agent: CLIAgent) -> bool',
-]:
-    if required not in settings:
-        raise SystemExit(f"CLI agent discovery selection setting missing: {required}")
-for required in [
-    'AISettingsChangedEvent::CLIAgentHistoryEnabledAgents',
-    'me.refresh_workspace_sessions(ctx);',
-    'is_cli_agent_history_enabled(agent)',
-    'cli_agent_history_enabled_agents()',
-]:
-    if required not in workspace:
-        raise SystemExit(f"CLI agent discovery setting is not the Workspace scan/menu authority: {required}")
-for required in [
-    'enabled_agents: &[crate::terminal::CLIAgent]',
-    '.scan_cli_agent_sessions(',
-    '.map(crate::terminal::CLIAgent::to_serialized_name)',
-]:
-    if required not in runtime:
-        raise SystemExit(f"runtime scan does not forward desktop-selected agents: {required}")
-for required in [
-    "let ScanCliAgentSessions {",
-    "enabled_agents,",
-    'decode_scan_cli_agent_wire_agents("enabled_agents", enabled_agents)',
-]:
-    if required not in remote_server:
-        raise SystemExit(f"remote RPC handler does not consume desktop-selected agents: {required}")
-if 'AgentSessionDiscoveryPlan::from_enabled_agents' not in remote_sessions:
-    raise SystemExit("remote session scanner does not consume desktop-selected agents")
-if 'repeated string enabled_agents = 3;' not in proto:
-    raise SystemExit("ScanCliAgentSessions must carry desktop-selected enabled_agents")
-JCODE_OMP_GUARD
+        raise SystemExit(f"Omp bounded parallel discovery contract missing: {required}")
+if 'scan_agent_session_provider(*provider, roots, usize::MAX)' in discovery:
+    raise SystemExit("provider discovery must not parse unbounded records before the logical limit")
+for required in ['pub(crate) fn is_omp_session_source', 'pub(crate) fn omp_sessions']:
+    if required not in roots:
+        raise SystemExit(f"Omp authoritative store contract missing: {required}")
+for required in ['let omp_sessions = real(&roots.omp_sessions());', 'is_omp_session_source(&omp_sessions, &resolved)']:
+    if required not in remote:
+        raise SystemExit(f"remote Omp mutation authority missing: {required}")
+if 'Icon::OmpLogo => "bundled/svg/omp.svg"' not in icons:
+    raise SystemExit("Omp icon mapping missing")
+for source in [agent, discovery, roots, remote, icons]:
+    if 'Jcode' in source or 'jcode' in source.lower():
+        raise SystemExit("Jcode must not re-enter the native agent registry or provider path")
+OMP_DISCOVERY_GUARD
 then
-    echo "[LR-179] Jcode/Omp read-only discovery or independent native-resume contract changed" >&2
-    print_jcode_stage_a_inventory >&2
-    fail=1
-fi
-
-if rg -n 'jcode.*acp|acp.*jcode' app/src crates --glob '*.rs' -i; then
-    echo "[LR-179] mandatory Jcode ACP production path exists without an approved exception contract" >&2
-    fail=1
-fi
-if rg -n 'jcode-app-core' Cargo.toml app crates --glob 'Cargo.toml'; then
-    echo "[LR-179] Ashide must not link Jcode's private app-core implementation" >&2
-    fail=1
-fi
-if jcode_internal_wires=$(jcode_internal_wire_references) && [[ -n "$jcode_internal_wires" ]]; then
-    echo "[LR-179] Ashide must consume the public Jcode session-control façade, never copy its internal wire" >&2
-    echo "$jcode_internal_wires" >&2
+    echo "[LR-179] Omp bounded discovery/resume or Jcode-removal contract changed" >&2
     fail=1
 fi
 
@@ -4015,6 +3849,120 @@ fi
 action_required_inventory=$(rust_production_call_sites '\badd_action_required_toast\(')
 if [[ -z "$action_required_inventory" ]]; then
     echo "[LR-184] keyed ActionRequired production caller inventory is empty" >&2
+    fail=1
+fi
+
+operation_toast_inventory=$(rust_production_call_sites '\badd_operation_toast\(')
+echo "[LR-184] operation-keyed transient toast production inventory (path:line):"
+echo "$operation_toast_inventory"
+echo "[LR-184] operation-keyed transient toast enclosing-function inventory:"
+rust_production_callsite_owners '\badd_operation_toast\('
+if [[ -z "$operation_toast_inventory" ]]; then
+    echo "[LR-184] keyed transient operation toast production caller inventory is empty" >&2
+    fail=1
+fi
+require_contract_marker "LR-184" "keyed_transient_operation_replaces_across_info_success_and_error" app/src/view_components/dismissible_toast_tests.rs
+require_contract_marker "LR-184" "keyed_transient_operation_stays_transient" app/src/view_components/dismissible_toast_tests.rs
+require_contract_marker "LR-184" "different_operation_keys_remain_independent" app/src/view_components/dismissible_toast_tests.rs
+
+# LR-198: Session Navigator refresh 的 user feedback 只属于显式 action。被动
+# projection 可以触发/合并同一个 authority scan，但不得抢占 user generation、显示
+# 全局 start/success toast 或把 preserve outcome 伪称 complete。
+require_contract_marker "LR-198" "id: LR-198" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-198" "Session Navigator refresh feedback lifecycle" docs/design/local-remote-capability-matrix.csv
+require_contract_marker "LR-198" "PassiveProjection" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-198" "test_workspace_sessions_refresh_state_reports_local_progress_and_keyed_failure" app/src/workspace/view_test.rs
+require_contract_marker "LR-198" "session_navigator_refresh_feedback_static_guard" app/src/workspace/view_test.rs
+require_rust_callsite_owners \
+    "LR-198" \
+    "explicit Session Navigator refresh action" \
+    '\brefresh_workspace_sessions\(' \
+    $'app/src/workspace/view/session_navigator.rs:refresh_workspace_sessions\napp/src/workspace/view.rs:handle_action'
+if ! python3 - <<'PYCONTRACT'
+from pathlib import Path
+
+navigator_path = Path("app/src/workspace/view/session_navigator.rs")
+view_path = Path("app/src/workspace/view.rs")
+toast_path = Path("app/src/view_components/dismissible_toast.rs")
+navigator = navigator_path.read_text()
+view = view_path.read_text()
+toast = toast_path.read_text()
+
+for required in [
+    "ToastPolicy::operation",
+    "ToastLifetime::Transient",
+    "pub fn add_operation_toast(",
+]:
+    if required not in toast:
+        raise SystemExit(f"operation-keyed transient Toast contract missing: {required}")
+
+for forbidden in [
+    "WORKSPACE_SESSIONS_REFRESH_TOAST_ID",
+    "show_workspace_sessions_refresh_toast",
+    'message: Option<String>',
+]:
+    if forbidden in navigator or forbidden in view:
+        raise SystemExit(f"Session Navigator refresh must not retain global feedback path: {forbidden}")
+
+def function_body(source: str, marker: str, next_marker: str) -> str:
+    start = source.index(marker)
+    end = source.index(next_marker, start)
+    return source[start:end]
+
+begin = function_body(
+    navigator,
+    "pub(super) fn begin_workspace_sessions_refresh",
+    "pub(super) fn finish_workspace_sessions_refresh_if_current",
+)
+finish = function_body(
+    navigator,
+    "pub(super) fn finish_workspace_sessions_refresh_if_current",
+    "pub(super) fn fail_workspace_sessions_refresh_if_current",
+)
+fail = function_body(
+    navigator,
+    "pub(super) fn fail_workspace_sessions_refresh_if_current",
+    "pub(super) fn show_workspace_session_success_toast",
+)
+if "DismissibleToast" in begin or "DismissibleToast" in finish:
+    raise SystemExit("start/complete must not emit global Session Navigator refresh toasts")
+if "add_operation_toast" not in fail or "DismissibleToast::error" not in fail:
+    raise SystemExit("only explicit refresh failure may emit the operation-keyed error toast")
+if "String" in finish:
+    raise SystemExit("complete/partial refresh must not accept a success message")
+
+# Source-wide caller inventory: a UI user-refresh primitive has only its
+# definition and the typed RefreshWorkspaceSessions action owner. This makes a
+# new setting/pin/reorder wrapper fail closed even when it is added in another file.
+production_sources = sorted(
+    path
+    for path in Path("app/src").rglob("*.rs")
+    if "test" not in path.name and "/test_" not in path.as_posix()
+)
+needle = ".refresh_workspace_sessions(ctx)"
+locations = []
+for path in production_sources:
+    for line_number, line in enumerate(path.read_text().splitlines(), 1):
+        if needle in line:
+            locations.append(f"{path}:{line_number}")
+print("[LR-198 inventory] explicit refresh callers:", ", ".join(locations))
+if len(locations) != 1 or locations[0].split(":", 1)[0] != "app/src/workspace/view.rs":
+    raise SystemExit("only Workspace::handle_action RefreshWorkspaceSessions may invoke user refresh")
+
+for passive_owner in [
+    "AISettingsChangedEvent::CLIAgentHistoryEnabledAgents",
+    "fn toggle_workspace_session_pinned",
+]:
+    start = view.index(passive_owner) if passive_owner.startswith("AI") else navigator.index(passive_owner)
+    source = view if passive_owner.startswith("AI") else navigator
+    window = source[start:start + 1800]
+    if ".refresh_workspace_sessions(ctx)" in window:
+        raise SystemExit(f"passive owner must not invoke user refresh: {passive_owner}")
+if "EnvironmentSessionRefreshIntent::PassiveProjection" not in view:
+    raise SystemExit("settings reconciliation must retain explicit PassiveProjection")
+PYCONTRACT
+then
+    echo "[LR-198] Session Navigator refresh feedback lifecycle contract failed" >&2
     fail=1
 fi
 
@@ -4614,7 +4562,7 @@ require_rust_callsite_owners \
     "LR-186" \
     "remote session cache authority-scoped ownership" \
     'clear_indexed_environment_cli_agent_sessions_for_authority\(|refresh_indexed_sessions_for_authority\(|commit_indexed_environment_cli_agent_sessions\(' \
-    $'app/src/workspace/view/session_navigator.rs:commit_indexed_environment_cli_agent_sessions\napp/src/workspace/view/session_navigator.rs:clear_indexed_environment_cli_agent_sessions_for_authority\napp/src/workspace/view/session_navigator.rs:refresh_workspace_sessions\napp/src/workspace/view/session_navigator.rs:refresh_indexed_sessions_for_authority\napp/src/workspace/view/session_navigator.rs:finish_workspace_session_delete_plan\napp/src/workspace/view.rs:configure_new_workspace\napp/src/workspace/view.rs:schedule_environment_cli_agent_session_source_action\napp/src/workspace/view.rs:finish_resolve_environment_runtime_root\napp/src/workspace/view.rs:handle_file_tree_event\napp/src/workspace/view.rs:disconnect_environment_runtime_state'
+    $'app/src/workspace/view/session_navigator.rs:commit_indexed_environment_cli_agent_sessions\napp/src/workspace/view/session_navigator.rs:clear_indexed_environment_cli_agent_sessions_for_authority\napp/src/workspace/view/session_navigator.rs:refresh_workspace_sessions\napp/src/workspace/view/session_navigator.rs:refresh_workspace_sessions_passively\napp/src/workspace/view/session_navigator.rs:refresh_indexed_sessions_for_authority\napp/src/workspace/view/session_navigator.rs:finish_workspace_session_delete_plan\napp/src/workspace/view.rs:configure_new_workspace\napp/src/workspace/view.rs:schedule_environment_cli_agent_session_source_action\napp/src/workspace/view.rs:finish_resolve_environment_runtime_root\napp/src/workspace/view.rs:remove_tab\napp/src/workspace/view.rs:disconnect_environment_runtime_state'
 
 # LR-187: remote CLI-agent scan fields must cross the RPC boundary only as the
 # canonical serde identity. The daemon scanner owns typed provider facts; the
@@ -4629,9 +4577,9 @@ require_rust_test_name "LR-187" "remote_cli_agent_scan_rejects_command_prefix_wi
 require_rust_test_name "LR-187" "environment_cli_agent_scan_requires_serialized_agent_names" app/src/workspace/environment_runtime.rs
 require_rust_test_name "LR-187" "environment_cli_agent_scan_rejects_mixed_source_missing_outcome" app/src/workspace/environment_runtime.rs
 require_rust_test_name "LR-187" "environment_cli_agent_scan_rejects_record_without_observed_provider" app/src/workspace/environment_runtime.rs
-require_contract_marker "LR-187" "REMOTE_SERVER_PROTOCOL_REVISION 到 6" docs/design/local-remote-parity-tracker.yaml
-require_contract_marker "LR-187" "REMOTE_SERVER_PROTOCOL_REVISION: u32 = 6" crates/remote_server/src/lib.rs
-require_rust_test_name "LR-187" "oss_source_build_remote_server_binary_uses_dev_protocol_slot_v6" crates/remote_server/src/setup_tests.rs
+require_contract_marker "LR-187" "REMOTE_SERVER_PROTOCOL_REVISION 到 7" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-187" "REMOTE_SERVER_PROTOCOL_REVISION: u32 = 7" crates/remote_server/src/lib.rs
+require_rust_test_name "LR-187" "oss_source_build_remote_server_binary_uses_dev_protocol_slot_v7" crates/remote_server/src/setup_tests.rs
 if ! python3 - <<'PYCONTRACT'
 from pathlib import Path
 
@@ -4688,32 +4636,6 @@ then
     fail=1
 fi
 
-# Jcode is rendered in the Session Navigator only through this bundled SVG.
-# Validate the actual XML asset, not just the Rust icon mapping: a malformed
-# data URL otherwise compiles successfully and degrades only at GUI render time.
-if ! python3 - <<'PY'
-from pathlib import Path
-from xml.etree import ElementTree
-
-icons = Path("crates/warp_core/src/ui/icons.rs").read_text()
-asset = Path("app/assets/bundled/svg/jcode.svg")
-
-if 'Icon::JcodeLogo => "bundled/svg/jcode.svg"' not in icons:
-    raise SystemExit("Jcode icon mapping must point at the bundled SVG")
-
-try:
-    root = ElementTree.parse(asset).getroot()
-except ElementTree.ParseError as error:
-    raise SystemExit(f"Jcode SVG must be well-formed XML: {error}")
-
-if not root.tag.endswith("svg"):
-    raise SystemExit("Jcode icon asset must have an SVG root")
-PY
-then
-    echo "[Jcode icon] bundled SVG contract failed" >&2
-    fail=1
-fi
-
 # LR-188: local provider-store discovery can be arbitrarily expensive. It must
 # mirror the runtime path's asynchronous delivery boundary: the UI callback owns
 # only token/generation creation and atomic completion; filesystem traversal is
@@ -4732,12 +4654,23 @@ for required in [
     "ctx.spawn(",
     "tokio::task::spawn_blocking(move ||",
     "Workspace::try_scan_terminal_cli_agent_session_discovery(",
+    "registry.request_local_cli_agent_session_scan(",
+    "registry.complete_local_cli_agent_session_scan(&scan_key, generation)",
+    "workspace.finish_local_cli_agent_session_scan(own_participant, result.clone(), ctx)",
+]:
+    if required not in refresh:
+        raise SystemExit(f"local refresh must retain async delivery contract: {required}")
+
+finish_start = view.index("fn finish_local_cli_agent_session_scan(")
+finish_end = view.index("impl EnvironmentBackend for TerminalBootstrapEnvironmentBackend", finish_start)
+finish = view[finish_start:finish_end]
+for required in [
     "commit_indexed_environment_cli_agent_session_discovery",
     "finish_workspace_sessions_refresh_if_current",
     "fail_workspace_sessions_refresh_if_current",
 ]:
-    if required not in refresh:
-        raise SystemExit(f"local refresh must retain async delivery contract: {required}")
+    if required not in finish:
+        raise SystemExit(f"local scan recipient commit helper lost lifecycle delivery: {required}")
 
 blocking_start = refresh.index("tokio::task::spawn_blocking(move ||")
 scan_start = refresh.index("Workspace::try_scan_terminal_cli_agent_session_discovery(")
@@ -4792,6 +4725,70 @@ then
     fail=1
 fi
 
+# LR-195: passive lifecycle reconciliation may be triggered by every terminal
+# bootstrap/source mutation. It must coalesce behind the current authority token
+# before backend delivery, otherwise each event replaces the token and every
+# background completion becomes stale. Explicit user refresh is deliberately
+# excluded so it can replace a stuck worker.
+if ! python3 - <<'PYCONTRACT'
+from pathlib import Path
+
+table = Path("app/src/workspace/environment_table.rs").read_text()
+navigator = Path("app/src/workspace/view/session_navigator.rs").read_text()
+
+owner = "pub(crate) fn has_indexed_cli_agent_session_scan_in_flight"
+if table.count(owner) != 1:
+    raise SystemExit("EnvironmentTable must own exactly one in-flight session scan query")
+
+refresh_start = navigator.index("pub(super) fn refresh_indexed_sessions_for_authority(")
+refresh_end = navigator.index("fn remove_workspace_session_from_cached_sources", refresh_start)
+refresh = navigator[refresh_start:refresh_end]
+coalesce = refresh.index("has_indexed_cli_agent_session_scan_in_flight(authority)")
+delivery = refresh.index("EnvironmentBackendKind::for_authority(authority)")
+if coalesce > delivery:
+    raise SystemExit("passive scan coalescing must happen before backend delivery")
+for required in [
+    "matches!(intent, EnvironmentSessionRefreshIntent::PassiveProjection)",
+    "return Ok(true);",
+]:
+    if required not in refresh:
+        raise SystemExit(f"missing passive scan coalescing contract: {required}")
+PYCONTRACT
+then
+    echo "[LR-195] passive Session Navigator refresh must coalesce behind the current authority-scoped scan" >&2
+    fail=1
+fi
+
+# LR-199: generic PTY bootstrap is terminal readiness, not provider history
+# source mutation. Keep the full allowed semantic trigger owner set explicit and
+# reject reintroducing discovery under TerminalSessionBootstrapped.
+require_contract_marker "LR-199" "SN-PASSIVE-DISCOVERY-SEMANTIC-TRIGGERS-68" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-199" "id: LR-199" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-199" "Session Navigator passive discovery trigger ownership" docs/design/local-remote-capability-matrix.csv
+require_rust_test_name "LR-199" "generic_terminal_bootstrap_does_not_trigger_provider_history_scan" app/src/workspace/view_test.rs
+require_rust_callsite_owners \
+    "LR-199" \
+    "passive provider discovery semantic trigger ownership" \
+    'refresh_indexed_sessions_for_authority\(' \
+    $'app/src/workspace/view/session_navigator.rs:refresh_workspace_sessions\napp/src/workspace/view/session_navigator.rs:refresh_workspace_sessions_passively\napp/src/workspace/view/session_navigator.rs:refresh_indexed_sessions_for_authority\napp/src/workspace/view/session_navigator.rs:finish_workspace_session_delete_plan\napp/src/workspace/view.rs:configure_new_workspace\napp/src/workspace/view.rs:schedule_environment_cli_agent_session_source_action\napp/src/workspace/view.rs:finish_resolve_environment_runtime_root\napp/src/workspace/view.rs:remove_tab'
+if ! python3 - <<'PYCONTRACT'
+from pathlib import Path
+
+view = Path("app/src/workspace/view.rs").read_text()
+handler = view.split("pane_group::Event::TerminalSessionBootstrapped { pane_id } => {", 1)[1]
+handler = handler.split("pane_group::Event::TerminalSessionBootstrapFailed", 1)[0]
+for forbidden in [
+    "refresh_indexed_sessions_for_authority",
+    "EnvironmentSessionRefreshIntent::PassiveProjection",
+]:
+    if forbidden in handler:
+        raise SystemExit(f"generic terminal bootstrap must not start provider discovery: {forbidden}")
+PYCONTRACT
+then
+    echo "[LR-199] passive provider discovery semantic trigger ownership changed" >&2
+    fail=1
+fi
+
 # LR-189: the logical Navigator row limit cannot bound physical provider-store
 # enumeration. Every shared discovery scanner must use one app-state owned
 # physical source limit and exceed it as a typed failure, never as a
@@ -4820,7 +4817,6 @@ for required in [
     "recent_jsonl_files(",
     "Some(crate::app_state::WORKSPACE_SESSION_NAVIGATOR_PHYSICAL_SOURCE_LIMIT_PER_PROVIDER)",
     "let physical_limit =",
-    "recent_jcode_session_files(",
     "recent_omp_session_files(",
     "parse_codex_discovery_index(",
 ]:
@@ -4855,6 +4851,946 @@ for consumer, source in {
 PYCONTRACT
 then
     echo "[LR-189] Session Navigator provider discovery must retain its bounded physical-source gate" >&2
+    fail=1
+fi
+
+
+# LR-194: Omp 的发现 source shape 也是 remote helper 的 mutation authority。
+# 不能只扩大目录 root，否则 nested tool log 会绕过 source-shape gate；所有
+# native file delete 必须仍集中到 mutate_file → ensure_allowed。
+if ! python3 - <<'PYCONTRACT'
+import re
+from pathlib import Path
+
+roots = Path("app/src/cli_agent_jsonl/roots.rs").read_text()
+discovery = Path("app/src/cli_agent_jsonl/discovery.rs").read_text()
+remote = Path("app/src/remote_server/cli_agent_sessions.rs").read_text()
+
+def function_body(source: str, name: str) -> str:
+    start = source.index(f"fn {name}(")
+    next_match = re.search(r"\nfn [A-Za-z_]", source[start + 1:])
+    if next_match is None:
+        return source[start:]
+    return source[start:start + 1 + next_match.start()]
+
+omp_shape = function_body(roots, "is_omp_session_source")
+for required in [
+    ".and_then(Path::parent)",
+    "parent == root",
+    'extension == "jsonl"',
+]:
+    if required not in omp_shape:
+        raise SystemExit(f"Omp source shape must remain exactly one bucket deep: {required}")
+if "|path| is_omp_session_source(root, path)" not in discovery:
+    raise SystemExit("Omp discovery must reuse the native mutation source predicate")
+
+allow = function_body(remote, "ensure_allowed")
+for required in [
+    "let omp_sessions = real(&roots.omp_sessions());",
+    "is_omp_session_source(&omp_sessions, &resolved)",
+]:
+    if required not in allow:
+        raise SystemExit(f"remote helper allow-list must reuse Omp source shape: {required}")
+
+mutation = function_body(remote, "mutate_file")
+if "let path = ensure_allowed(source, roots)?;" not in mutation:
+    raise SystemExit("native file mutation must pass through ensure_allowed")
+if mutation.count("std::fs::remove_file(&path)") != 1:
+    raise SystemExit("native CLI-agent delete must retain exactly one canonical primitive")
+
+for test_name in [
+    "remote_mutation_deletes_omp_authoritative_session_file",
+    "remote_mutation_rejects_omp_tool_log_paths",
+]:
+    if f"fn {test_name}()" not in remote:
+        raise SystemExit(f"missing LR-194 native mutation regression test: {test_name}")
+PYCONTRACT
+then
+    echo "[LR-194] remote Omp native mutation source authority contract failed" >&2
+    fail=1
+fi
+
+# LR-196: expanded persisted-session providers must stay on the canonical
+# descriptor/plan/EnvironmentTable path. Local and runtime carry the same
+# canonical workspace scope into that plan; no renderer vault or partial-success
+# overlay may become a second collection owner.
+require_contract_marker "LR-196" "SN-EXPANDED-PROVIDER-DISCOVERY-65" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-196" "id: LR-196" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-196" "Session Navigator expanded native provider discovery" docs/design/local-remote-capability-matrix.csv
+for test in \
+    expanded_provider_discovery_is_registry_owned_complete_and_scope_preserving \
+    expanded_provider_parsers_extract_native_identity_title_and_cwd \
+    opencode_legacy_and_sqlite_discovery_prefers_sqlite_identity \
+    expanded_provider_discovery_preserves_old_current_workspace_session_beyond_recent_limit
+do
+    require_rust_test_name "LR-196" "$test" app/src/cli_agent_jsonl/tests.rs
+done
+require_rust_test_name "LR-196" "expanded_provider_failure_preserves_committed_collection" app/src/workspace/environment_table.rs
+require_rust_test_name "LR-196" "expanded_provider_resume_commands_use_public_native_contracts" app/src/terminal/cli_agent_tests.rs
+require_contract_marker "LR-196" "repeated string scope_paths = 5;" crates/remote_server/proto/remote_server.proto
+if ! python3 - <<'PYCONTRACT'
+from pathlib import Path
+
+agent = Path("app/src/terminal/cli_agent.rs").read_text()
+discovery = Path("app/src/cli_agent_jsonl/discovery.rs").read_text()
+roots = Path("app/src/cli_agent_jsonl/roots.rs").read_text()
+local = Path("app/src/terminal/cli_agent_session_index.rs").read_text()
+workspace = Path("app/src/workspace/view.rs").read_text()
+runtime = Path("app/src/workspace/environment_runtime.rs").read_text()
+helper = Path("app/src/remote_server/cli_agent_sessions.rs").read_text()
+server = Path("app/src/remote_server/server_model.rs").read_text()
+proto = Path("crates/remote_server/proto/remote_server.proto").read_text()
+
+providers = ["Droid", "OpenCode", "Copilot", "Pi", "Cursor", "Antigravity"]
+for provider in providers:
+    mapping = f"CLIAgent::{provider if provider != 'Cursor' else 'CursorCli'} => Some(AgentSessionDiscoveryProvider::{provider})"
+    if mapping not in agent:
+        raise SystemExit(f"expanded provider escaped AgentRecord registry: {mapping}")
+for parser in [
+    "parse_droid_discovery_record",
+    "scan_opencode_discovery_records",
+    "parse_copilot_discovery_record",
+    "parse_pi_discovery_record",
+    "parse_cursor_discovery_record",
+    "parse_antigravity_discovery_record",
+]:
+    if parser not in discovery:
+        raise SystemExit(f"expanded provider parser missing: {parser}")
+for required in [
+    "OpenCodeSqliteEntry",
+    ".filter_map(|path| fs::canonicalize(path).ok())",
+    "normalize_cli_agent_session_cwd",
+    "scope_paths: impl IntoIterator<Item = PathBuf>",
+    ".with_scope_paths(scope_paths)",
+]:
+    if required not in discovery + roots + local + helper:
+        raise SystemExit(f"expanded discovery ownership marker missing: {required}")
+for required in [
+    "snapshot_for_authority(authority)",
+    "scope_paths",
+    "scan_environment_cli_agent_sessions(",
+]:
+    if required not in workspace:
+        raise SystemExit(f"Workspace must project authority-owned scope to both backends: {required}")
+for required in [
+    "scope_paths: &[PathBuf]",
+    ".map(|path| path.to_string_lossy().into_owned())",
+]:
+    if required not in runtime:
+        raise SystemExit(f"runtime scope projection missing: {required}")
+if "scope_paths.into_iter().map(PathBuf::from)" not in server:
+    raise SystemExit("remote helper must decode scope paths into the shared plan")
+if "repeated string scope_paths = 5;" not in proto:
+    raise SystemExit("ScanCliAgentSessions must carry canonical Environment scope")
+for forbidden in ["AiVault", "AI Vault", "partial scan success", "renderer-owned provider scanner"]:
+    production = agent + discovery + local + workspace + runtime + helper + server
+    if forbidden in production:
+        raise SystemExit(f"forbidden second discovery path remains: {forbidden}")
+# Negative probes: the guard must catch both a second UI-owned collection and
+# a runtime request that stops carrying authority-owned scope.
+synthetic_polluted = workspace + "\nstruct AiVaultPanel;\n"
+if "AiVault" not in synthetic_polluted:
+    raise SystemExit("negative probe failed to detect injected AI Vault path")
+synthetic_proto = proto.replace("repeated string scope_paths = 5;", "")
+if "repeated string scope_paths = 5;" in synthetic_proto:
+    raise SystemExit("negative probe failed to remove scope_paths")
+if "repeated string scope_paths = 5;" not in proto:
+    raise SystemExit("negative probe baseline is missing scope_paths")
+PYCONTRACT
+then
+    echo "[LR-196] expanded provider discovery ownership/parity contract failed" >&2
+    fail=1
+fi
+
+# LR-197: generic local terminals must not enter the canonical Navigator projection
+# or persist as recoverable history. The local-only membership branch belongs at
+# the live projection/read-write boundaries; runtime terminal rows remain valid.
+require_contract_marker "LR-197" "SN-LOCAL-AGENT-HISTORY-MEMBERSHIP-67" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-197" "id: LR-197" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-197" "Session Navigator local agent-history membership" docs/design/local-remote-capability-matrix.csv
+for test in \
+    local_generic_terminal_is_excluded_from_navigator_but_agent_bound_live_pane_survives \
+    local_agent_binding_survives_passive_refresh_and_tab_close_requests_native_history_refresh \
+    local_agent_history_membership_static_guard
+do
+    require_rust_test_name "LR-197" "$test" app/src/workspace/view_test.rs
+done
+require_rust_test_name "LR-197" "local_session_user_state_drops_generic_pane_identity_debt" app/src/terminal/cli_agent_session_index.rs
+require_rust_test_name "LR-197" "restored_workspace_session_history_requires_agent_or_conversation_semantics" app/src/app_state_tests.rs
+if ! python3 - <<'PYCONTRACT'
+from pathlib import Path
+
+navigator = Path("app/src/workspace/view/session_navigator.rs").read_text()
+workspace = Path("app/src/workspace/view.rs").read_text()
+app_state = Path("app/src/app_state.rs").read_text()
+local_index = Path("app/src/terminal/cli_agent_session_index.rs").read_text()
+
+membership = navigator.split("fn session_navigator_live_session_is_member(", 1)[1].split(
+    "pub(super) fn live_workspace_sessions", 1
+)[0]
+if "uses_terminal_bootstrap" not in membership or "WorkspaceSessionKind::Terminal" not in membership:
+    raise SystemExit("local generic-terminal membership predicate lost its canonical authority/kind boundary")
+if "AgentTerminal" not in membership:
+    raise SystemExit("local agent-bound terminal membership must remain explicit")
+
+projection = navigator.split("pub(super) fn live_workspace_sessions", 1)[1].split(
+    "pub(crate) fn live_or_pending_workspace_session_locator", 1
+)[0]
+if projection.count("session_navigator_live_session_is_member") != 2:
+    raise SystemExit("terminal and placeholder live carriers must both use the one membership predicate")
+if "binding.apply_to_workspace_session(&mut session);\n                    }\n                    if Self::session_navigator_live_session_is_member" not in projection:
+    raise SystemExit("local membership must run after canonical pane binding is applied")
+if "sessions.push(session);\n                    continue;" in projection:
+    raise SystemExit("unconditional terminal live-session push bypass remains")
+
+remove_tab = workspace.split("fn remove_tab(", 1)[1].split(
+    "fn reconcile_workspace_state_after_tab_collection_changed", 1
+)[0]
+refresh = remove_tab.find("refresh_indexed_sessions_for_authority(")
+removed = remove_tab.find("self.tabs.remove(index)")
+if refresh == -1 or removed == -1 or refresh < removed:
+    raise SystemExit("tab close must request native history refresh only after removing the live carrier")
+if "EnvironmentSessionRefreshIntent::PassiveProjection" not in remove_tab:
+    raise SystemExit("tab close history refresh must use the shared passive intent")
+if "closed_tab_has_agent_history" not in remove_tab:
+    raise SystemExit("tab close must avoid scanning after generic terminal-only tab removal")
+
+if "fn is_persistable_navigator_history" not in app_state:
+    raise SystemExit("restored virtual history needs one app-state semantic membership gate")
+if "filter(WorkspaceSessionSnapshot::is_persistable_navigator_history)" not in workspace:
+    raise SystemExit("WindowSnapshot restore/save must prune non-agent virtual history")
+
+sanitizer = local_index.split("fn sanitize_session_user_state", 1)[1].split(
+    "fn write_session_user_state", 1
+)[0]
+if "local::pane:" not in sanitizer or "is_persistable_local_agent_history_user_state_key" not in sanitizer:
+    raise SystemExit("local generic pane user-state cleanup gate is missing")
+
+# Negative probes: reintroducing either bypass must fail the corresponding gate.
+# Keep the probe independent of rustfmt's line wrapping: replacing the canonical
+# predicate with `true` must be rejected by the same two-carrier ownership count.
+synthetic_unconditional_projection = projection.replace(
+    "if Self::session_navigator_live_session_is_member(&tab_environment, &session) {",
+    "if true {",
+)
+if synthetic_unconditional_projection.count("session_navigator_live_session_is_member") == 2:
+    raise SystemExit("negative probe failed to model an unconditional terminal push")
+if "local::pane:" not in sanitizer.replace(
+    "is_persistable_local_agent_history_user_state_key(&key)",
+    "true",
+):
+    raise SystemExit("negative probe failed to model generic pane-key retention")
+PYCONTRACT
+then
+    echo "[LR-197] local agent-history membership/persistence contract failed" >&2
+    fail=1
+fi
+
+# LR-200: virtualized Session Navigator rendering must consume the committed
+# Environment-owned model and materialize only canonical reorder units. List
+# indices are transient geometry, never a second identity/persistence registry.
+require_contract_marker "LR-200" "SN-SESSION-NAVIGATOR-VIEWPORTED-PROJECTION-69" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-200" "SESSION-NAVIGATOR-VIEWPORTED-PROJECTION-69" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
+require_contract_marker "LR-200" "id: LR-200" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-200" "Session Navigator viewported render projection" docs/design/local-remote-capability-matrix.csv
+for test in \
+    session_navigator_viewport_uses_reorder_units_and_stable_identities \
+    session_navigator_viewport_static_guard
+do
+    require_rust_test_name "LR-200" "$test" app/src/workspace/view/vertical_tabs_tests.rs
+done
+if ! python3 - <<'PYCONTRACT'
+from pathlib import Path
+
+vertical = Path("app/src/workspace/view/vertical_tabs.rs").read_text()
+navigator = Path("app/src/workspace/view/session_navigator.rs").read_text()
+reducer = Path("app/src/workspace/view/session_navigator_reducer.rs").read_text()
+list_source = Path("crates/warpui_core/src/elements/viewported_list.rs").read_text()
+
+panel = vertical.split("fn render_vertical_tabs_panel(", 1)[1].split(
+    "fn render_tab_group_internal(", 1
+)[0]
+if "NewScrollable::vertical(" not in panel or "List::new(" not in panel:
+    raise SystemExit("Session Navigator panel must use the viewported List primitive")
+if "ClippedScrollable::vertical(" in panel:
+    raise SystemExit("old full-column ClippedScrollable path remains in Session Navigator panel")
+if "state.sync_session_navigator_viewport(workspace, app)" not in panel:
+    raise SystemExit("panel must reconcile the committed viewport projection before layout")
+
+sync = vertical.split("fn sync_session_navigator_viewport(", 1)[1].split(
+    "fn session_navigator_session_row_is_viewport_visible", 1
+)[0]
+for required in [
+    "committed_session_navigator_model",
+    "model.revision",
+    "invalidate_height_for_index",
+    "scroll_to_with_offset",
+    "SessionNavigatorViewportItem::identity",
+]:
+    if required not in sync:
+        raise SystemExit(f"viewport reconciliation missing required owner/geometry gate: {required}")
+if "workspace.session_navigator_model()" in sync:
+    raise SystemExit("viewport reconciliation must not clone the model on every render")
+
+projection = vertical.split("fn build_session_navigator_viewport_projection(", 1)[1].split(
+    "fn render_session_unit_insertion_target", 1
+)[0]
+for required in [
+    "build_reorder_units",
+    "session_navigator_viewport_unit_identity(unit)",
+    "SessionNavigatorRowIdentity::for_session",
+]:
+    if required not in projection:
+        raise SystemExit(f"viewport projection lost canonical unit/identity behavior: {required}")
+if "render_session_unit_insertion_target" not in vertical:
+    raise SystemExit("viewport items must retain canonical unit-boundary insertion targets")
+if "for session in visible" in projection:
+    raise SystemExit("legacy leaf-by-leaf viewport construction remains")
+
+sidecar = vertical.split("fn render_workspace_session_detail_sidecar(", 1)[1].split(
+    "pub(super) fn render_detail_sidecar", 1
+)[0]
+if "session_navigator_session_row_is_viewport_visible" not in sidecar:
+    raise SystemExit("session detail sidecar must reject unmounted viewport rows")
+if "element_position_by_id_at_last_frame" not in sidecar or "state.clear_detail_sidecar();" not in sidecar:
+    raise SystemExit("session detail sidecar must fail closed for missing anchors")
+
+if "pub fn is_item_visible" not in list_source:
+    raise SystemExit("ListState must expose viewport visibility for stale overlay rejection")
+if "pub revision: u64" not in reducer or "revision: environment_model.revision.wrapping_add(1)" not in navigator:
+    raise SystemExit("canonical SessionNavigatorModel revision ownership is missing")
+
+# Negative probes: the same assertions must fail if a row-level adapter or the
+# old full-column renderer is reintroduced.
+synthetic_old_panel = panel + "\nClippedScrollable::vertical(todo!(), todo!(), todo!(), todo!(), todo!(), todo!());"
+if "ClippedScrollable::vertical(" not in synthetic_old_panel:
+    raise SystemExit("negative probe failed to inject legacy renderer")
+synthetic_leaf_projection = projection.replace(
+    "session_navigator_viewport_unit_identity(unit)",
+    'format!("leaf:{}", session.id)',
+    1,
+)
+if "session_navigator_viewport_unit_identity(unit)" in synthetic_leaf_projection:
+    raise SystemExit("negative probe failed to model leaf-level identity regression")
+PYCONTRACT
+then
+    echo "[LR-200] Session Navigator viewport projection contract failed" >&2
+    fail=1
+fi
+
+
+# LR-201: command-palette session search consumes only the committed
+# WorkspaceRegistry projection. Discovery and Tantivy rebuilding are forbidden
+# on the input-query hot path.
+require_contract_marker "LR-201" "SN-SESSION-NAVIGATOR-INCREMENTAL-SEARCH-70" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-201" "SESSION-NAVIGATOR-INCREMENTAL-SEARCH-70" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
+require_contract_marker "LR-201" "id: LR-201" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-201" "Session Navigator incremental command-palette search projection" docs/design/local-remote-capability-matrix.csv
+for test in \
+    session_search_projection_is_window_scoped_and_unregister_clears_it \
+    session_search_projection_event_reaches_derived_index_owner \
+    full_text_session_search_reuses_published_projection_until_generation_changes \
+    session_search_static_guard
+do
+    case "$test" in
+        session_search_projection_is_window_scoped_and_unregister_clears_it|session_search_projection_event_reaches_derived_index_owner)
+            require_rust_test_name "LR-201" "$test" app/src/workspace/registry_tests.rs
+            ;;
+        *)
+            require_rust_test_name "LR-201" "$test" app/src/search/command_palette/navigation/search_tests.rs
+            ;;
+    esac
+done
+if ! python3 - <<'PYCONTRACT'
+from pathlib import Path
+
+registry = Path("app/src/workspace/registry.rs").read_text()
+navigator = Path("app/src/workspace/view/session_navigator.rs").read_text()
+workspace = Path("app/src/workspace/view.rs").read_text()
+search = Path("app/src/search/command_palette/navigation/search.rs").read_text()
+data_source = Path("app/src/search/command_palette/navigation/data_source.rs").read_text()
+
+for required in [
+    "session_search_documents: HashMap<WindowId, Vec<SessionNavigationData>>",
+    "session_search_generation: u64",
+    "SessionSearchProjectionChanged { generation: u64 }",
+    "fn replace_session_search_documents(",
+    "fn session_search_generation(&self) -> u64",
+]:
+    if required not in registry:
+        raise SystemExit(f"WorkspaceRegistry incremental document owner lost: {required}")
+
+publisher = navigator.split("fn publish_session_navigator_search_documents(", 1)[1].split(
+    "pub(super) fn snapshot_pane_group_info", 1
+)[0]
+for required in [
+    "committed_session_navigator_model",
+    "workspace_sessions(window_id, ctx)",
+    "SessionNavigationData::from_workspace_session_snapshot",
+    "replace_session_search_documents",
+    "SessionSearchProjectionChanged",
+]:
+    if required not in publisher:
+        raise SystemExit(f"canonical search publisher lost required projection gate: {required}")
+if "SessionNavigationData::all_sessions(" in publisher:
+    raise SystemExit("canonical publisher must not rediscover global search membership")
+if "sessions.push(" in publisher:
+    raise SystemExit("live enrichment may not append a second membership collection")
+
+if "publish_session_navigator_search_documents(ctx);" not in navigator:
+    raise SystemExit("reducer commit must publish the derived search projection")
+if "registry.unregister(window_id)" not in workspace or "SessionSearchProjectionChanged" not in workspace:
+    raise SystemExit("window close must clear and publish its search projection partition")
+
+collect = search.split("pub(super) fn collect_search_sessions", 1)[1].split(
+    "pub trait SessionSearcher", 1
+)[0]
+if "WorkspaceRegistry::as_ref(app)" not in collect:
+    raise SystemExit("fuzzy query must consume WorkspaceRegistry projection")
+for forbidden in [
+    "app.window_ids(",
+    "app.views_of_type::<Workspace>(",
+    "SessionNavigationData::all_sessions(",
+]:
+    if forbidden in search or forbidden in data_source:
+        raise SystemExit(f"query-time session discovery remains: {forbidden}")
+
+full_text = search.split("impl SessionSearcher for FullTextSessionSearcher {", 1)[1]
+query = full_text.split("fn active_session_id(", 1)[0]
+for forbidden in ["create_searcher(", "build_index(", "refresh_search_index("]:
+    if forbidden in query:
+        raise SystemExit(f"full-text input query must only match a published index, found {forbidden}")
+if "WorkspaceRegistry::as_ref(app).session_search_generation()" not in query:
+    raise SystemExit("full-text query must fail closed on a stale projection generation")
+if "fn refresh_search_index(" not in full_text or "fn build_index(" not in full_text:
+    raise SystemExit("full-text index refresh must stay outside query execution")
+
+for required in [
+    "WorkspaceRegistry::handle(ctx)",
+    "subscribe_to_model(",
+    "handle_session_search_projection_changed",
+    "refresh_search_index(*generation, ctx)",
+]:
+    if required not in data_source:
+        raise SystemExit(f"DataSource no longer refreshes derived index from registry event: {required}")
+
+# Negative probes: reintroducing a query-time full scan or rebuild must violate
+# the same conditions instead of being hidden by the source layout.
+synthetic_discovery = search.replace(
+    "WorkspaceRegistry::as_ref(app).session_search_generation()",
+    "SessionNavigationData::all_sessions(app).count()",
+    1,
+)
+if "SessionNavigationData::all_sessions(" not in synthetic_discovery:
+    raise SystemExit("negative probe failed to inject query-time discovery")
+synthetic_rebuild = query.replace(
+    "let index = self",
+    "let _searcher = SESSION_SEARCH_SCHEMA.create_searcher(DEFAULT_MEMORY_BUDGET);\n            let index = self",
+    1,
+)
+if "create_searcher(" not in synthetic_rebuild:
+    raise SystemExit("negative probe failed to inject query-time rebuild")
+PYCONTRACT
+then
+    echo "[LR-201] Session Navigator incremental command-palette search contract failed" >&2
+    fail=1
+fi
+
+
+# LR-202: Environment Strip provider picker must be an explicit, keyboard-first
+# presentation over SshTargetCatalog's committed snapshot. Opening may not read
+# or refresh catalog state, and selection must retain the stable catalog alias.
+require_contract_marker "LR-202" "ENVIRONMENT-PROVIDER-QUICK-PICKER-KEYBOARD-71" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
+require_contract_marker "LR-202" "id: LR-202" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-202" "Environment provider quick picker explicit keyboard interaction" docs/design/local-remote-capability-matrix.csv
+require_rust_test_name "LR-202" "environment_provider_quick_picker_filter_and_selection_are_stable" app/src/workspace/view_test.rs
+require_rust_test_name "LR-202" "environment_provider_quick_picker_static_guard" app/src/workspace/view_test.rs
+if ! python3 - <<'PYCONTRACT'
+from pathlib import Path
+
+view = Path("app/src/workspace/view.rs").read_text()
+
+def between(source, start, end):
+    try:
+        return source.split(start, 1)[1].split(end, 1)[0]
+    except IndexError as exc:
+        raise SystemExit(f"missing required source boundary: {start} -> {end}") from exc
+
+def assert_picker_contract(source):
+    strip = between(
+        source,
+        "fn render_environment_strip_add_provider_chip(",
+        "fn render_tab_bar_contents(",
+    )
+    if ".on_hover(" in strip:
+        raise SystemExit("Environment Strip hover may not mutate/open the provider picker")
+    if "on_left_mouse_down" not in strip:
+        raise SystemExit("Environment Strip must retain an explicit click entry")
+
+    action = between(
+        source,
+        "SetEnvironmentProviderPickerOpen { open } => {",
+        "RefreshEnvironmentSshTargets => {",
+    )
+    for required in [
+        "self.open_environment_provider_picker(ctx)",
+        "self.close_environment_provider_picker_and_restore_focus(ctx)",
+    ]:
+        if required not in action:
+            raise SystemExit(f"provider picker action lost lifecycle owner: {required}")
+    if "catalog.refresh(" in action:
+        raise SystemExit("opening the provider picker must not refresh the catalog")
+
+    opening = between(
+        source,
+        "fn open_environment_provider_picker(",
+        "fn close_environment_provider_picker_and_restore_focus(",
+    )
+    for required in [
+        "clear_environment_provider_picker_ephemeral_state",
+        "is_workspace_session_restore_popover_open = false",
+        "close_new_session_dropdown_menu(ctx)",
+        "ctx.focus(&self.environment_provider_picker_search_editor)",
+    ]:
+        if required not in opening:
+            raise SystemExit(f"explicit picker opening lost required behavior: {required}")
+    if "SshTargetCatalogRefreshIntent::ExplicitRefresh" in opening or "catalog.refresh(" in opening:
+        raise SystemExit("picker opening must consume only a committed catalog snapshot")
+
+    dismissal = between(
+        source,
+        "fn dismiss_environment_provider_picker(",
+        "fn close_environment_provider_picker_and_restore_focus(",
+    )
+    if "clear_environment_provider_picker_ephemeral_state" not in dismissal:
+        raise SystemExit("picker dismissal must clear transient query and stable alias")
+
+    closing = between(
+        source,
+        "fn close_environment_provider_picker_and_restore_focus(",
+        "fn vertical_tabs_search_input(",
+    )
+    for required in [
+        "self.dismiss_environment_provider_picker(ctx)",
+        "self.focus_active_tab(ctx)",
+    ]:
+        if required not in closing:
+            raise SystemExit(f"Escape close lifecycle lost required behavior: {required}")
+
+    search_editor = between(
+        source,
+        "fn build_environment_provider_picker_search_input(",
+        "fn clear_environment_provider_picker_ephemeral_state(",
+    )
+    for required in [
+        "EditorEvent::Edited(_)",
+        "EditorEvent::Navigate(NavigationKey::Up)",
+        "EditorEvent::Navigate(NavigationKey::Down)",
+        "EditorEvent::Enter",
+        "EditorEvent::Escape",
+        "OpenEnvironmentProviderCandidate { alias }",
+    ]:
+        if required not in search_editor and required != "OpenEnvironmentProviderCandidate { alias }":
+            raise SystemExit(f"picker keyboard editor lost event handling: {required}")
+    confirmation = between(
+        source,
+        "fn confirm_environment_provider_picker_selection(",
+        "fn open_environment_provider_picker(",
+    )
+    if "ctx.dispatch_typed_action(&WorkspaceAction::OpenEnvironmentProviderCandidate { alias })" not in confirmation:
+        raise SystemExit("Enter must route through the existing typed provider activation action")
+
+    catalog_subscription = source.rsplit(
+        "&crate::ssh_manager::SshTargetCatalog::handle(ctx)",
+        1,
+    )[1].split("ctx.subscribe_to_model(&OneTimeModalModel::handle(ctx)", 1)[0]
+    for required in [
+        "is_environment_provider_picker_open",
+        "normalize_environment_provider_picker_selection(ctx)",
+    ]:
+        if required not in catalog_subscription:
+            raise SystemExit(f"catalog refresh no longer re-normalizes picker selection: {required}")
+
+    state = between(
+        source,
+        "environment_provider_picker_search_editor: ViewHandle<EditorView>",
+        "new_session_sidecar_add_repo_mouse_state",
+    )
+    for required in [
+        "environment_provider_picker_query: String",
+        "environment_provider_picker_selected_alias: Option<String>",
+    ]:
+        if required not in state:
+            raise SystemExit(f"picker ephemeral state lost stable owner field: {required}")
+    if "selected_index" in state:
+        raise SystemExit("picker selection must not persist a list index")
+
+    render = between(
+        source,
+        "fn render_environment_provider_picker_popover(",
+        "fn render_environment_provider_picker_dismiss_target(",
+    )
+    for required in [
+        "environment_provider_picker_filtered_candidates(",
+        "environment_provider_picker_selected_alias.as_deref()",
+        "workspace-environment-provider-picker-no-matches",
+    ]:
+        if required not in render:
+            raise SystemExit(f"picker rendering lost committed-snapshot filter behavior: {required}")
+
+    refresh = between(
+        source,
+        "RefreshEnvironmentSshTargets => {",
+        "OpenEnvironmentProviderCandidate { alias } => {",
+    )
+    if "SshTargetCatalogRefreshIntent::ExplicitRefresh" not in refresh:
+        raise SystemExit("explicit Refresh must remain the sole open-picker refresh intent")
+
+assert_picker_contract(view)
+
+# Negative probes: a hover side effect, open-time refresh, or index-backed
+# selection must fail the same contract rather than relying on source layout.
+strip_start = view.index("fn render_environment_strip_add_provider_chip(")
+synthetic_hover = (
+    view[:strip_start]
+    + view[strip_start:].replace(
+        ".with_cursor(Cursor::PointingHand)",
+        ".on_hover(|_, _, _, _| {})\n        .with_cursor(Cursor::PointingHand)",
+        1,
+    )
+)
+try:
+    assert_picker_contract(synthetic_hover)
+except SystemExit:
+    pass
+else:
+    raise SystemExit("negative probe failed: hover mutation escaped LR-202 guard")
+
+synthetic_open_refresh = view.replace(
+    "self.clear_environment_provider_picker_ephemeral_state(ctx);",
+    "catalog.refresh(SshTargetCatalogRefreshIntent::ExplicitRefresh, ctx);\n        self.clear_environment_provider_picker_ephemeral_state(ctx);",
+    1,
+)
+try:
+    assert_picker_contract(synthetic_open_refresh)
+except SystemExit:
+    pass
+else:
+    raise SystemExit("negative probe failed: open-time refresh escaped LR-202 guard")
+
+synthetic_index_selection = view.replace(
+    "environment_provider_picker_selected_alias: Option<String>",
+    "environment_provider_picker_selected_alias: Option<String>,\n    environment_provider_picker_selected_index: usize",
+    1,
+)
+try:
+    assert_picker_contract(synthetic_index_selection)
+except SystemExit:
+    pass
+else:
+    raise SystemExit("negative probe failed: index-backed selection escaped LR-202 guard")
+PYCONTRACT
+then
+    echo "[LR-202] Environment provider quick picker explicit keyboard contract failed" >&2
+    fail=1
+fi
+
+
+# LR-203: Session Navigator keyboard movement is a transient VerticalTabs cursor
+# over committed viewport rows. It must never reuse Environment-owned reducer
+# selection or use ListState geometry indices as its identity.
+require_contract_marker "LR-203" "SN-SESSION-NAVIGATOR-KEYBOARD-CURSOR-72" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-203" "SESSION-NAVIGATOR-KEYBOARD-CURSOR-72" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
+require_contract_marker "LR-203" "id: LR-203" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-203" "Session Navigator keyboard cursor" docs/design/local-remote-capability-matrix.csv
+require_rust_test_name "LR-203" "session_navigator_keyboard_cursor_normalizes_by_stable_identity" app/src/workspace/view_test.rs
+require_rust_test_name "LR-203" "session_navigator_keyboard_cursor_static_guard" app/src/workspace/view_test.rs
+if ! python3 - <<'PYCONTRACT'
+from pathlib import Path
+
+vertical = Path("app/src/workspace/view/vertical_tabs.rs").read_text()
+view = Path("app/src/workspace/view.rs").read_text()
+
+def between(source, start, end):
+    try:
+        return source.split(start, 1)[1].split(end, 1)[0]
+    except IndexError as exc:
+        raise SystemExit(f"missing required source boundary: {start} -> {end}") from exc
+
+state = between(
+    vertical,
+    "pub(super) struct VerticalTabsPanelState {",
+    "impl Default for VerticalTabsPanelState",
+)
+if "session_navigator_keyboard_cursor: RefCell<Option<SessionNavigatorRowIdentity>>" not in state:
+    raise SystemExit("keyboard cursor must have one transient stable-identity owner")
+if "keyboard_cursor_index" in state or "selected_index" in state:
+    raise SystemExit("keyboard cursor must not retain a geometry index")
+
+panel_impl = between(
+    vertical,
+    "impl VerticalTabsPanelState {",
+    "fn render_control_bar(",
+)
+for required in [
+    "fn normalize_session_navigator_keyboard_cursor(",
+    "fn navigate_session_navigator_keyboard_cursor(",
+    "fn activate_session_navigator_keyboard_cursor(",
+    "fn clear_session_navigator_keyboard_cursor(",
+    "session_navigator_keyboard_cursor_normalized(",
+    "session_navigator_keyboard_cursor_navigate(",
+    "self.session_navigator_list_state.scroll_to(",
+]:
+    if required not in panel_impl:
+        raise SystemExit(f"keyboard cursor lifecycle lost required behavior: {required}")
+if "selected_row_id" in panel_impl:
+    raise SystemExit("keyboard cursor must not mutate or mirror reducer selection")
+
+projection = between(
+    vertical,
+    "struct SessionNavigatorViewportProjection {",
+    "fn new_session_navigator_viewport_state(",
+)
+for required in [
+    "keyboard_cursor: Option<SessionNavigatorRowIdentity>",
+    "fn keyboard_row_identities(",
+    "row.is_keyboard_cursor",
+    "session_navigator_keyboard_cursor_normalized(",
+]:
+    if required not in projection:
+        raise SystemExit(f"viewport projection lost keyboard cursor contract: {required}")
+if "selected_row_id" in projection:
+    raise SystemExit("viewport keyboard rendering must not borrow reducer selection")
+
+search_editor = between(view, "fn vertical_tabs_search_input(", "fn tab_rename_editor(")
+for required in [
+    "propagate_and_no_op_vertical_navigation_keys:",
+    "PropagateAndNoOpNavigationKeys::Always",
+    "EditorEvent::Navigate(NavigationKey::Up)",
+    "EditorEvent::Navigate(NavigationKey::Down)",
+    "EditorEvent::Enter",
+    "EditorEvent::Escape",
+    "navigate_session_navigator_keyboard_cursor",
+    "activate_session_navigator_keyboard_cursor",
+    "clear_session_navigator_keyboard_cursor",
+    "editor_view.update(ctx, |editor, ctx| editor.clear_buffer(ctx))",
+]:
+    if required not in search_editor:
+        raise SystemExit(f"search editor keyboard route lost: {required}")
+
+activate = between(
+    panel_impl,
+    "fn activate_session_navigator_keyboard_cursor(",
+    "fn clear_session_navigator_keyboard_cursor(",
+)
+if "ctx.dispatch_typed_action(&WorkspaceAction::ActivateRestoredWorkspaceSession" not in activate:
+    raise SystemExit("Enter must dispatch the existing typed session activation action")
+
+# Negative probes: an index-backed cursor or reducer-selection mutation must
+# fail the same contract instead of hiding behind source layout.
+def assert_cursor_contract(state_text, panel_text):
+    if "keyboard_cursor_index" in state_text or "selected_index" in state_text:
+        raise SystemExit("geometry index cursor")
+    if "selected_row_id" in panel_text:
+        raise SystemExit("reducer selection mutation")
+
+synthetic_index = state.replace(
+    "session_navigator_keyboard_cursor: RefCell<Option<SessionNavigatorRowIdentity>>",
+    "session_navigator_keyboard_cursor: RefCell<Option<SessionNavigatorRowIdentity>>,\n    keyboard_cursor_index: usize",
+    1,
+)
+try:
+    assert_cursor_contract(synthetic_index, panel_impl)
+except SystemExit:
+    pass
+else:
+    raise SystemExit("negative probe failed: index-backed cursor escaped LR-203 guard")
+
+synthetic_reducer_write = panel_impl.replace(
+    "fn clear_session_navigator_keyboard_cursor(",
+    "self.session_navigator_model().state.selected_row_id = None;\n\n    fn clear_session_navigator_keyboard_cursor(",
+    1,
+)
+try:
+    assert_cursor_contract(state, synthetic_reducer_write)
+except SystemExit:
+    pass
+else:
+    raise SystemExit("negative probe failed: reducer selection write escaped LR-203 guard")
+PYCONTRACT
+then
+    echo "[LR-203] Session Navigator keyboard cursor contract failed" >&2
+    fail=1
+fi
+
+
+
+# LR-204: local provider-store discovery is process-scoped source work, not a
+# per-window Navigator projection. WorkspaceRegistry owns only the short-lived
+# keyed transaction; every Workspace must receive the outcome through its own
+# EnvironmentTable token and Runtime environments may not join this local path.
+require_contract_marker "LR-204" "SESSION-NAVIGATOR-LOCAL-SCAN-COORDINATION-73" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
+require_contract_marker "LR-204" "id: LR-204" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-204" "Session Navigator local provider discovery: process-scoped source coalescing" docs/design/local-remote-capability-matrix.csv
+require_rust_test_name "LR-204" "local_cli_agent_scan_coalesces_matching_workspaces_and_explicit_refresh_preempts_safely" app/src/workspace/registry_tests.rs
+require_rust_test_name "LR-204" "local_cli_agent_scan_never_coalesces_different_source_scopes" app/src/workspace/registry_tests.rs
+require_rust_test_name "LR-204" "local_cli_agent_scan_never_coalesces_different_observed_provider_sets" app/src/workspace/registry_tests.rs
+require_rust_test_name "LR-204" "local_cli_agent_session_refresh_runs_blocking_scan_off_ui_thread" app/src/workspace/view_test.rs
+if ! python3 - <<'PYCONTRACT'
+from pathlib import Path
+
+registry = Path("app/src/workspace/registry.rs").read_text()
+view = Path("app/src/workspace/view.rs").read_text()
+navigator = Path("app/src/workspace/view/session_navigator.rs").read_text()
+
+def between(source, start, end):
+    try:
+        return source.split(start, 1)[1].split(end, 1)[0]
+    except IndexError as exc:
+        raise SystemExit(f"missing required source boundary: {start} -> {end}") from exc
+
+def assert_contract(registry_text, view_text, navigator_text):
+    registry_state = between(
+        registry_text,
+        "pub struct WorkspaceRegistry {",
+        "/// Notification emitted after the canonical per-window Session Navigator",
+    )
+    if "local_cli_agent_session_scans: HashMap<LocalCliAgentSessionScanKey, LocalCliAgentSessionScan>" not in registry_state:
+        raise SystemExit("WorkspaceRegistry must be the sole process-scoped local scan transaction owner")
+
+    key = between(
+        registry_text,
+        "pub(crate) struct LocalCliAgentSessionScanKey {",
+        "#[derive(Clone, Debug)]\npub(crate) struct LocalCliAgentSessionScanParticipant",
+    )
+    for required in ["enabled_agents: Vec<String>", "observed_agents: Vec<String>", "scope_paths: Vec<PathBuf>"]:
+        if required not in key:
+            raise SystemExit(f"local scan coalescing key lost source input: {required}")
+    if "sort_unstable()" not in registry_text or "dedup()" not in registry_text:
+        raise SystemExit("equivalent local scan inputs must normalize before coalescing")
+
+    request = between(
+        registry_text,
+        "pub(crate) fn request_local_cli_agent_session_scan(",
+        "    /// Returns every still-live Workspace transaction",
+    )
+    for required in [
+        "scan.participants.insert(window_id, participant)",
+        "EnvironmentSessionRefreshIntent::UserInitiated",
+        "scan.generation = scan",
+        "LocalCliAgentSessionScanRequest::Joined",
+    ]:
+        if required not in request:
+            raise SystemExit(f"local scan request lifecycle lost required behavior: {required}")
+
+    completion = between(
+        registry_text,
+        "pub(crate) fn complete_local_cli_agent_session_scan(",
+        "    /// Registers a workspace for the given window.",
+    )
+    for required in ["if scan.generation != generation", "return Vec::new()", ".remove(key)"]:
+        if required not in completion:
+            raise SystemExit(f"stale local scan worker can mutate current generation: {required}")
+
+    local_backend = between(
+        view_text,
+        "impl EnvironmentBackend for TerminalBootstrapEnvironmentBackend {",
+        "impl EnvironmentBackend for RuntimeEnvironmentBackend {",
+    )
+    refresh = between(local_backend, "fn refresh_indexed_sessions(", "    }\n}\n")
+    for required in [
+        "LocalCliAgentSessionScanKey::new(",
+        "registry.request_local_cli_agent_session_scan(",
+        "tokio::task::spawn_blocking(move ||",
+        "Workspace::try_scan_terminal_cli_agent_session_discovery(",
+        "registry.complete_local_cli_agent_session_scan(&scan_key, generation)",
+        "workspace.finish_local_cli_agent_session_scan(own_participant, result.clone(), ctx)",
+        "workspace_handle.update(ctx, |workspace, ctx|",
+    ]:
+        if required not in refresh:
+            raise SystemExit(f"local coordinator path lost required step: {required}")
+    if refresh.index("tokio::task::spawn_blocking(move ||") > refresh.index("Workspace::try_scan_terminal_cli_agent_session_discovery("):
+        raise SystemExit("local discovery must remain beyond the blocking worker boundary")
+    if refresh.count("Workspace::try_scan_terminal_cli_agent_session_discovery(") != 1:
+        raise SystemExit("local discovery helper must have one coordinator-owned worker caller")
+
+    finish = between(
+        view_text,
+        "fn finish_local_cli_agent_session_scan(",
+        "impl EnvironmentBackend for TerminalBootstrapEnvironmentBackend {",
+    )
+    for required in [
+        "commit_indexed_environment_cli_agent_session_discovery",
+        "remember_indexed_environment_cli_agent_session_user_state",
+        "sync_session_navigator_sessions(ctx)",
+    ]:
+        if required not in finish:
+            raise SystemExit(f"recipient fanout bypasses canonical EnvironmentTable commit: {required}")
+    if "SessionNavigatorModel" in finish or "session_navigator_model(" in finish:
+        raise SystemExit("Registry fanout must not write SessionNavigatorModel directly")
+
+    runtime_backend = between(
+        view_text,
+        "impl EnvironmentBackend for RuntimeEnvironmentBackend {",
+        "#[cfg(test)]",
+    )
+    for forbidden in [
+        "LocalCliAgentSessionScanKey",
+        "request_local_cli_agent_session_scan",
+        "complete_local_cli_agent_session_scan",
+        "finish_local_cli_agent_session_scan",
+        "try_scan_terminal_cli_agent_session_discovery",
+    ]:
+        if forbidden in runtime_backend:
+            raise SystemExit(f"Runtime backend must not join local source transactions: {forbidden}")
+
+    helper = between(
+        navigator_text,
+        "pub(super) fn try_scan_terminal_cli_agent_session_discovery(",
+        "pub(super) fn backing_sessions_for_workspace_session",
+    )
+    if "AppContext" in helper or "ViewContext" in helper:
+        raise SystemExit("blocking discovery helper must consume captured source inputs, not UI state")
+
+assert_contract(registry, view, navigator)
+
+# Negative probes: changing the source key, bypassing the Registry worker path,
+# or committing directly to the Navigator must fail the same ownership contract.
+synthetic_key = registry.replace("scope_paths: Vec<PathBuf>", "window_id: u64", 1)
+try:
+    assert_contract(synthetic_key, view, navigator)
+except SystemExit:
+    pass
+else:
+    raise SystemExit("negative probe failed: WindowId-based local scan key escaped LR-204 guard")
+
+synthetic_bypass = view.replace(
+    "let LocalCliAgentSessionScanRequest::Started { generation } = request else {",
+    "let _bypass = Workspace::try_scan_terminal_cli_agent_session_discovery(enabled_agents.clone(), &previously_observed_agents, scope_paths.clone());\n        let LocalCliAgentSessionScanRequest::Started { generation } = request else {",
+    1,
+)
+try:
+    assert_contract(registry, synthetic_bypass, navigator)
+except SystemExit:
+    pass
+else:
+    raise SystemExit("negative probe failed: direct local discovery bypass escaped LR-204 guard")
+
+finish_prefix, finish_suffix = view.split("fn finish_local_cli_agent_session_scan(", 1)
+synthetic_direct_model = finish_prefix + "fn finish_local_cli_agent_session_scan(" + finish_suffix.replace(
+    "self.sync_session_navigator_sessions(ctx);",
+    "self.session_navigator_model().direct_write_forbidden();\n        self.sync_session_navigator_sessions(ctx);",
+    1,
+)
+try:
+    assert_contract(registry, synthetic_direct_model, navigator)
+except SystemExit:
+    pass
+else:
+    raise SystemExit("negative probe failed: direct Navigator write escaped LR-204 guard")
+PYCONTRACT
+then
+    echo "[LR-204] Session Navigator process-scoped local scan coordination contract failed" >&2
     fail=1
 fi
 

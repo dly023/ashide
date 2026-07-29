@@ -363,9 +363,11 @@ fn workspace_session_from_tabs_uses_leaf_title_not_tab_group_title() {
     assert_eq!(sessions[0].label.as_deref(), Some("API pane"));
     assert_eq!(sessions[1].container_uuid, Some(vec![2; 16]));
     assert_eq!(sessions[1].label.as_deref(), Some("Tests pane"));
-    assert!(sessions
-        .iter()
-        .all(|session| session.label.as_deref() != Some("Backend group")));
+    assert!(
+        sessions
+            .iter()
+            .all(|session| session.label.as_deref() != Some("Backend group"))
+    );
 }
 
 #[test]
@@ -457,6 +459,32 @@ fn test_workspace_session_snapshot_collects_terminal_metadata() {
     );
     assert_eq!(sessions[0].cwd.as_deref(), Some("/repo"));
     assert!(sessions[0].is_active);
+}
+
+#[test]
+fn restored_workspace_session_history_requires_agent_or_conversation_semantics() {
+    let generic_terminal = test_workspace_session("tab:0:leaf:0", None, None, false, None);
+    assert!(
+        !generic_terminal.is_persistable_navigator_history(),
+        "a terminal layout locator cannot become persisted virtual history"
+    );
+
+    let agent_history = test_workspace_session(
+        "external:Codex:deadbeef",
+        Some("Codex"),
+        Some("native-history-id"),
+        false,
+        None,
+    );
+    assert!(agent_history.is_persistable_navigator_history());
+
+    let mut ashide_conversation = generic_terminal;
+    ashide_conversation.kind = WorkspaceSessionKind::AgentTerminal;
+    ashide_conversation.id = "ashide-history".to_owned();
+    ashide_conversation.container_uuid = None;
+    ashide_conversation.is_live_container = false;
+    ashide_conversation.conversation_ids = vec!["conversation-history-id".to_owned()];
+    assert!(ashide_conversation.is_persistable_navigator_history());
 }
 
 #[test]
@@ -702,9 +730,11 @@ fn test_session_navigator_merges_terminal_bootstrap_authority_variants() {
     assert_eq!(sessions[0].id, "tab:1:leaf:0");
     assert!(sessions[0].is_active);
     assert_eq!(sessions[0].logical_key(), live_container_key);
-    assert!(sessions[0]
-        .stable_pin_keys()
-        .contains(&"local::agent:Codex:shared-local-session".to_string()));
+    assert!(
+        sessions[0]
+            .stable_pin_keys()
+            .contains(&"local::agent:Codex:shared-local-session".to_string())
+    );
 }
 
 #[test]
@@ -1037,9 +1067,11 @@ fn test_live_pane_identity_uses_container_uuid_not_layout_coordinate() {
     );
     assert_eq!(first.logical_key(), "local::pane:10203040");
     assert!(!first.stable_user_state_keys().contains(&first.id));
-    assert!(first
-        .stable_user_state_keys()
-        .contains(&"local::pane:10203040".to_owned()));
+    assert!(
+        first
+            .stable_user_state_keys()
+            .contains(&"local::pane:10203040".to_owned())
+    );
 
     let shifted = WorkspaceSessionSnapshot::from_tabs(
         &[

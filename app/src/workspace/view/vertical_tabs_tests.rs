@@ -8,6 +8,7 @@ use crate::terminal::cli_agent_sessions::CLIAgentSessionStatus;
 use crate::terminal::CLIAgent;
 use crate::themes::theme::Fill as ThemeFill;
 use crate::workspace::tab_settings::VerticalTabsDisplayGranularity;
+use crate::workspace::view::session_navigator_reducer::build_reorder_units;
 use crate::workspace::view::session_navigator_reducer::SessionNavigatorState;
 use crate::workspace::Workspace;
 use pathfinder_color::ColorU;
@@ -25,15 +26,16 @@ use super::{
     pane_row_is_selected, pane_search_text_fragments, preferred_agent_tab_titles,
     restored_session_activity_indicator, restored_session_icon_badge,
     restored_session_row_background, search_fragments_contain_query,
-    select_summary_pane_kind_icons, should_keep_detail_sidecar_visible_for_mouse_position,
-    summary_overflow_count, summary_search_text_fragments, tab_group_container_is_selected,
-    terminal_kind_badge_label, terminal_primary_line_data, terminal_pull_request_badge_label,
-    terminal_search_text_fragments, terminal_title_fallback_font, uses_outer_group_container,
-    visible_pane_ids_for_detail_target, vtab_diff_stats_text, AgentTabTextPreference,
-    RestoredSessionActivityIndicator, RestoredSessionIconBadge, SessionNavigatorRowIdentity,
-    SummaryPaneKind, SummaryPaneKindIcons, TerminalAgentText, TerminalPrimaryLineData,
-    TerminalPrimaryLineFont, VerticalTabsDetailTarget, VerticalTabsDetailTargetKind,
-    VerticalTabsResolvedMode, VerticalTabsSummaryBranchEntry, VerticalTabsSummaryData,
+    select_summary_pane_kind_icons, session_navigator_viewport_unit_identity,
+    should_keep_detail_sidecar_visible_for_mouse_position, summary_overflow_count,
+    summary_search_text_fragments, tab_group_container_is_selected, terminal_kind_badge_label,
+    terminal_primary_line_data, terminal_pull_request_badge_label, terminal_search_text_fragments,
+    terminal_title_fallback_font, uses_outer_group_container, visible_pane_ids_for_detail_target,
+    vtab_diff_stats_text, AgentTabTextPreference, RestoredSessionActivityIndicator,
+    RestoredSessionIconBadge, SessionNavigatorRowIdentity, SummaryPaneKind, SummaryPaneKindIcons,
+    TerminalAgentText, TerminalPrimaryLineData, TerminalPrimaryLineFont, VerticalTabsDetailTarget,
+    VerticalTabsDetailTargetKind, VerticalTabsResolvedMode, VerticalTabsSummaryBranchEntry,
+    VerticalTabsSummaryData,
 };
 
 fn pane_id() -> PaneId {
@@ -69,6 +71,26 @@ fn render_identity_session(
         updated_at_unix_ms: None,
         is_live_container,
     }
+}
+
+#[test]
+fn session_navigator_viewport_uses_reorder_units_and_stable_identities() {
+    let mut first = render_identity_session("tab:7:leaf:0", Some(vec![7; 16]), true);
+    let mut second = render_identity_session("tab:7:leaf:1", Some(vec![8; 16]), true);
+    first.label = Some("left sibling".to_owned());
+    second.label = Some("right sibling".to_owned());
+
+    let units = build_reorder_units(&[first, second]);
+    assert_eq!(
+        units.len(),
+        1,
+        "split siblings must share one viewport item"
+    );
+    assert_eq!(
+        session_navigator_viewport_unit_identity(&units[0]),
+        "group:tab:7",
+        "viewport identity must follow the canonical reorder unit, not a leaf locator"
+    );
 }
 
 #[test]
@@ -1273,4 +1295,24 @@ fn pane_ids_for_display_granularity_preserves_panes_for_display_modes() {
         vec![first],
         "single-pane tabs mode should still resolve the only visible pane"
     );
+}
+
+#[test]
+fn session_navigator_viewport_static_guard() {
+    let source = include_str!("vertical_tabs.rs");
+    let panel = source
+        .split("fn render_vertical_tabs_panel(")
+        .nth(1)
+        .expect("vertical tabs panel must exist")
+        .split("fn render_tab_group_internal(")
+        .next()
+        .expect("vertical tabs panel must end before tab renderer");
+
+    assert!(panel.contains("NewScrollable::vertical("));
+    assert!(panel.contains("List::new("));
+    assert!(panel.contains("state.sync_session_navigator_viewport"));
+    assert!(!panel.contains("ClippedScrollable::vertical("));
+    assert!(source.contains("build_reorder_units"));
+    assert!(source.contains("session_navigator_viewport_unit_identity(unit)"));
+    assert!(source.contains("session_navigator_session_row_is_viewport_visible"));
 }

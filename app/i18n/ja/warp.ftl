@@ -2292,6 +2292,7 @@ workspace-environment-provider-picker-refresh-error = 更新に失敗しまし�
 workspace-environment-provider-picker-key-auth = key
 workspace-environment-provider-picker-alias-only = OpenSSH エイリアス
 workspace-environment-provider-picker-empty = 利用できる Host エントリが見つかりません。
+workspace-environment-provider-picker-no-matches = 一致する環境ターゲットはありません。
 workspace-environment-provider-picker-not-found = ~/.ssh/config が見つかりません。
 workspace-environment-provider-picker-error = provider ターゲットを読み込めません: { $message }
 workspace-restored-sessions-agent-fallback = agent session

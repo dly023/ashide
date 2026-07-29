@@ -55,6 +55,58 @@ fn unkeyed_error_burst_is_bounded_by_source_and_category() {
 }
 
 #[test]
+fn keyed_transient_operation_replaces_across_info_success_and_error() {
+    let mut stack = DismissibleToastStack::<()>::new(Duration::from_secs(4));
+    let (uuid, generation) = stack.upsert(
+        DismissibleToast::default("正在刷新会话列表…".to_owned()),
+        ToastPolicy::operation("session-navigator", "refresh"),
+    );
+    let (success_uuid, success_generation) = stack.upsert(
+        DismissibleToast::success("已刷新会话列表".to_owned()),
+        ToastPolicy::operation("session-navigator", "refresh"),
+    );
+    let (error_uuid, error_generation) = stack.upsert(
+        DismissibleToast::error("刷新失败，已保留上次结果".to_owned()),
+        ToastPolicy::operation("session-navigator", "refresh"),
+    );
+
+    assert_eq!(stack.toasts.len(), 1);
+    assert_eq!(success_uuid, uuid);
+    assert_eq!(error_uuid, uuid);
+    assert_eq!(success_generation, generation + 1);
+    assert_eq!(error_generation, generation + 2);
+    assert_eq!(
+        stack.toasts[0].dismissible_toast.main_text,
+        "刷新失败，已保留上次结果"
+    );
+}
+
+#[test]
+fn keyed_transient_operation_stays_transient() {
+    let mut stack = DismissibleToastStack::<()>::new(Duration::from_secs(4));
+    let (_, generation) = stack.upsert(
+        DismissibleToast::error("刷新失败".to_owned()),
+        ToastPolicy::operation("session-navigator", "refresh"),
+    );
+
+    assert_eq!(stack.toasts[0].lifetime, ToastLifetime::Transient);
+    assert_eq!(generation, 0);
+}
+
+#[test]
+fn different_operation_keys_remain_independent() {
+    let mut stack = DismissibleToastStack::<()>::new(Duration::from_secs(4));
+    for operation in ["refresh", "delete"] {
+        stack.upsert(
+            DismissibleToast::error(operation.to_owned()),
+            ToastPolicy::operation("session-navigator", operation),
+        );
+    }
+
+    assert_eq!(stack.toasts.len(), 2);
+}
+
+#[test]
 fn action_required_stays_and_is_dismissable() {
     let mut stack = DismissibleToastStack::<()>::new(Duration::from_secs(4));
     let (uuid, generation) = stack.upsert(

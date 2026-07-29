@@ -19,9 +19,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 
 use crate::cli_agent_jsonl::{
-    canonical_codex_session_id, codex_session_metadata, read_jsonl_values_from_path,
-    recent_jsonl_files, require_cli_agent_home, sha256_hex, AgentSessionDiscoveryPlan,
-    AgentSessionDiscoveryTransition, CliAgentSessionScanError, CliAgentStoreRoots,
+    canonical_codex_session_id, codex_session_metadata, is_omp_session_source,
+    read_jsonl_values_from_path, recent_jsonl_files, require_cli_agent_home, sha256_hex,
+    AgentSessionDiscoveryPlan, AgentSessionDiscoveryTransition, CliAgentSessionScanError,
+    CliAgentStoreRoots,
 };
 
 /// Default number of records the scan returns (mirrors the Python `LIMIT`).
@@ -91,12 +92,14 @@ pub fn scan_sessions(
     limit: usize,
     enabled_agents: impl IntoIterator<Item = crate::terminal::CLIAgent>,
     previously_observed_agents: impl IntoIterator<Item = crate::terminal::CLIAgent>,
+    scope_paths: impl IntoIterator<Item = PathBuf>,
 ) -> Result<ScannedSessionDiscovery, CliAgentSessionScanError> {
     let previously_observed_providers = previously_observed_agents
         .into_iter()
         .filter_map(|agent| agent.session_discovery_provider())
         .collect::<HashSet<_>>();
     match AgentSessionDiscoveryPlan::from_enabled_agents(enabled_agents, limit)
+        .with_scope_paths(scope_paths)
         .execute(roots, &previously_observed_providers)
         .transition()
     {
@@ -144,6 +147,7 @@ fn scan_sessions_for_home(
         &roots,
         limit,
         enum_iterator::all::<crate::terminal::CLIAgent>(),
+        [],
         [],
     )? {
         ScannedSessionDiscovery::Complete { sessions, .. } => Ok(sessions),
@@ -194,6 +198,10 @@ fn ensure_allowed(path: &str, roots: &CliAgentStoreRoots) -> Result<PathBuf, Str
     ];
     let allowed_index = real(&roots.codex_index());
     if resolved == allowed_index {
+        return Ok(resolved);
+    }
+    let omp_sessions = real(&roots.omp_sessions());
+    if is_omp_session_source(&omp_sessions, &resolved) {
         return Ok(resolved);
     }
     for root in &allowed {
@@ -553,25 +561,6 @@ mod uireq014_first_message_tests {
     #[test]
     fn test_remote_scan_respects_explicit_enabled_agents() {
         let home = tempfile::tempdir().expect("create remote scan home");
-        let jcode_id = "session_remote_enabled_agent";
-        let jcode_path = home
-            .path()
-            .join(".jcode/sessions")
-            .join(format!("{jcode_id}.json"));
-        std::fs::create_dir_all(jcode_path.parent().expect("Jcode parent"))
-            .expect("create Jcode store");
-        std::fs::write(
-            &jcode_path,
-            json!({
-                "id": jcode_id,
-                "short_name": "Jcode remote",
-                "is_debug": false,
-                "messages": [{"role": "user"}],
-            })
-            .to_string(),
-        )
-        .expect("write Jcode session");
-
         let omp_id = "019f0a0b-1111-4222-8333-444444444444";
         let omp_path = home
             .path()
@@ -587,7 +576,8 @@ mod uireq014_first_message_tests {
         let sessions = scan_sessions(
             &CliAgentStoreRoots::for_home(home.path().to_path_buf()),
             40,
-            [crate::terminal::CLIAgent::Jcode],
+            [crate::terminal::CLIAgent::Omp],
+            [],
             [],
         )
         .expect("scan explicitly enabled remote agent");
@@ -596,34 +586,35 @@ mod uireq014_first_message_tests {
         };
 
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].agent, crate::terminal::CLIAgent::Jcode);
-        assert_eq!(sessions[0].id, jcode_id);
+        assert_eq!(sessions[0].agent, crate::terminal::CLIAgent::Omp);
+        assert_eq!(sessions[0].id, omp_id);
     }
 
     #[test]
     fn remote_discovery_keeps_previously_observed_missing_provider_typed() {
         let home = tempfile::tempdir().expect("create remote discovery home");
         let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
-        std::fs::create_dir_all(roots.jcode_sessions()).expect("provision Jcode source");
+        std::fs::create_dir_all(roots.omp_sessions()).expect("provision Omp source");
 
         assert!(matches!(
-            scan_sessions(&roots, 40, [crate::terminal::CLIAgent::Jcode], [])
+            scan_sessions(&roots, 40, [crate::terminal::CLIAgent::Omp], [], [])
                 .expect("first discovery completes"),
             ScannedSessionDiscovery::Complete { observed_agents, sessions }
-                if observed_agents == vec![crate::terminal::CLIAgent::Jcode] && sessions.is_empty()
+                if observed_agents == vec![crate::terminal::CLIAgent::Omp] && sessions.is_empty()
         ));
 
-        std::fs::remove_dir_all(roots.jcode_sessions()).expect("remove observed Jcode source");
+        std::fs::remove_dir_all(roots.omp_sessions()).expect("remove observed Omp source");
         assert!(matches!(
             scan_sessions(
                 &roots,
                 40,
-                [crate::terminal::CLIAgent::Jcode],
-                [crate::terminal::CLIAgent::Jcode],
+                [crate::terminal::CLIAgent::Omp],
+                [crate::terminal::CLIAgent::Omp],
+                [],
             )
             .expect("missing provider is a typed completion"),
             ScannedSessionDiscovery::SourceMissing {
-                agent: crate::terminal::CLIAgent::Jcode
+                agent: crate::terminal::CLIAgent::Omp
             }
         ));
     }
@@ -748,8 +739,13 @@ mod uireq014_first_message_tests {
             .expect("session-store cwd session");
 
         assert_eq!(
-            valid.cwd.as_deref(),
-            Some(project.to_string_lossy().as_ref())
+            valid.cwd,
+            Some(
+                std::fs::canonicalize(&project)
+                    .expect("canonical project cwd")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
         );
         assert_eq!(store.cwd, None);
     }
@@ -966,6 +962,7 @@ mod uireq014_first_message_tests {
             40,
             enum_iterator::all::<crate::terminal::CLIAgent>(),
             [],
+            [],
         )
         .expect("scan explicit target roots");
         let ScannedSessionDiscovery::Complete {
@@ -990,6 +987,46 @@ mod uireq014_first_message_tests {
                 .exists(),
             "explicit target operations must not touch the daemon/default store"
         );
+    }
+
+    #[test]
+    fn remote_mutation_deletes_omp_authoritative_session_file() {
+        let home = tempfile::tempdir().expect("create Omp target home");
+        let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+        let path = roots
+            .omp_sessions()
+            .join("-ashide")
+            .join("1784897000000_remote-mutation.jsonl");
+        std::fs::create_dir_all(path.parent().expect("Omp session parent"))
+            .expect("create Omp session store");
+        std::fs::write(&path, "{}\n").expect("write Omp session");
+
+        mutate_session(&path.to_string_lossy(), Mutation::Delete, &roots)
+            .expect("delete authoritative Omp session");
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn remote_mutation_rejects_omp_tool_log_paths() {
+        let home = tempfile::tempdir().expect("create CLI-agent target home");
+        let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+        let omp_tool_log = roots
+            .omp_sessions()
+            .join("-ashide/tool-logs/1784897000000_remote-mutation.jsonl");
+        for path in [&omp_tool_log] {
+            std::fs::create_dir_all(path.parent().expect("fixture parent"))
+                .expect("create non-authoritative fixture parent");
+            std::fs::write(path, "{}\n").expect("write non-authoritative fixture");
+
+            let error = mutate_session(&path.to_string_lossy(), Mutation::Delete, &roots)
+                .expect_err("mutation must reject a non-authoritative CLI-agent source");
+            assert!(
+                error.contains("refusing to mutate path outside known agent session stores"),
+                "unexpected rejection: {error}"
+            );
+            assert!(path.exists(), "rejected source must remain untouched");
+        }
     }
 
     #[test]

@@ -16,8 +16,7 @@ use super::*;
 
 #[cfg(feature = "local_fs")]
 use super::discovery::{
-    parse_codex_discovery_index, recent_jcode_session_files, recent_omp_session_files,
-    scan_agent_session_provider,
+    parse_codex_discovery_index, recent_omp_session_files, scan_agent_session_provider,
 };
 
 #[cfg(feature = "local_fs")]
@@ -52,7 +51,7 @@ impl CliAgentSessionSource for TestSessionSource {
 fn discovery_plan_distinguishes_source_missing_from_successful_empty_store() {
     let home = tempfile::tempdir().expect("create discovery home");
     let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
-    let plan = AgentSessionDiscoveryPlan::for_test(vec![AgentSessionDiscoveryProvider::Jcode], 40);
+    let plan = AgentSessionDiscoveryPlan::for_test(vec![AgentSessionDiscoveryProvider::Omp], 40);
 
     assert!(matches!(
         plan.execute(&roots, &HashSet::new()).transition(),
@@ -60,21 +59,16 @@ fn discovery_plan_distinguishes_source_missing_from_successful_empty_store() {
     ));
 
     assert!(matches!(
-        plan.execute(
-            &roots,
-            &HashSet::from([AgentSessionDiscoveryProvider::Jcode]),
-        )
-        .transition(),
-        AgentSessionDiscoveryTransition::PreserveSourceMissing(
-            AgentSessionDiscoveryProvider::Jcode
-        )
+        plan.execute(&roots, &HashSet::from([AgentSessionDiscoveryProvider::Omp]),)
+            .transition(),
+        AgentSessionDiscoveryTransition::PreserveSourceMissing(AgentSessionDiscoveryProvider::Omp)
     ));
 
-    fs::create_dir_all(roots.jcode_sessions()).expect("provision observed Jcode store");
+    fs::create_dir_all(roots.omp_sessions()).expect("provision observed Omp store");
     assert!(matches!(
         plan.execute(
             &roots,
-            &HashSet::from([AgentSessionDiscoveryProvider::Jcode]),
+            &HashSet::from([AgentSessionDiscoveryProvider::Omp]),
         )
         .transition(),
         AgentSessionDiscoveryTransition::Replace { records, .. } if records.is_empty()
@@ -85,25 +79,80 @@ fn discovery_plan_distinguishes_source_missing_from_successful_empty_store() {
 #[test]
 fn discovery_plan_uses_only_enabled_unique_file_backed_agents() {
     let plan = AgentSessionDiscoveryPlan::from_enabled_agents(
-        [
-            CLIAgent::Jcode,
-            CLIAgent::Unknown,
-            CLIAgent::Omp,
-            CLIAgent::Jcode,
-            CLIAgent::Claude,
-        ],
+        [CLIAgent::Unknown, CLIAgent::Omp, CLIAgent::Claude],
         40,
     );
 
     assert_eq!(
         plan.providers(),
         [
-            AgentSessionDiscoveryProvider::Jcode,
             AgentSessionDiscoveryProvider::Omp,
             AgentSessionDiscoveryProvider::Claude,
         ],
         "discovery selection must be an ordered, duplicate-free projection of the setting",
     );
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn expanded_provider_discovery_preserves_old_current_workspace_session_beyond_recent_limit() {
+    let home = tempfile::tempdir().expect("create scoped discovery home");
+    let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+    let sessions = roots.pi_sessions();
+    let scoped_project = home.path().join("scoped-project");
+    let unrelated_project = home.path().join("unrelated-project");
+    fs::create_dir_all(&sessions).expect("create Pi store");
+    fs::create_dir_all(&scoped_project).expect("create scoped project");
+    fs::create_dir_all(&unrelated_project).expect("create unrelated project");
+
+    let scoped = sessions.join("scoped.jsonl");
+    fs::write(
+        &scoped,
+        format!(
+            "{}\n{}",
+            serde_json::json!({"type":"session","id":"scoped-old","cwd":scoped_project}),
+            serde_json::json!({"type":"message","message":{"role":"user","content":"old scoped task"}}),
+        ),
+    )
+    .expect("write scoped session");
+    let parent = sessions.join("parent.jsonl");
+    fs::write(
+        parent,
+        serde_json::json!({"type":"session","id":"parent-not-scoped","cwd":home.path()})
+            .to_string(),
+    )
+    .expect("write parent session");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    for index in 0..2 {
+        let recent = sessions.join(format!("recent-{index}.jsonl"));
+        fs::write(
+            recent,
+            serde_json::json!({"type":"session","id":format!("recent-{index}"),"cwd":unrelated_project}).to_string(),
+        )
+        .expect("write recent session");
+    }
+
+    let result = AgentSessionDiscoveryPlan::for_test(vec![AgentSessionDiscoveryProvider::Pi], 1)
+        .with_scope_paths([scoped_project])
+        .execute(&roots, &HashSet::new())
+        .transition();
+    let AgentSessionDiscoveryTransition::Replace { records, .. } = result else {
+        panic!("scoped scan must complete");
+    };
+    assert_eq!(records.len(), 2);
+    assert!(records
+        .iter()
+        .any(|record| record.provider_session_id == "scoped-old"));
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.provider_session_id.starts_with("recent-"))
+            .count(),
+        1,
+    );
+    assert!(!records
+        .iter()
+        .any(|record| record.provider_session_id == "parent-not-scoped"));
 }
 
 #[cfg(feature = "local_fs")]
@@ -390,15 +439,8 @@ fn recent_jsonl_scan_error_is_not_silently_dropped() {
 
 #[cfg(feature = "local_fs")]
 #[test]
-fn discovery_candidate_gate_rejects_jcode_and_omp_across_buckets() {
+fn discovery_candidate_gate_rejects_omp_across_buckets() {
     let home = tempfile::tempdir().expect("create discovery home");
-    let jcode_sessions = home.path().join(".jcode/sessions");
-    fs::create_dir_all(&jcode_sessions).expect("create Jcode sessions");
-    fs::write(jcode_sessions.join("session_first.json"), "{}").expect("write first Jcode session");
-    fs::write(jcode_sessions.join("session_second.json"), "{}")
-        .expect("write second Jcode session");
-    assert!(recent_jcode_session_files(&jcode_sessions, 1).is_err());
-
     let omp_sessions = home.path().join(".omp/agent/sessions");
     for bucket in ["first", "second"] {
         let bucket = omp_sessions.join(bucket);
@@ -535,134 +577,6 @@ fn cli_agent_logical_limit_is_shared_across_providers() {
 
 #[cfg(feature = "local_fs")]
 #[test]
-fn jcode_discovery_reads_authoritative_session_json_and_uses_updated_at() {
-    let home = tempfile::tempdir().expect("create Jcode home");
-    let project = home.path().join("project");
-    let sessions = home.path().join(".jcode/sessions");
-    fs::create_dir_all(&project).expect("create Jcode project");
-    fs::create_dir_all(&sessions).expect("create Jcode sessions");
-
-    let session_id = "session_bug_1784897411999_c3c24cb8ea67c6a2";
-    let session_path = sessions.join(format!("{session_id}.json"));
-    fs::write(
-        &session_path,
-        serde_json::json!({
-            "id": session_id,
-            "short_name": "bug",
-            "working_dir": project,
-            "updated_at": "2026-07-24T13:28:15.634345Z",
-            "is_debug": false,
-            "messages": [{"role": "user"}],
-        })
-        .to_string(),
-    )
-    .expect("write authoritative Jcode session");
-    fs::write(
-        sessions.join(format!("{session_id}.json.bak")),
-        "not a session",
-    )
-    .expect("write ignored Jcode backup");
-    fs::create_dir_all(home.path().join(".jcode/cache")).expect("create Jcode cache");
-    fs::write(
-        home.path().join(".jcode/cache/session-picker-list-v1.json"),
-        serde_json::json!([{"id": "session_stale"}]).to_string(),
-    )
-    .expect("write ignored Jcode picker cache");
-
-    let records = scan_agent_session_provider(
-        AgentSessionDiscoveryProvider::Jcode,
-        &CliAgentStoreRoots::for_home(home.path().to_path_buf()),
-        10,
-    )
-    .expect("scan Jcode authoritative sessions");
-
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].agent, CLIAgent::Jcode);
-    assert_eq!(records[0].provider_session_id, session_id);
-    assert_eq!(records[0].label.as_deref(), Some("bug"));
-    assert_eq!(records[0].cwd.as_deref(), project.to_str());
-    assert_eq!(records[0].modified_epoch_millis, 1_784_899_695_634);
-    assert_eq!(
-        records[0].source,
-        AgentSessionDiscoverySource::Transcript(session_path)
-    );
-}
-
-#[cfg(feature = "local_fs")]
-#[test]
-fn jcode_discovery_filters_debug_and_empty_sessions_before_recency_limit() {
-    let home = tempfile::tempdir().expect("create Jcode home");
-    let sessions = home.path().join(".jcode/sessions");
-    fs::create_dir_all(&sessions).expect("create Jcode sessions");
-
-    let parent_session_id = "session_a_parent";
-    fs::write(
-        sessions.join(format!("{parent_session_id}.json")),
-        serde_json::json!({
-            "id": parent_session_id,
-            "parent_id": "session_upstream_parent",
-            "short_name": "visible parent session",
-            "is_debug": false,
-            "messages": [{"role": "user"}],
-        })
-        .to_string(),
-    )
-    .expect("write visible Jcode parent session");
-    fs::write(
-        sessions.join("session_y_empty.json"),
-        serde_json::json!({
-            "id": "session_y_empty",
-            "is_debug": false,
-            "messages": [],
-        })
-        .to_string(),
-    )
-    .expect("write empty Jcode session");
-    fs::write(
-        sessions.join("session_z_debug.json"),
-        serde_json::json!({
-            "id": "session_z_debug",
-            "is_debug": true,
-            "messages": [{"role": "user"}],
-        })
-        .to_string(),
-    )
-    .expect("write debug Jcode session");
-
-    let records = scan_agent_session_provider(
-        AgentSessionDiscoveryProvider::Jcode,
-        &CliAgentStoreRoots::for_home(home.path().to_path_buf()),
-        1,
-    )
-    .expect("scan Jcode sessions");
-
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].provider_session_id, parent_session_id);
-    assert_eq!(records[0].label.as_deref(), Some("visible parent session"));
-}
-
-#[cfg(feature = "local_fs")]
-#[test]
-fn jcode_discovery_rejects_filename_id_mismatch() {
-    let home = tempfile::tempdir().expect("create Jcode home");
-    let sessions = home.path().join(".jcode/sessions");
-    fs::create_dir_all(&sessions).expect("create Jcode sessions");
-    fs::write(
-        sessions.join("session_filename.json"),
-        serde_json::json!({"id": "session_payload"}).to_string(),
-    )
-    .expect("write mismatched Jcode session");
-
-    assert!(scan_agent_session_provider(
-        AgentSessionDiscoveryProvider::Jcode,
-        &CliAgentStoreRoots::for_home(home.path().to_path_buf()),
-        10,
-    )
-    .is_err());
-}
-
-#[cfg(feature = "local_fs")]
-#[test]
 fn omp_discovery_reads_one_project_level_and_prefers_title_slot() {
     let home = tempfile::tempdir().expect("create Omp home");
     let project = home.path().join("project");
@@ -703,7 +617,15 @@ fn omp_discovery_reads_one_project_level_and_prefers_title_slot() {
     assert_eq!(records[0].agent, CLIAgent::Omp);
     assert_eq!(records[0].provider_session_id, session_id);
     assert_eq!(records[0].label.as_deref(), Some("标题槽优先"));
-    assert_eq!(records[0].cwd.as_deref(), project.to_str());
+    assert_eq!(
+        records[0].cwd,
+        Some(
+            fs::canonicalize(&project)
+                .expect("canonical Omp project cwd")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    );
     assert_eq!(
         records[0].source,
         AgentSessionDiscoverySource::Transcript(session_path)
@@ -769,7 +691,7 @@ fn omp_discovery_orders_by_mtime_and_rejects_filename_id_mismatch() {
 
 #[cfg(feature = "local_fs")]
 #[test]
-fn explicit_target_roots_keep_jcode_and_omp_under_target_home() {
+fn explicit_target_roots_keep_provider_stores_under_target_home() {
     let home = PathBuf::from("/target/home");
     let roots = CliAgentStoreRoots::from_explicit_target_paths(
         home.clone(),
@@ -778,31 +700,159 @@ fn explicit_target_roots_keep_jcode_and_omp_under_target_home() {
     )
     .expect("construct explicit target roots");
 
-    assert_eq!(roots.jcode_home, home.join(".jcode"));
     assert_eq!(roots.omp_agent_home, home.join(".omp/agent"));
+    assert_eq!(roots.opencode_data_dir, home.join(".local/share/opencode"));
+    assert_eq!(roots.copilot_home, home.join(".copilot"));
+    assert_eq!(roots.pi_agent_home, home.join(".pi/agent"));
 }
 
 #[cfg(feature = "local_fs")]
 #[test]
-fn jcode_and_omp_are_file_backed_session_index_providers() {
+fn expanded_provider_discovery_is_registry_owned_complete_and_scope_preserving() {
     let plan = AgentSessionDiscoveryPlan::from_registry(40);
-
-    assert_eq!(
-        CLIAgent::Jcode.session_discovery_provider(),
-        Some(AgentSessionDiscoveryProvider::Jcode)
-    );
-    assert_eq!(
-        CLIAgent::Omp.session_discovery_provider(),
-        Some(AgentSessionDiscoveryProvider::Omp)
-    );
     assert_eq!(
         plan.providers(),
         [
-            AgentSessionDiscoveryProvider::Jcode,
             AgentSessionDiscoveryProvider::Claude,
             AgentSessionDiscoveryProvider::Codex,
+            AgentSessionDiscoveryProvider::Droid,
+            AgentSessionDiscoveryProvider::OpenCode,
+            AgentSessionDiscoveryProvider::Copilot,
+            AgentSessionDiscoveryProvider::Pi,
+            AgentSessionDiscoveryProvider::Cursor,
+            AgentSessionDiscoveryProvider::Antigravity,
             AgentSessionDiscoveryProvider::Omp,
         ],
-        "all read-only persisted-session adapters must use the shared discovery plan",
+        "every indexable native provider must use the shared discovery plan",
     );
+    for agent in [
+        CLIAgent::Droid,
+        CLIAgent::OpenCode,
+        CLIAgent::Copilot,
+        CLIAgent::Pi,
+        CLIAgent::CursorCli,
+        CLIAgent::Antigravity,
+    ] {
+        assert!(agent.session_discovery_provider().is_some());
+        assert!(agent.capabilities().can_index_sessions);
+        assert!(agent.capabilities().can_resume);
+    }
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn expanded_provider_parsers_extract_native_identity_title_and_cwd() {
+    let home = tempfile::tempdir().expect("create provider home");
+    let project = home.path().join("project");
+    fs::create_dir(&project).expect("create project");
+    let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+    let fixtures = [
+        (
+            AgentSessionDiscoveryProvider::Droid,
+            roots.droid_sessions().join("droid-1.jsonl"),
+            serde_json::json!({"type":"session_start","id":"droid-1","title":"Droid task","cwd":project}).to_string(),
+            "droid-1",
+            "Droid task",
+        ),
+        (
+            AgentSessionDiscoveryProvider::Copilot,
+            roots.copilot_sessions().join("copilot.jsonl"),
+            format!("{}\n{}", serde_json::json!({"type":"session.start","data":{"sessionId":"copilot-1"}}), serde_json::json!({"type":"user.message","data":{"content":"Copilot task"}})),
+            "copilot-1",
+            "Copilot task",
+        ),
+        (
+            AgentSessionDiscoveryProvider::Pi,
+            roots.pi_sessions().join("pi.jsonl"),
+            format!("{}\n{}", serde_json::json!({"type":"session","id":"pi-1","cwd":project}), serde_json::json!({"type":"message","message":{"role":"user","content":"Pi task"}})),
+            "pi-1",
+            "Pi task",
+        ),
+        (
+            AgentSessionDiscoveryProvider::Cursor,
+            roots.cursor_projects().join("repo/agent-transcripts/cursor.jsonl"),
+            serde_json::json!({"sessionId":"cursor-1","role":"user","message":{"content":"Cursor task"},"cwd":project}).to_string(),
+            "cursor-1",
+            "Cursor task",
+        ),
+    ];
+    for (provider, path, content, expected_id, expected_title) in fixtures {
+        fs::create_dir_all(path.parent().expect("fixture parent")).expect("create provider store");
+        fs::write(&path, content).expect("write provider session");
+        let records = scan_agent_session_provider(provider, &roots, 10).expect("scan provider");
+        assert_eq!(records.len(), 1, "provider {provider:?}");
+        assert_eq!(records[0].provider_session_id, expected_id);
+        assert_eq!(records[0].label.as_deref(), Some(expected_title));
+    }
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn opencode_legacy_and_sqlite_discovery_prefers_sqlite_identity() {
+    use diesel::connection::SimpleConnection;
+    use diesel::Connection;
+
+    let home = tempfile::tempdir().expect("create OpenCode home");
+    let project = home.path().join("project");
+    fs::create_dir(&project).expect("create project");
+    let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+    let legacy = roots
+        .opencode_legacy_sessions()
+        .join("project/ses_shared.json");
+    fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("create legacy store");
+    fs::write(&legacy, serde_json::json!({"id":"ses_shared","title":"Legacy","directory":project,"time":{"updated":10}}).to_string()).expect("write legacy session");
+    fs::create_dir_all(roots.opencode_databases_dir()).expect("create OpenCode data dir");
+    let database = roots.opencode_databases_dir().join("opencode.db");
+    let mut connection = diesel::sqlite::SqliteConnection::establish(&database.to_string_lossy())
+        .expect("open fixture database");
+    connection.batch_execute("CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created BIGINT NOT NULL, time_updated BIGINT NOT NULL, parent_id TEXT, time_archived BIGINT); INSERT INTO session VALUES ('ses_shared', 'SQLite', NULL, 20, 30, NULL, NULL);").expect("seed OpenCode database");
+    drop(connection);
+
+    let records = scan_agent_session_provider(AgentSessionDiscoveryProvider::OpenCode, &roots, 10)
+        .expect("scan OpenCode");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].provider_session_id, "ses_shared");
+    assert_eq!(records[0].label.as_deref(), Some("SQLite"));
+    assert!(matches!(
+        records[0].source,
+        AgentSessionDiscoverySource::OpenCodeSqliteEntry { .. }
+    ));
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+#[ignore = "reads the operator's real provider stores"]
+fn expanded_provider_real_stores_match_current_native_formats() {
+    let home = current_cli_agent_home().expect("resolve real HOME");
+    let roots = CliAgentStoreRoots::for_current_process(home);
+    let expected = [
+        (AgentSessionDiscoveryProvider::OpenCode, CLIAgent::OpenCode),
+        (AgentSessionDiscoveryProvider::Cursor, CLIAgent::CursorCli),
+        (
+            AgentSessionDiscoveryProvider::Antigravity,
+            CLIAgent::Antigravity,
+        ),
+    ];
+
+    for (provider, agent) in expected {
+        assert!(
+            super::discovery::provider_source_exists(provider, &roots)
+                .expect("inspect real provider source"),
+            "real {agent:?} source is unavailable",
+        );
+        let records =
+            scan_agent_session_provider(provider, &roots, 40).expect("scan real provider store");
+        assert!(
+            !records.is_empty(),
+            "real {agent:?} store must project sessions"
+        );
+        assert!(records.iter().all(|record| {
+            record.agent == agent
+                && !record.provider_session_id.trim().is_empty()
+                && record
+                    .label
+                    .as_deref()
+                    .is_some_and(|label| !label.trim().is_empty())
+        }));
+    }
 }

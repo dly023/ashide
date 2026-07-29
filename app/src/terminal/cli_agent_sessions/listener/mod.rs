@@ -60,8 +60,7 @@ pub fn session_supports_rich_status(session: &CLIAgentSession) -> bool {
 pub fn is_agent_supported(agent: &CLIAgent) -> bool {
     matches!(
         agent,
-        CLIAgent::Jcode
-            | CLIAgent::Claude
+        CLIAgent::Claude
             | CLIAgent::OpenCode
             | CLIAgent::Codex
             | CLIAgent::Auggie
@@ -79,8 +78,7 @@ fn create_handler(agent: &CLIAgent) -> Option<Box<dyn CLIAgentSessionHandler>> {
         // https://github.com/badlogic/pi-mono), which emit the same
         // structured OSC 777 events as the first-party Claude/OpenCode
         // plugins. We don't ship install flows for them — we just listen.
-        CLIAgent::Jcode
-        | CLIAgent::Claude
+        CLIAgent::Claude
         | CLIAgent::OpenCode
         | CLIAgent::Auggie
         | CLIAgent::Pi

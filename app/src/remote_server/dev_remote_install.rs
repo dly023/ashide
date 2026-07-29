@@ -1644,8 +1644,8 @@ mod tests {
     #[test]
     fn dev_remote_installed_stamp_path_sits_next_to_remote_binary() {
         assert_eq!(
-            dev_remote_installed_stamp_path("~/.ashide-dev/remote-server/ashide-dev-pty-v6"),
-            "~/.ashide-dev/remote-server/ashide-dev-pty-v6.stamp"
+            dev_remote_installed_stamp_path("~/.ashide-dev/remote-server/ashide-dev-pty-v7"),
+            "~/.ashide-dev/remote-server/ashide-dev-pty-v7.stamp"
         );
     }
 
@@ -1966,6 +1966,11 @@ mod tests {
         assert!(finder_layout.contains("set expectedWindowSize to {761, 500}"));
         assert!(finder_layout.contains("set actualWindowSize to"));
         assert!(finder_layout.contains("bounds="));
+        assert!(finder_layout.contains("requireExactIconPositions"));
+        assert!(finder_layout.contains("expectedWindowSize, true"));
+        assert!(finder_layout.contains("expectedWindowSize, false"));
+        assert!(finder_layout.contains("set iconHorizontalSpacing to"));
+        assert!(finder_layout.contains("iconHorizontalSpacing is not 400"));
         assert!(finder_layout.contains("currentHash is not initialHash"));
         assert!(finder_layout.contains("stableSamples ≥ 3"));
         assert!(finder_layout.contains("on closeWindowIfOpen"));

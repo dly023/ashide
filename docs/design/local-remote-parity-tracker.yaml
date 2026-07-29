@@ -5357,76 +5357,22 @@ items:
     evidence: PaneNode::Leaf 在任何 LeafContents projection 前 expect 对应 pane content；missing content 立即 panic，零 terminal UUID、snapshot 或 persistence mutation；TerminalPaneSnapshot UUID 只来自真实 TerminalPane snapshot
 - id: LR-179
   status: verified
-  category: jcode_omp_readonly_discovery_and_native_resume
-  discovered_at: '2026-07-23'
-  summary: Jcode 与 Omp 已交付可配置的只读原生 metadata discovery、Session Navigator virtual row、cold restore 与精确原生 Resume；desktop settings 是 local/runtime plan、Navigator 历史和 New Session 入口的唯一 selection authority，discovery 与 Resume 不互相依赖。当前产品范围只包含 discovery 与 native Resume；realtime attach/input/cancel、Fork/Edit/Write-back 均保持 capability=false，且没有 Ashide 产品入口。2026-07-26 已在 Jcode provider reader 底层镜像原生 picker 的默认可见性：`is_debug=true` self-dev/swarm worker 与空 session 不再被投影，官方 Jcode 图标也已进入 Agent 入口。
-  root_cause: 旧契约把「非交互公开 CLI session list」误当作唯一可靠 discovery boundary，因而把 Jcode 排除在 shared discovery；同时它把 discovery、未来 realtime input control 和历史 mutation 混为一个 lifecycle。正确边界是：只读、校验严格的原生 metadata reader 可提供 virtual-row discovery；native resume 只需要 stable native session id；当前产品不提供 realtime 或写操作。
-  target_invariant: CLIAgent::Jcode 与 CLIAgent::Omp 都是 AgentSessionDiscoveryPlan provider，能力为 detect/live binding/index/list/cold restore/resume=true。Jcode 仅读 ~/.jcode/sessions/session_*.json 的 root id/title/short_name/working_dir/updated_at/is_debug 和 `messages` 数组结构，且 id 必须与 filename 相同；reader 在底层排除 `is_debug=true` 与缺失/空 messages 的 session，并在筛选后再消耗 recency limit；`parent_id` 不参与过滤。Omp 仅读 ~/.omp/agent/sessions/*/*.jsonl 的 metadata prefix，且 header id 必须与 <timestamp>_<id>.jsonl suffix 相同。reader 不读取正文来构建 transcript、不修改文件、不属于 SessionBridge。`agents.third_party.history_enabled_agents` 是唯一 selection authority：默认所有可 index 且可 resume provider；unknown/重复项被过滤；禁用 provider 不读取其 store、不会出现在 Navigator 或 New Session，手工命令 detection 与直接 Resume 不受影响。target HOME 决定所有 store roots；desktop 显式将 enabled_agents 传入 runtime RPC，local/runtime 共享 plan、identity、排序和 failure semantics。缺少 provider store 是成功空集合；失败/cancel/stale completion 保留 canonical committed collection；永久删除只删除该 provider row。设置变更刷新所有 authority，disabled row 在重绘前从 canonical collection 移除。`jcode --resume <id>` 和 `omp --resume <id>` 可在完全不扫描 store 时执行。realtime attach/input/cancel、Fork/Edit/Write-back 与原生 history 写入均不属于当前产品能力，必须保持关闭且无入口。
+  category: omp_native_discovery_resume_and_jcode_hard_cut
+  discovered_at: '2026-07-29'
+  summary: "Jcode 的 subagent/session store 会造成极高噪音与脆弱适配；产品边界改为不再将 Jcode 作为原生 provider，同时保留 Omp native discovery/resume。"
+  root_cause: "Jcode store 格式和 subagent 可见性不适合作为 Ashide 的稳定 Session Navigator authority；此前完整 provider scan 又在逻辑 limit 前解析过多 records，导致刷新延迟。"
+  target_invariant: "Jcode 不在 CLIAgent、AgentSessionDiscoveryProvider、roots、resume、icon、New Session、Session Navigator、remote helper 或测试/静态契约中出现。Omp 保留唯一 native source shape ~/.omp/agent/sessions/<project-bucket>/*.jsonl、exact `omp --resume <id>`，provider scan 在 worker 上并行且每 provider 使用 logical limit。"
   spec_path: docs/LOCAL_REMOTE_PARITY_SPEC.yaml
-  spec_matrix_id: JCODE-PHASED-CONTROL-PLANE-83
-  capability_matrix:
-  - 'Jcode/Omp Agent discovery and native resume'
+  capability_matrix: 'Omp Agent discovery and native resume'
   static_check: script/check_local_remote_parity
-  reused_abstractions:
-  - unified layered Agent capability registry from LR-171
-  - shared AgentSessionDiscoveryPlan and CliAgentStoreRoots
-  - WorkspaceSessionSnapshot virtual-row projection and durable external identity
-  - generic native resume command delivery and pane-owned live Agent binding
-  removed_parallel_paths:
-  - jcode_machine_json_list_as_discovery_prerequisite
-  - jcode_and_omp_discovery_exclusion_from_shared_plan
-  - discovery_as_resume_precondition
-  - session_bridge_or_history_mutation_for_discovery
-  - PTY_or_TUI_text_session_list_parser
-  - speculative_Jcode_realtime_control_plane
-  - premature_Jcode_omp_fork_edit_writeback_capabilities
-  shared_paths:
-  - app/src/cli_agent_jsonl.rs
-  - app/src/terminal/cli_agent.rs
-  - app/src/terminal/cli_agent_session_index.rs
-  - app/src/remote_server/cli_agent_sessions.rs
-  lifecycle_carriers:
-  - state: readonly_metadata_discovery
-    canonical_owner: AgentSessionDiscoveryPlan plus its typed AgentSessionDiscoveryProvider readers
-    identity: provider-native session id plus physical source path; Navigator projection has no layout container identity
-    visible_carrier: canonical committed AgentSessionDiscoveryRecord collection and derived virtual Session Navigator rows
-    carrier_missing_semantics: a missing Jcode/Omp store is a successful empty provider result and leaves unrelated committed provider rows available
-    cleanup: filename/id mismatch or malformed metadata never commits; permanent provider-store deletion removes only that provider rows; failure/cancel/stale completion preserves committed collection
-  - state: native_resume
-    canonical_owner: generic pending resume action plus pane-owned live Agent binding
-    identity: exact nonblank Jcode or Omp native session id
-    visible_carrier: local or runtime resumed terminal and its pane binding after the native CLI reports it
-    carrier_missing_semantics: Resume remains available with an explicit id even when discovery is disabled, missing, stale, or never run
-    cleanup: blank identity emits no command; Resume emits only the quoted native CLI argv and does not read or modify a session store
-  required_tests:
-  - jcode_is_a_first_class_detectable_cli_agent
-  - jcode_uses_its_official_icon_in_all_agent_entrypoints
-  - jcode_explicit_resume_command_uses_public_cli_contract
-  - jcode_discovery_and_resume_do_not_require_a_daemon_handshake
-  - jcode_readonly_discovery_capabilities_are_separate_from_advanced_session_actions
-  - omp_readonly_discovery_has_an_independent_explicit_resume_adapter
-  - jcode_fork_edit_and_writeback_remain_disabled
-  - jcode_discovery_reads_authoritative_session_json_and_uses_updated_at
-  - jcode_discovery_rejects_filename_id_mismatch
-  - jcode_discovery_filters_debug_and_empty_sessions_before_recency_limit
-  - omp_discovery_reads_one_project_level_and_prefers_title_slot
-  - omp_discovery_orders_by_mtime_and_rejects_filename_id_mismatch
-  - explicit_target_roots_keep_jcode_and_omp_under_target_home
-  - jcode_and_omp_are_file_backed_session_index_providers
-  - discovery_plan_uses_only_enabled_unique_file_backed_agents
-  - local_jcode_and_omp_cold_scan_project_stable_rows_without_layout_identity
-  - test_cli_agent_history_enabled_agents_default_to_all_discoverable_native_resumers
-  - test_cli_agent_history_enabled_agents_ignore_stale_names_and_deduplicate_selection
-  - test_unified_new_session_menu_projects_history_discovery_selection
-  - test_remote_scan_respects_explicit_enabled_agents
+  reused_abstractions: [CLIAgent, AgentRecord, AgentSessionDiscoveryPlan, CliAgentStoreRoots, EnvironmentTable, remote_server_cli_agent_sessions]
+  removed_parallel_paths: [Jcode provider registry, Jcode store reader/parser, Jcode icon and UI entry, unbounded provider record parsing]
+  required_tests: [omp_is_a_first_class_detectable_cli_agent, omp_readonly_discovery_has_an_independent_explicit_resume_adapter, omp_discovery_reads_one_project_level_and_prefers_title_slot, local_omp_cold_scan_projects_stable_rows_without_layout_identity]
   verification:
-    discovery_resume: 'verified 2026-07-26：Jcode v0.58.0（5e064af4）的原生 picker 默认隐藏 `is_debug=true` self-dev/swarm worker；Ashide 的 Jcode provider reader 现在在底层跳过 debug 与缺失/空 messages session，并在筛选后才消耗 recency limit；非 debug parent session 仍保留。本机只读 metadata census 为 166 个 filename/id 合法 candidate，其中 78 个 debug、2 个空 messages 被过滤，86 个会投影。`jcode --resume <id>` 与 `omp --resume <id>` 均继续使用精确 native session id。'
-    boundary: 'verified 2026-07-24：Discovery 不读取或写入 conversation history，不是 SessionBridge，不依赖 daemon handshake；Resume 不触发扫描。未知/缺失 provider store 被解释为成功空集合，而不是全局 discovery failure。'
-    scope_boundary: 'verified 2026-07-24：当前产品只支持 discovery + native Resume。Jcode/Omp realtime attach/input/cancel、Fork/Edit/Write-back 与 native history write 均保持 capability=false、没有菜单或 SessionBridge 入口；不引入 ACP、Jcode private app-core、daemon façade 或 internal wire compatibility。'
-    static_check: 'verified 2026-07-26：`bash -n script/check_local_remote_parity` 与完整 checker 通过；LR-179 guard 现在锁定 Jcode provider reader 的 default visibility helper、debug/messages 结构判定、parent_id 非过滤语义、新 focused test 与唯一 store reader。'
-    focused_tests: 'verified 2026-07-26：`MACOSX_DEPLOYMENT_TARGET=10.14 cargo test -p warp --lib --features gui,local_fs jcode_ -- --nocapture` 通过 12 项，包括新增 debug/empty filtering before recency limit、non-debug parent session discovery、filename/id mismatch、官方图标映射、cold-scan Navigator projection 与 native Resume independent from daemon。'
-    cargo_check: 'verified 2026-07-26：`MACOSX_DEPLOYMENT_TARGET=10.14 cargo check -p warp` 通过；仅有仓库既有 dead-code/unused warnings。'
-    gui_or_runtime: 'verified 2026-07-26：`TERM=xterm-256color ./script/run` 从当前 checkout 重建、签名并启动 target/debug/bundle/osx/AshideDev.app（PID 26696）；未启动或触碰 /Applications/Ashide.app。二进制 embedded asset index 已包含 `bundled/svg/jcode.svg`，Quick Look 成功将该 SVG 生成 128×128 PNG thumbnail，证明 data-URI 官方图标可被实际 macOS SVG 栈解析。Session Navigator 选中 Jcode virtual row 后的既有运行日志仍记录 native `jcode --resume <native-session-id>` delivery。系统拒绝 display capture，故不伪称已观察到窗口内像素或点击行为。'
+    static_check: '2026-07-29 `./script/check_local_remote_parity` verifies Omp registry/source-shape/resume, bounded parallel scan and Jcode production absence.'
+    focused_tests: '2026-07-29 focused Omp discovery/resume and session-index tests pass.'
+    cargo_check: '2026-07-29 `MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs` passes.'
+    gui_or_runtime: 'new macOS bundle startup and interactive refresh remain covered by current dogfooding gate.'
 
 - id: LR-180
   status: verified
@@ -5592,9 +5538,9 @@ items:
   status: verified
   category: toast_typed_lifecycle
   discovered_at: '2026-07-23'
-  summary: DismissibleToastStack 只为每次 add 分配随机 UUID；可选 object_id 仅做先删后加，persistent 永不超时且 render 全量 collection。高频错误 burst 与 29 个 persistent 调用可无限占据页面顶部，重复事件也没有 generation-safe carrier lifecycle。
+  summary: DismissibleToastStack 曾把 source/category 当作唯一 transient identity，导致同一用户 operation 的 Info→Success/Error 叠加，而同一文件不同 operation 又互相覆盖。Session Navigator 把同一 refresh lifecycle 错投影成开始/成功全局 toast，PassiveProjection 也误走用户刷新。
   root_cause: Toast identity、source/category、lifetime policy、timer generation、pending bound 与 visible projection 没有一个 typed canonical owner；调用方只能在 ephemeral/persistent 两个旁路里自行选 lifetime。
-  target_invariant: DismissibleToastStack 原子持有 ToastPolicy、ToastIdentity、carrier UUID/generation 与 bounded projection；相同 stable identity 原位更新，unkeyed burst 按 source/category 合并，Transient 自动消失，只有显式 keyed ActionRequired 可持续存在且可关闭，额外 pending carrier 用可访问 summary 表达。
+  target_invariant: DismissibleToastStack 原子持有 ToastPolicy、ToastIdentity、carrier UUID/generation 与 bounded projection；keyed Transient operation 跨类别原位更新且自动消失，unkeyed burst 才按 source/category 合并，只有显式 keyed ActionRequired 可持续存在。Session Navigator 只让显式 Refresh action 驱动 header spinner；成功静默，失败按同一 operation key 替换为一条 transient error，partial preserved 不伪称 complete。
   spec_path: docs/LOCAL_REMOTE_PARITY_SPEC.yaml
   spec_matrix_id: TOAST-TYPED-LIFECYCLE-86
   capability_matrix: 'Workspace Toast lifecycle: typed identity policy and bounded projection'
@@ -5605,6 +5551,8 @@ items:
   - Workspace ToastStack global event routing
   removed_parallel_paths:
   - caller_selected_default_persistent_lifetime
+  - global_refresh_start_and_success_toasts
+  - passive_trigger_user_refresh
   - random_uuid_per_duplicate_event
   - object_id_remove_then_append_reordering
   - render_entire_pending_collection
@@ -5618,7 +5566,7 @@ items:
   lifecycle_carriers:
   - state: toast_notification
     canonical_owner: DismissibleToastStack
-    identity: ToastIdentity stable source/key or source/category burst identity
+    identity: ToastIdentity stable source/operation key or source/category burst identity
     visible_carrier: at most the configured accessible Toast slots including an overflow summary
     carrier_missing_semantics: dismissed or current Transient generation expired; stale timer completion is ignored
     cleanup: replacement aborts the prior timer and increments generation, current timer/manual dismiss removes exactly one carrier, overflow projection updates without discarding pending ActionRequired state
@@ -5630,11 +5578,15 @@ items:
   - different_sources_remain_independent
   - visible_projection_is_bounded_and_summarizes_overflow
   - action_required_policy_always_has_a_stable_key
+  - keyed_transient_operation_replaces_across_info_success_and_error
+  - keyed_transient_operation_stays_transient
+  - different_operation_keys_remain_independent
+  - test_workspace_sessions_refresh_state_reports_local_progress_and_keyed_failure
   verification_evidence:
     static_check: passed_full_production_caller_inventory_and_legacy_wrapper_negative_probe_2026_07_24
-    focused_tests: passed_dismissible_toast_tests_7_of_7_2026_07_24
+    focused_tests: passed_dismissible_toast_tests_10_of_10_2026_07_29_including_keyed_transient_operation_cross_category_replacement
     legacy_api_inventory: zero_add_ephemeral_toast_and_add_persistent_toast_production_calls
-    cargo_check: passed_cargo_check_p_warp_integrated_2026_07_24
+    cargo_check: passed_MACOSX_DEPLOYMENT_TARGET_10_14_CARGO_INCREMENTAL_0_cargo_check_p_warp_features_gui_local_fs_2026_07_29
 - id: LR-185
   status: verified
   category: session_navigator_live_agent_activity
@@ -5708,7 +5660,7 @@ items:
   discovered_at: '2026-07-26'
   summary: redacted-remote-target 实机刷新远端会话列表时，remote helper 已连接并完成 PTY bootstrap，但 Session Navigator 因 unknown observed agent 失败，旧 local rows 保留而没有提交 remote authority rows。
   root_cause: remote scanner 在 typed CLIAgent → ScanCliAgentSessions RPC 的投影中错误发送 command_prefix（jcode / omp 等），desktop 却按 CLIAgent serde 协议值解码；Claude/Codex record decoder 的局部兼容掩盖了 records 路径，observed_agents 对所有 provider 都 fail closed。该语义变化没有递增 remote helper protocol revision，故同版本旧 helper 能连接后才在刷新时暴露。
-  target_invariant: remote scanner 只产出 typed CLIAgent；server_model 是 request decode 与 records.agent、observed_agents、source_missing_agent 唯一 typed↔wire 投影点，统一使用 CLIAgent::to_serialized_name。source_missing_agent 与 records/observed_agents 必须互斥，Complete 的 record.agent 必须属于 observed_agents；desktop 在提交前整帧验证，任何违例拒绝整帧、保留已提交的 remote authority cache，绝不部分提交、回写或归属到 local。该语义协议递增 REMOTE_SERVER_PROTOCOL_REVISION 到 6，使旧 helper 在 Initialize fail-closed 并使用新安装 slot。
+  target_invariant: remote scanner 只产出 typed CLIAgent；server_model 是 request decode 与 records.agent、observed_agents、source_missing_agent 唯一 typed↔wire 投影点，统一使用 CLIAgent::to_serialized_name。source_missing_agent 与 records/observed_agents 必须互斥，Complete 的 record.agent 必须属于 observed_agents；desktop 在提交前整帧验证，任何违例拒绝整帧、保留已提交的 remote authority cache，绝不部分提交、回写或归属到 local。LR-196 扩展 wire 语义后 REMOTE_SERVER_PROTOCOL_REVISION 到 7，使 v6 及更旧 helper 在 Initialize fail-closed 并使用新安装 slot。
   spec_path: docs/SESSION_NAVIGATOR_SPEC.yaml
   spec_matrix_id: SN-ENV-SESSION-REFRESH-INTENT-25
   capability_matrix: 'environment runtime remote CLI-agent scan wire identity'
@@ -5736,8 +5688,8 @@ items:
   - test_remote_scan_respects_explicit_enabled_agents
   - remote_discovery_keeps_previously_observed_missing_provider_typed
   verification:
-    runtime_evidence: '2026-07-26 授权远端环境先复现 unknown observed agent；修复后当前源码 AshideDev 通过 ashide-dev-pty-v6 helper 成功连接，并在远端 authority 下完成两次 CLI-agent scan（45 sessions）；日志没有 unknown observed agent 或 scan failure。'
-    static_check: '2026-07-26 ./script/check_local_remote_parity 通过；LR-187 同时锁定 typed scanner、唯一 server-model wire projection、strict request decode、desktop atomic outcome decode、revision v6 和 dev slot。'
+    runtime_evidence: '2026-07-26 授权远端环境先复现 unknown observed agent；修复后当前源码 AshideDev 通过当时的 ashide-dev-pty-v6 helper 成功连接，并在远端 authority 下完成两次 CLI-agent scan（45 sessions）。LR-196 已将当前协议升至 v7，该 v6 证据不再证明当前 expanded-provider wire。'
+    static_check: '2026-07-28 LR-196 将 ScanCliAgentSessions 扩展为携带 scope_paths 与新增 provider records，REMOTE_SERVER_PROTOCOL_REVISION 到 7；LR-187 gate 锁定 typed scanner、唯一 server-model wire projection、strict request decode、desktop atomic outcome decode 和 v7 dev/release slot。'
     focused_tests: '2026-07-26 `cargo test -p warp --lib --features gui,local_fs remote_cli_agent_scan -- --nocapture` 10/10、`environment_cli_agent_scan_ -- --nocapture` 4/4、`environment_runtime_transport::dev_remote_install::tests:: -- --nocapture` 22/22，以及 `cargo test -p remote_server --lib --no-fail-fast` 94/94 通过。'
     cargo_check: '2026-07-26 MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp 通过（仅既有 unused/dead-code warnings）。'
     gui_or_runtime: '2026-07-26 当前 checkout 重建并 ad-hoc sealed 的 AshideDev.app 已启动；强制本地 source helper 路径后，旧缺失 stamp 被安全刷新，remote proxy connected，随后 Environment Session Navigator 对授权远端 authority 成功发现 45 个会话。'
@@ -5820,7 +5772,7 @@ items:
   capability_matrix: 'Session Navigator Resume committed hot path'
   static_check: script/check_local_remote_parity
   reused_abstractions: [SessionNavigatorModel, EnvironmentTable, SessionNavigatorReducer, PaneSessionBinding, PaneConfiguration]
-  removed_parallel_paths: [session_navigator_sessions_for_display_update Resume path, lifecycle dispatch session_navigator_action_model, live_or_pending live_workspace_sessions, PaneGroup::snapshot Navigator live projection, duplicate post-delivery sync]
+  removed_parallel_paths: ["session_navigator_sessions_for_display_update Resume path", "lifecycle dispatch session_navigator_action_model", "live_or_pending live_workspace_sessions", "PaneGroup::snapshot Navigator live projection", "duplicate post-delivery sync"]
   shared_paths: [app/src/workspace/view/session_navigator.rs, app/src/workspace/view.rs]
   required_tests: [resume_action_consumes_committed_model_without_action_time_refresh]
   verification:
@@ -5858,7 +5810,7 @@ items:
   spec_matrix_id: SN-LIVE-CONTAINER-TITLE-OWNERSHIP-60
   capability_matrix: 'Session Navigator Resume scanned title ownership'
   static_check: script/check_local_remote_parity
-  reused_abstractions: [PaneConfiguration.custom_vertical_tabs_title, WorkspaceSessionSnapshot::title_fallback_label, WorkspaceSessionSnapshot::merged_label, SessionNavigatorReducer collapse]
+  reused_abstractions: [PaneConfiguration.custom_vertical_tabs_title, "WorkspaceSessionSnapshot::title_fallback_label", "WorkspaceSessionSnapshot::merged_label", SessionNavigatorReducer collapse]
   removed_parallel_paths: [live leaf label from PaneGroup.custom_title, live leaf label from environment.label, Resume set_title as Navigator title owner, collapse keep-any-Some live label]
   shared_paths: [app/src/workspace/view/session_navigator.rs, app/src/workspace/view.rs, app/src/workspace/view/session_navigator_reducer.rs, app/src/app_state.rs]
   required_tests: [test_resume_seeds_pane_container_title_not_tab_group_title, test_session_navigator_collapse_keeps_indexed_title_when_live_label_is_generic, test_session_navigator_live_pane_specific_title_wins_over_indexed_specific]
@@ -5887,3 +5839,230 @@ items:
     focused_tests: '门禁为静态负向探针 + contract markers；产品行为仍由 LR-192 focused tests 覆盖。'
     cargo_check: n/a
     gui_or_runtime: n/a
+- id: LR-194
+  status: verified
+  category: remote_cli_agent_omp_native_mutation_source_authority
+  discovered_at: '2026-07-29'
+  summary: "远端 Omp Delete/Archive 必须只接受其正本 session source，不能放宽为整个目录。"
+  root_cause: "root-only allow-list 会把 Omp sessions 下的 nested tool log 误当成可写会话。"
+  target_invariant: "Omp discovery 与远端 native mutation 共用唯一 source-shape predicate：仅 sessions/<project-bucket>/*.jsonl；tool log、home 外路径均 fail-closed，拒绝时不触碰文件并由既有 optimistic rollback 保留 row。"
+  spec_path: docs/SESSION_NAVIGATOR_SPEC.yaml
+  spec_matrix_id: SN-INTRA-NATIVE-SESSION-SOURCE-SHAPE-01
+  capability_matrix: 'Native Omp session mutation source authority'
+  static_check: script/check_local_remote_parity
+  reused_abstractions: [CliAgentStoreRoots, shared_cli_agent_jsonl_discovery, "remote_server_cli_agent_sessions::ensure_allowed", "remote_server_cli_agent_sessions::mutate_session"]
+  removed_parallel_paths: [remote Claude/Codex-only allow-list, Omp root-only mutation authorization, recursive Omp session mutation authorization]
+  shared_paths: [app/src/cli_agent_jsonl/roots.rs, app/src/cli_agent_jsonl/discovery.rs, app/src/remote_server/cli_agent_sessions.rs, docs/SESSION_NAVIGATOR_SPEC.yaml, script/check_local_remote_parity]
+  required_tests: [remote_mutation_deletes_omp_authoritative_session_file, remote_mutation_rejects_omp_tool_log_paths]
+  verification:
+    static_check: '2026-07-29 `./script/check_local_remote_parity` validates shared Omp predicate and canonical remote mutation path.'
+    focused_tests: '2026-07-29 `cargo test -p warp --lib --features gui,local_fs remote_mutation_ -- --nocapture` covers authoritative Omp delete and tool-log rejection.'
+    cargo_check: '2026-07-29 `MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs` passes.'
+    gui_or_runtime: '不触发远端 SSH/RPC 或真实删除；helper native mutation 由 temp HOME focused tests 覆盖。'
+
+- id: LR-195
+  status: verified
+  category: session_navigator_passive_refresh_token_starvation
+  discovered_at: '2026-07-28'
+  summary: "v0.0.4 的本地 Session Navigator 扫描在启动/terminal bootstrap 后连续输出 `Local Session Navigator scan ignored stale generation`，没有一次本地 outcome 能提交，导致本地发现列表失效。"
+  root_cause: "每个 PassiveProjection 都无条件创建同 authority 的 replacement token；多个 terminal bootstrap/source reconciliation 并发触发时，较早 worker 完成必 stale，后续 passive event 又覆盖最新 token，形成 token starvation。LR-188 仅将 I/O 移离 UI 线程，未将同 authority 的重复被动请求合并。"
+  target_invariant: "EnvironmentTable 是 authority-scoped in-flight scan 的唯一 owner。PassiveProjection 发现已有 token 时只合并且不启动 backend I/O；UserInitiated 始终创建 replacement token 以抢占可能停滞的旧 worker，随后 passive 请求合并到新 token。该规则在 shared dispatcher 生效，local 与 runtime 不得分叉。"
+  spec_path: docs/SESSION_NAVIGATOR_SPEC.yaml
+  spec_matrix_id: SESSION-NAVIGATOR-REFRESH-ASYNC-01
+  capability_matrix: 'Session Navigator refresh delivery'
+  static_check: script/check_local_remote_parity
+  reused_abstractions: [EnvironmentTable indexed_cli_agent_session_scan_by_navigation_key, IndexedCliAgentSessionScanToken, EnvironmentSessionRefreshIntent, Workspace refresh generation]
+  removed_parallel_paths: [per-backend passive refresh de-duplication, passive replacement-token delivery]
+  shared_paths: [app/src/workspace/environment_table.rs, app/src/workspace/view/session_navigator.rs, app/src/workspace/view.rs, app/src/workspace/view_test.rs, script/check_local_remote_parity]
+  required_tests: [indexed_session_scan_in_flight_is_authority_scoped_and_clears_on_completion, passive_cli_agent_session_refresh_coalesces_before_backend_delivery]
+  verification:
+    runtime_evidence: '2026-07-28 `/Applications/Ashide.app` v0.0.4 日志在 10:14:31–10:15:02 连续八次记录 `Local Session Navigator scan ignored stale generation`；10:56:54 再次出现，且未见本地成功提交日志。'
+    static_check: '2026-07-28 `./script/check_local_remote_parity` 通过；LR-195 锁定 EnvironmentTable 的唯一 in-flight scan owner、PassiveProjection guard 必须先于 shared local/runtime backend delivery，且 UserInitiated 不得被该 guard 合并。'
+    focused_tests: '2026-07-28 `cargo test -p warp --lib --features gui,local_fs indexed_session_scan_in_flight_is_authority_scoped_and_clears_on_completion -- --nocapture` 1/1 通过；`passive_cli_agent_session_refresh_coalesces_before_backend_delivery -- --nocapture` 1/1 通过。'
+    cargo_check: '2026-07-28 `MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs` 通过。'
+    gui_or_runtime: '2026-07-28 当前源码 arm64 AshideDev.app 完成 ad-hoc signing、替换并启动；实际进程 pid 51470 写入 `~/Library/Logs/ashide_dev.log`，冷启动后 11:33:42 记录 `Local Session Navigator scan committed 88 sessions`。universal x86_64 链接受本机 ENOSPC 阻断，失败派生产物已删除；本机 Apple Silicon 的 arm64 可用包已验证。'
+- id: LR-196
+  status: verified
+  category: session_navigator_expanded_provider_discovery
+  discovered_at: '2026-07-28'
+  summary: "对照 Orca AI Vault 后，Ashide 现有 Session Navigator 仅索引 Claude/Codex/Jcode/Omp；Droid/OpenCode/Copilot/Pi/Cursor/Antigravity 虽已存在 Agent identity 或 live detection，却无法发现其原生持久会话。"
+  root_cause: "AgentRecord discovery descriptor 只覆盖四个 provider，CliAgentStoreRoots 与 shared plan 没有声明其正本 store/parser；简单复制 Orca panel 会制造第二套 collection、host scope、identity、Resume 与错误语义。"
+  target_invariant: "直接扩展 AgentRecord → AgentSessionDiscoveryPlan → EnvironmentTable 正本链：六个既有 Agent 的 local/runtime scanner、metadata、scope-old-session 保底、完整事务提交和原生 exact-session Resume 共用一套语义；OpenCode legacy/SQLite 去重且 SQLite 为新格式正本；不创建 AI Vault 第二入口或 partial-success issue overlay。"
+  spec_path: docs/SESSION_NAVIGATOR_SPEC.yaml
+  spec_matrix_id: SN-EXPANDED-PROVIDER-DISCOVERY-01
+  capability_matrix: 'Session Navigator expanded native provider discovery'
+  static_check: script/check_local_remote_parity
+  reused_abstractions: [AgentRecord, AgentSessionDiscoveryPlan, AgentSessionDiscoveryRecord, CliAgentStoreRoots, EnvironmentTable indexed scan generation, SessionNavigatorModel, "EnvironmentEntryIntent::SessionRestore"]
+  removed_parallel_paths: [Orca-style second AI Vault collection, renderer-owned scanning, local-only provider adapters, partial-success per-file issue projection, UI-built resume command]
+  shared_paths: [app/src/terminal/cli_agent.rs, app/src/cli_agent_jsonl, app/src/terminal/cli_agent_session_index.rs, app/src/remote_server/cli_agent_sessions.rs, crates/remote_server/proto/remote_server.proto, app/src/workspace/environment_runtime.rs, app/src/workspace/view.rs]
+  required_tests: [expanded_provider_discovery_is_registry_owned_complete_and_scope_preserving, expanded_provider_parsers_extract_native_identity_title_and_cwd, opencode_legacy_and_sqlite_discovery_prefers_sqlite_identity, expanded_provider_failure_preserves_committed_collection, expanded_provider_resume_commands_use_public_native_contracts, expanded_provider_real_stores_match_current_native_formats, local_remote_parity_static_expanded_provider_discovery_guard]
+  verification:
+    static_check: '2026-07-28 LR-196 descriptor/parser/scope/wire/negative-probe gates all pass; full parity checker reaches only the expected LR-063 completion gate before this entry is marked verified.'
+    focused_tests: '2026-07-28 discovery_ 22/22, remote_cli_agent_scan 10/10, helper protocol 94/94, expanded provider/resume/OpenCode/failure groups 8/8 passed. Real HOME ignored smoke scanned current OpenCode SQLite, Cursor JSONL and Antigravity transcript stores; it exposed and then verified the nested Cursor message.content-array title parser fix.'
+    cargo_check: '2026-07-28 MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs passed.'
+    gui_or_runtime: 'Current source AshideDev bundle built and was ad-hoc signed, but macOS single-instance correctly forwarded launch to the existing installed Ashide process; user cancelled graceful quit, so current-bundle visual local/remote history was not claimed. Real local provider stores and the complete remote helper protocol path are verified by the real-store smoke plus focused wire/helper tests.'
+- id: LR-197
+  status: verified
+  category: session_navigator_local_agent_history_membership
+  discovered_at: '2026-07-29'
+  summary: "本地刷新后 Session Navigator 把所有 live terminal 投影为历史候选，导致普通 shell 淹没原生 Agent 会话；旧 local sidecar 还允许遗留 generic pane alias/pin。"
+  root_cause: "Workspace::live_workspace_sessions 在 canonical merge 前无条件 push local Terminal；local session_state sanitizer 只淘汰 tab locator，仍保留 local::pane key；WindowSnapshot restored virtual targets 没有语义 membership gate。"
+  target_invariant: "TerminalBootstrap/local 只有 canonical binding 或 Ashide conversation 的 AgentTerminal 可进入 Navigator；binding 随 pane 生命周期保存且 agent 退出/resume 不清；关闭 agent pane/tab 后对其 authority 立即发起一次 passive native-history refresh；local generic pane user-state 和 non-agent restored virtual rows 在读写边界原子清理；runtime terminal 不被过滤。"
+  spec_path: docs/SESSION_NAVIGATOR_SPEC.yaml
+  spec_matrix_id: SN-LOCAL-AGENT-HISTORY-MEMBERSHIP-67
+  capability_matrix: 'Session Navigator local agent-history membership'
+  static_check: script/check_local_remote_parity
+  reused_abstractions: ["Workspace::live_workspace_sessions", PaneConfiguration.session_binding, WorkspaceSessionSnapshot, EnvironmentTable indexed session cache, "EnvironmentSessionRefreshIntent::PassiveProjection", local session_state sanitizer]
+  removed_parallel_paths: [render-time generic terminal hiding, tab-locator history, generic local pane alias/pin state, close-without-history-refresh]
+  shared_paths: [app/src/workspace/view/session_navigator.rs, app/src/workspace/view.rs, app/src/app_state.rs, app/src/terminal/cli_agent_session_index.rs, app/src/workspace/view_test.rs, app/src/app_state_tests.rs, script/check_local_remote_parity]
+  required_tests: [local_generic_terminal_is_excluded_from_navigator_but_agent_bound_live_pane_survives, local_agent_binding_survives_passive_refresh_and_tab_close_requests_native_history_refresh, local_session_user_state_drops_generic_pane_identity_debt, restored_workspace_session_history_requires_agent_or_conversation_semantics, local_agent_history_membership_static_guard]
+  verification:
+    static_check: '2026-07-29 `./script/check_local_remote_parity` 通过；LR-197 锁定 local terminal membership 的唯一 canonical predicate、placeholder/terminal 两 carrier 均在 binding apply 后走同一 gate、关闭后 refresh 只能在移除 live carrier 后以 PassiveProjection 触发；负向 probes 覆盖 unconditional push 与 local::pane sidecar 回归。'
+    focused_tests: '2026-07-29 `local_generic_terminal_is_excluded_from_navigator_but_agent_bound_live_pane_survives`、`local_agent_binding_survives_passive_refresh_and_tab_close_requests_native_history_refresh`、`local_agent_history_membership_static_guard`、`local_session_user_state_drops_generic_pane_identity_debt`、`restored_workspace_session_history_requires_agent_or_conversation_semantics` 以及 remote terminal regression `test_add_terminal_tab_from_environment_runtime_syncs_active_session_row` 均通过。'
+    cargo_check: '2026-07-29 `MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs` 通过。'
+    gui_or_runtime: '待当前 checkout macOS app bundle 的最小实机 smoke：local generic shell 不出现；bound agent pane 出现且关闭后由 native history 接管；remote generic terminal 保留。'
+
+- id: LR-198
+  status: verified
+  category: session_navigator_refresh_feedback_lifecycle
+  discovered_at: '2026-07-29'
+  summary: "同一次 Session Navigator refresh 被投影成开始和成功两个全局 toast；设置与 pin 等 PassiveProjection 也误发 UserInitiated refresh，SourceMissing/stale 还会被写成完整成功。"
+  root_cause: "WorkspaceSessionsRefreshState 持有 UI 文案并直接驱动 toast，Toast transient identity 又按 caller source/category 而不是 operation；trigger intent 没在所有高层入口保持边界。"
+  target_invariant: "只有 RefreshWorkspaceSessions action 创建 UserInitiated generation 并将 progress 投影到当前 Navigator header spinner。complete 只静默结束 spinner；explicit failure 保留已提交 rows 并以 source+operation-key 的 transient error 原位替换。PassiveProjection 合并 canonical scan，绝不抢占、修改 user generation 或发 toast；partial/source-missing/cancel/stale 绝不伪称完整成功。"
+  spec_path: docs/SESSION_NAVIGATOR_SPEC.yaml
+  spec_matrix_id: SN-ENV-SESSION-REFRESH-INTENT-25
+  capability_matrix: 'Session Navigator refresh feedback lifecycle'
+  static_check: script/check_local_remote_parity
+  reused_abstractions: [EnvironmentSessionRefreshIntent, EnvironmentTable authority-scoped scan token, WorkspaceSessionsRefreshState, DismissibleToastStack ToastPolicy]
+  removed_parallel_paths: [global_refresh_start_toast, global_refresh_success_toast, passive_settings_user_refresh, pin_user_refresh, source_category_refresh_identity]
+  shared_paths: [app/src/workspace/view.rs, app/src/workspace/view/session_navigator.rs, app/src/view_components/dismissible_toast.rs, app/src/workspace/view_test.rs, app/src/view_components/dismissible_toast_tests.rs, script/check_local_remote_parity]
+  lifecycle_carriers:
+  - state: user_initiated_refresh
+    canonical_owner: EnvironmentTable authority-scoped scan token plus Workspace user refresh generation
+    identity: current navigator authority plus monotonic explicit generation
+    visible_carrier: current Navigator header refresh icon only
+    carrier_missing_semantics: complete, partial-preserved, cancelled, stale or failure ends spinner without clearing the committed collection
+    cleanup: only current explicit generation may clear spinner; stale completion is ignored; failure emits one keyed transient error
+  required_tests: [test_workspace_sessions_refresh_state_reports_local_progress_and_keyed_failure, passive_refresh_does_not_mutate_user_refresh_generation, keyed_transient_operation_replaces_across_info_success_and_error, keyed_transient_operation_stays_transient, different_operation_keys_remain_independent, session_navigator_refresh_feedback_static_guard]
+  verification:
+    static_check: '2026-07-29 `./script/check_local_remote_parity` passed after full production caller inventory verified the sole explicit refresh action owner and operation-keyed transient toast path.'
+    focused_tests: '2026-07-29 focused workspace refresh progress/failure/passive/static-guard tests and all three keyed transient operation tests passed.'
+    cargo_check: '2026-07-29 `MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs` passed.'
+    gui_or_runtime: '2026-07-29 current-checkout `target/aarch64-apple-darwin/release-lto-debug_assertions/bundle/osx/AshideDev.app` 已重建、strict codesign 通过并实际启动；运行日志记录 Claude 16 条/30 ms、Codex 81 条/49 ms 的 discovery。当前 Codex shell 无 macOS Accessibility/Screen Recording，未把未观察到的视觉点击伪称为 GUI smoke；局部 spinner、静默 completion、keyed failure 与 passive 边界由上述 focused lifecycle tests 和 production static caller inventory 覆盖。'
+- id: LR-199
+  status: verified
+  category: session_navigator_passive_discovery_trigger_ownership
+  discovered_at: '2026-07-29'
+  summary: "generic terminal bootstrap/split 在 provider 历史 source 未变化时仍触发全量 PassiveProjection；运行态 Codex 单源重复扫描达到 190 ms。"
+  root_cause: "TerminalSessionBootstrapped 同时承载 runtime materialization completion 与通用 PTY readiness，调用方无条件把后者解释成 provider history source mutation。LR-195 只合并 in-flight token，scan 完成后的无效 bootstrap 仍会重新做 I/O。"
+  target_invariant: "PassiveProjection 只由初始 authority discovery、history-enabled 设置变化、provider source mutation 成功、runtime HOME 首次物化或 agent-bound carrier 移除触发。generic TerminalSessionBootstrapped/split 只提交 live projection。显式 Refresh 始终强制重扫；existing token/complete-or-preserve/feedback/local-remote parity 不变。"
+  spec_path: docs/SESSION_NAVIGATOR_SPEC.yaml
+  spec_matrix_id: SN-PASSIVE-DISCOVERY-SEMANTIC-TRIGGERS-68
+  capability_matrix: 'Session Navigator passive discovery trigger ownership'
+  static_check: script/check_local_remote_parity
+  reused_abstractions: [EnvironmentSessionRefreshIntent, "EnvironmentBackend::refresh_indexed_sessions", EnvironmentTable authority-scoped scan token, PaneConfiguration session binding, runtime HOME materialization]
+  removed_parallel_paths: [generic terminal bootstrap provider scan, split/new-terminal provider scan, TTL/debounce freshness guess]
+  shared_paths: [app/src/workspace/view.rs, app/src/workspace/view_test.rs, docs/SESSION_NAVIGATOR_SPEC.yaml, docs/design/local-remote-capability-matrix.csv, script/check_local_remote_parity]
+  required_tests: [generic_terminal_bootstrap_does_not_trigger_provider_history_scan, passive_cli_agent_session_refresh_coalesces_before_backend_delivery, local_agent_binding_survives_passive_refresh_and_tab_close_requests_native_history_refresh, test_environment_runtime_root_materialization_owns_passive_session_refresh]
+  verification:
+    static_check: '2026-07-29 LR-199 full production caller inventory passes after removing handle_file_tree_event from provider-discovery owners; negative guard rejects refresh calls in TerminalSessionBootstrapped.'
+    focused_tests: '2026-07-29 generic bootstrap no-scan, passive coalescing, agent-close history takeover and runtime HOME first-discovery tests passed 4/4.'
+    cargo_check: '2026-07-29 MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs passed.'
+    gui_or_runtime: '2026-07-29 current-source release AshideLocal.app built, strict codesign verified and started with isolated app identity. Cold start committed exactly one 89-session scan; the subsequent ordinary shell Received Bootstrapped hook produced no second scan and no stale generation.'
+- id: LR-200
+  status: verified
+  category: session_navigator_viewported_render_projection
+  discovered_at: '2026-07-29'
+  summary: "Session Navigator 的 ClippedScrollable 只裁剪 paint；每帧仍 clone/filter 全量 session、构造所有 Hoverable/Draggable/drop target，89+ 条本地和 82+ 条远端记录会放大 UI 热路径。"
+  root_cause: "render 直接把 committed model 的整组 rows 展开成 Flex column，缺少以 stable reorder unit 为几何 item 的 viewport projection；若直接按 row 替换为 index list，又会破坏 split unit、scroll identity 和 SavePosition sidecar anchor。"
+  target_invariant: "EnvironmentTable committed SessionNavigatorModel 的 revision 是唯一 projection 更新边界。VerticalTabs 仅生成 render-only ReorderUnit viewport payload；ListState index 永不进入 stable state。query/order/content 变化精确 reconcile count/height，top unit 以 stable identity 保持；离屏或缺 anchor 的 detail sidecar fail closed。"
+  spec_path: docs/SESSION_NAVIGATOR_SPEC.yaml
+  spec_matrix_id: SN-SESSION-NAVIGATOR-VIEWPORTED-PROJECTION-69
+  capability_matrix: 'Session Navigator viewported render projection'
+  static_check: script/check_local_remote_parity
+  reused_abstractions: [SessionNavigatorModel, SessionNavigatorRowIdentity, ReorderUnit, ListState, SavePosition, VerticalTabsDetailTarget]
+  removed_parallel_paths: [ClippedScrollable full session column, render-time full row element construction, leaf-level viewport/drop projection, stale offscreen sidecar fallback]
+  shared_paths: [app/src/workspace/view/session_navigator.rs, app/src/workspace/view/session_navigator_reducer.rs, app/src/workspace/view/vertical_tabs.rs, crates/warpui_core/src/elements/viewported_list.rs]
+  required_tests: [session_navigator_viewport_uses_reorder_units_and_stable_identities, session_navigator_viewport_static_guard]
+  verification:
+    static_check: '2026-07-29 ./script/check_local_remote_parity passed; LR-200 locks committed-model revision, unique ListState panel, ReorderUnit projection, index-only geometry, unit-boundary insertion targets, and stale detail-anchor rejection with negative probes.'
+    focused_tests: '2026-07-29 cargo test -p warp --lib --features gui,local_fs session_navigator_viewport -- --nocapture passed 2/2: split siblings collapse to one canonical ReorderUnit viewport identity and the render path rejects the old full-column adapter.'
+    cargo_check: '2026-07-29 cargo check -p warp --features gui,local_fs passed.'
+    gui_or_runtime: '2026-07-29 TERM=xterm-256color ./script/run rebuilt target/debug/bundle/osx/AshideDev.app, assembled bundled resources, codesigned it and opened the current checkout. Startup logs opened windows and completed provider discovery without a viewport panic; this shell has no Accessibility/Screen Recording permission, so visual drag/scroll interaction is not claimed.'
+- id: LR-201
+  status: in_progress
+  category: session_navigator_incremental_command_palette_search
+  discovered_at: '2026-07-29'
+  summary: "会话命令面板每个字符都跨 window/Workspace 重建 membership，Tantivy 每次 query 重新建索引；89+ 本地和 82+ 远端条目放大输入热路径。"
+  root_cause: "搜索层拥有了 live discovery 和 index lifecycle，绕过 EnvironmentTable committed SessionNavigatorModel；因此 query 同时承担 membership、字符串 materialization 和 Tantivy build。"
+  target_invariant: "canonical reducer commit 后 Workspace 只发布本 window 已提交 projection，live data 只能 enrich 已存在行；WorkspaceRegistry event 驱动 DataSource 刷新派生 index，query 仅匹配当前 generation，绝不重新发现 membership 或 build index。"
+  spec_path: docs/SESSION_NAVIGATOR_SPEC.yaml
+  spec_matrix_id: SN-SESSION-NAVIGATOR-INCREMENTAL-SEARCH-70
+  capability_matrix: 'Session Navigator incremental command-palette search projection'
+  static_check: script/check_local_remote_parity
+  reused_abstractions: [SessionNavigatorModel, "Workspace::apply_session_navigator_reduction", WorkspaceRegistry, SessionNavigationData, command palette navigation DataSource]
+  removed_parallel_paths: [query-time Workspace enumeration, "query-time SessionNavigationData::all_sessions", query-time Tantivy rebuild, search-owned live membership collection]
+  shared_paths: [app/src/workspace/registry.rs, app/src/workspace/view/session_navigator.rs, app/src/search/command_palette/navigation/search.rs, app/src/search/command_palette/navigation/data_source.rs]
+  required_tests: [session_search_projection_is_window_scoped_and_unregister_clears_it, session_search_projection_event_reaches_derived_index_owner, full_text_session_search_reuses_published_projection_until_generation_changes, session_search_static_guard]
+  verification:
+    focused_tests: '2026-07-29 focused registry partition/close, registry event delivery, full-text generation refresh and static guard tests passed; navigation::search passed 11/11.'
+    cargo_check: '2026-07-29 MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs passed.'
+    gui_or_runtime: '2026-07-29 TERM=xterm-256color ./script/run rebuilt, bundled, ad-hoc codesigned and opened target/debug/bundle/osx/AshideDev.app. macOS routed launch to the pre-existing old AshideDev process, and this shell lacks Accessibility/Screen Recording permission, so current-code visual input behavior is not claimed; tracker remains in_progress until an isolated current-process check.'
+- id: LR-202
+  status: in_progress
+  category: environment_provider_quick_picker_keyboard
+  discovered_at: '2026-07-29'
+  summary: "Environment Strip + 通过 hover 打开且立即显式刷新 SSH catalog；popover 没有 query、selection 或 keyboard path，鼠标经过会产生不必要副作用。"
+  root_cause: "picker 把 transient presentation state 简化为一个 bool，并把 open 与 I/O intent 绑定；候选列表渲染直接消费 catalog，没有 canonical keyboard selection owner。"
+  target_invariant: "Workspace 仅持有 ephemeral query/selected stable catalog identity，SshTargetCatalog 继续唯一拥有 committed candidates 和 refresh lifecycle。显式打开先显示已提交候选，键盘路径复用 OpenEnvironmentProviderCandidate typed action，hover 不得打开或刷新。"
+  spec_path: docs/LOCAL_REMOTE_PARITY_SPEC.yaml
+  spec_matrix_id: ENVIRONMENT-PROVIDER-QUICK-PICKER-KEYBOARD-71
+  capability_matrix: 'Environment provider quick picker explicit keyboard interaction'
+  static_check: script/check_local_remote_parity
+  reused_abstractions: [SshTargetCatalog, EnvironmentProviderCandidate, EditorView, "WorkspaceAction::OpenEnvironmentProviderCandidate", Workspace focus restoration]
+  removed_parallel_paths: [hover-open mutation, open-time ExplicitRefresh, mouse-only candidate activation, index-based picker selection]
+  shared_paths: [app/src/workspace/view.rs, app/src/workspace/action.rs, app/src/workspace/environment_provider.rs, app/src/workspace/view_test.rs]
+  required_tests: [environment_provider_quick_picker_filter_and_selection_are_stable, environment_provider_quick_picker_static_guard]
+  verification:
+    focused_tests: '2026-07-29 cargo test -p warp --lib --features gui,local_fs environment_provider_quick_picker --no-fail-fast passed (2/2): case-insensitive alias/title/detail filtering preserves or re-normalizes stable catalog aliases; static guard covers no hover state/I/O, separate ExplicitRefresh, keyboard event routing and index-free selection.'
+    cargo_check: '2026-07-29 MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs passed.'
+    gui_or_runtime: 'pending: the current shell has no Accessibility/Screen Recording permission, and an existing AshideDev process can receive macOS launch forwarding. Do not mark verified until an isolated current-checkout process exercises click-open, query, Up/Down, Enter, Escape, Refresh, empty/loading/error and current/open/dormant row states.'
+- id: LR-203
+  status: in_progress
+  category: session_navigator_keyboard_cursor
+  discovered_at: '2026-07-29'
+  summary: "Session Navigator 搜索输入只过滤文本；会话激活、重命名、置顶和删除仍主要依赖鼠标，且不能把键盘焦点误写入 Environment-owned canonical selection。"
+  root_cause: "VerticalTabs viewport 已有稳定 RowId projection 与 ListState 几何，但没有 UI-only keyboard cursor owner；若直接复用 reducer selected_row_id 或 list index，会混淆 canonical selection、坐标和短生命周期交互状态。"
+  target_invariant: "VerticalTabsPanelState 仅持有 transient SessionNavigatorRowIdentity cursor，在 committed、query-filtered viewport rows 中归一化；Up/Down 使用 flattened stable projection，Enter 复用 ActivateRestoredWorkspaceSession。cursor 永不持久化、永不写 reducer selection，ListState index 只用于 scroll-to-visible。"
+  spec_path: docs/SESSION_NAVIGATOR_SPEC.yaml
+  spec_matrix_id: SN-SESSION-NAVIGATOR-KEYBOARD-CURSOR-72
+  capability_matrix: 'Session Navigator keyboard cursor'
+  static_check: script/check_local_remote_parity
+  reused_abstractions: [SessionNavigatorRowIdentity, VerticalTabsPanelState, SessionNavigatorViewportProjection, ListState, "WorkspaceAction::ActivateRestoredWorkspaceSession"]
+  removed_parallel_paths: [mouse-only Navigator activation, reducer-selection-backed keyboard focus, index-backed cursor, keyboard-owned session mutation]
+  shared_paths: [app/src/workspace/view.rs, app/src/workspace/view/vertical_tabs.rs, app/src/workspace/view_test.rs, docs/SESSION_NAVIGATOR_SPEC.yaml, docs/LOCAL_REMOTE_PARITY_SPEC.yaml, docs/design/local-remote-capability-matrix.csv, script/check_local_remote_parity]
+  required_tests: [session_navigator_keyboard_cursor_normalizes_by_stable_identity, session_navigator_keyboard_cursor_static_guard]
+  verification:
+    static_check: '2026-07-29 ./script/check_local_remote_parity: LR-203 static contract and index/reducer-write negative probes passed. The aggregate script remains non-zero only because LR-201/LR-202/LR-203 intentionally remain in_progress until isolated current-checkout GUI/runtime confirmation.'
+    focused_tests: '2026-07-29 cargo test -p warp --lib --features gui,local_fs session_navigator_keyboard_cursor --no-fail-fast passed (2/2): stable RowId + authority normalization survives reorder, query/source removal clears cursor, edge navigation clamps, and source guard locks UI-only ownership plus Enter typed-action routing.'
+    cargo_check: '2026-07-29 MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs passed.'
+    gui_or_runtime: 'pending: verify in an isolated current-checkout macOS process (not launch-forwarded to an old AshideDev instance): search input query, Up/Down, Enter on historical/live/restoring/renaming rows, Escape clears both query text and cursor, scroll-to-visible across split units, query no-match and source deletion/reorder. Current shell lacks Accessibility/Screen Recording permission; no old app process was killed.'
+- id: LR-204
+  status: in_progress
+  category: session_navigator_local_process_scan_coalescing
+  discovered_at: '2026-07-29'
+  summary: "当前 checkout 冷启动恢复 3 个窗口时，本地 provider discovery 对相同输入完成了 3 次 scan（577 ms、246 ms、246 ms），单 Workspace 的 in-flight token 无法跨窗口合并。"
+  root_cause: "EnvironmentTable 的 scan token 正确地归属每个 Workspace canonical projection，但 source-read transaction 也被错误地局限在同一表内；恢复多个 local Workspace 时共享的 provider store 被重复读取。"
+  target_invariant: "WorkspaceRegistry 只协调 process-scoped、input-equivalent 的 local source worker；每个 Workspace 继续以自己的 EnvironmentTable token 提交或保留 projection。显式 refresh 只替换 source worker generation，不遗弃既有 passive recipient。"
+  spec_path: docs/LOCAL_REMOTE_PARITY_SPEC.yaml
+  spec_matrix_id: SESSION-NAVIGATOR-LOCAL-SCAN-COORDINATION-73
+  capability_matrix: 'Session Navigator process-scoped local scan coordination'
+  static_check: script/check_local_remote_parity
+  reused_abstractions: [WorkspaceRegistry, EnvironmentTable indexed scan token, EnvironmentSessionRefreshIntent, "Workspace::try_scan_terminal_cli_agent_session_discovery"]
+  removed_parallel_paths: [per-window duplicate local provider worker, stale worker delivery after explicit refresh]
+  shared_paths: [app/src/workspace/registry.rs, app/src/workspace/registry_tests.rs, app/src/workspace/view.rs, app/src/workspace/environment_table.rs]
+  required_tests: [local_cli_agent_scan_coalesces_matching_workspaces_and_explicit_refresh_preempts_safely, local_cli_agent_scan_never_coalesces_different_source_scopes, local_cli_agent_scan_never_coalesces_different_observed_provider_sets, local_cli_agent_session_refresh_runs_blocking_scan_off_ui_thread]
+  verification:
+    focused_tests: '2026-07-29 exact LR-204 tests passed 4/4: matching windows coalesce; explicit refresh preempts stale generation without losing passive recipients; scope and observed-provider input differences never coalesce; local worker remains off the UI thread and fans out only through recipient token commits.'
+    cargo_check: '2026-07-29 MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs passed after coordinator integration and static-gate hardening.'
+    gui_or_runtime: 'pending: rebuild an isolated current checkout and confirm a cold restore with equal local workspaces emits one provider scan transaction, while different scope remains independent.'

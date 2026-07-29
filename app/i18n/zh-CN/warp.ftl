@@ -2322,6 +2322,7 @@ workspace-environment-provider-picker-refresh-error = 刷新失败：{ $message 
 workspace-environment-provider-picker-key-auth = key
 workspace-environment-provider-picker-alias-only = OpenSSH 别名
 workspace-environment-provider-picker-empty = 没有找到可用的 Host 条目。
+workspace-environment-provider-picker-no-matches = 没有匹配的环境目标。
 workspace-environment-provider-picker-not-found = 未找到 ~/.ssh/config。
 workspace-environment-provider-picker-error = 无法读取 provider 目标：{ $message }
 workspace-restored-sessions-agent-fallback = agent 会话

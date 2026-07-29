@@ -841,6 +841,10 @@ message CliAgentSessionStoreRoots {
   string home_dir = 1;
   string claude_config_dir = 2;
   string codex_home = 3;
+  string opencode_data_dir = 4;
+  string copilot_home = 5;
+  string pi_agent_home = 6;
+  string omp_agent_home = 7;
 }
 
 // Client → server: scan recent Claude/Codex session files and return a
@@ -854,6 +858,9 @@ message ScanCliAgentSessions {
   // The daemon only uses this to distinguish first-run empty stores from a
   // temporarily missing previously-observed provider source.
   repeated string previously_observed_agents = 4;
+  // Canonical workspace roots owned by the requesting Environment. Sessions
+  // under these roots survive the global recent-session quota.
+  repeated string scope_paths = 5;
 }
 
 message CliAgentSessionRecord {

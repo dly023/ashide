@@ -1,7 +1,7 @@
 //! Agent session discovery orchestration.
 
 #[cfg(feature = "local_fs")]
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 #[cfg(feature = "local_fs")]
 use std::fs;
 #[cfg(feature = "local_fs")]
@@ -9,15 +9,19 @@ use std::io;
 #[cfg(feature = "local_fs")]
 use std::path::{Path, PathBuf};
 #[cfg(feature = "local_fs")]
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "local_fs")]
-use chrono::DateTime;
-#[cfg(feature = "local_fs")]
-use serde::{de::IgnoredAny, Deserialize};
-
 #[cfg(feature = "local_fs")]
 use crate::terminal::CLIAgent;
+#[cfg(feature = "local_fs")]
+use diesel::connection::SimpleConnection;
+#[cfg(feature = "local_fs")]
+use diesel::prelude::*;
+#[cfg(feature = "local_fs")]
+use diesel::sql_types::{BigInt, Nullable, Text};
+#[cfg(feature = "local_fs")]
+use rayon::prelude::*;
 
 #[cfg(feature = "local_fs")]
 use super::error::CliAgentSessionScanError;
@@ -33,14 +37,19 @@ use super::policy::{
     sort_recent_files, CliAgentSessionSource, RecentJsonlFile,
 };
 #[cfg(feature = "local_fs")]
-use super::roots::{normalize_cli_agent_session_cwd, CliAgentStoreRoots};
+use super::roots::{is_omp_session_source, normalize_cli_agent_session_cwd, CliAgentStoreRoots};
 
 /// Agent capability registry 对 session discovery provider 的穷尽声明。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum AgentSessionDiscoveryProvider {
     Claude,
     Codex,
-    Jcode,
+    Droid,
+    OpenCode,
+    Copilot,
+    Pi,
+    Cursor,
+    Antigravity,
     Omp,
 }
 
@@ -50,6 +59,7 @@ pub(crate) enum AgentSessionDiscoveryProvider {
 pub(crate) struct AgentSessionDiscoveryPlan {
     providers: Vec<AgentSessionDiscoveryProvider>,
     logical_limit: usize,
+    scope_paths: Vec<PathBuf>,
 }
 
 /// provider session source 的稳定类型，不把 path 编码规则泄漏给 transport。
@@ -58,6 +68,10 @@ pub(crate) struct AgentSessionDiscoveryPlan {
 pub(crate) enum AgentSessionDiscoverySource {
     Transcript(PathBuf),
     CodexIndexEntry {
+        path: PathBuf,
+        provider_session_id: String,
+    },
+    OpenCodeSqliteEntry {
         path: PathBuf,
         provider_session_id: String,
     },
@@ -72,6 +86,10 @@ impl AgentSessionDiscoverySource {
                 path,
                 provider_session_id,
             } => format!("{}:{provider_session_id}", path.to_string_lossy()),
+            Self::OpenCodeSqliteEntry {
+                path,
+                provider_session_id,
+            } => format!("{}#{provider_session_id}", path.to_string_lossy()),
         }
     }
 
@@ -133,7 +151,12 @@ impl AgentSessionDiscoveryProvider {
         match self {
             Self::Claude => CLIAgent::Claude,
             Self::Codex => CLIAgent::Codex,
-            Self::Jcode => CLIAgent::Jcode,
+            Self::Droid => CLIAgent::Droid,
+            Self::OpenCode => CLIAgent::OpenCode,
+            Self::Copilot => CLIAgent::Copilot,
+            Self::Pi => CLIAgent::Pi,
+            Self::Cursor => CLIAgent::CursorCli,
+            Self::Antigravity => CLIAgent::Antigravity,
             Self::Omp => CLIAgent::Omp,
         }
     }
@@ -182,7 +205,19 @@ impl AgentSessionDiscoveryPlan {
         Self {
             providers,
             logical_limit,
+            scope_paths: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_scope_paths(
+        mut self,
+        scope_paths: impl IntoIterator<Item = PathBuf>,
+    ) -> Self {
+        self.scope_paths = scope_paths
+            .into_iter()
+            .filter_map(|path| fs::canonicalize(path).ok())
+            .collect();
+        self
     }
 
     #[cfg(test)]
@@ -198,6 +233,7 @@ impl AgentSessionDiscoveryPlan {
         Self {
             providers,
             logical_limit,
+            scope_paths: Vec::new(),
         }
     }
 
@@ -213,23 +249,88 @@ impl AgentSessionDiscoveryPlan {
             };
         }
 
+        enum ProviderScan {
+            Records(Vec<AgentSessionDiscoveryRecord>),
+            SourceMissing(AgentSessionDiscoveryProvider),
+        }
+
+        let scan_started_at = Instant::now();
+        let provider_scans = self
+            .providers
+            .par_iter()
+            .map(|provider| {
+                let provider_started_at = Instant::now();
+                let result = match provider_source_exists(*provider, roots) {
+                    Err(error) => Err(error),
+                    Ok(false) if previously_observed_providers.contains(provider) => {
+                        Ok(ProviderScan::SourceMissing(*provider))
+                    }
+                    Ok(_) => scan_agent_session_provider(*provider, roots, self.logical_limit)
+                        .map(ProviderScan::Records),
+                };
+                (*provider, provider_started_at.elapsed(), result)
+            })
+            .collect::<Vec<_>>();
+
         let mut records = Vec::new();
-        for provider in &self.providers {
-            let source_exists = match provider_source_exists(*provider, roots) {
-                Ok(source_exists) => source_exists,
-                Err(error) => return AgentSessionDiscoveryResult::Failed(error),
-            };
-            if previously_observed_providers.contains(provider) && !source_exists {
-                return AgentSessionDiscoveryResult::SourceMissing(*provider);
+        for (provider, elapsed, result) in provider_scans {
+            match result {
+                Ok(ProviderScan::Records(provider_records)) => {
+                    log::info!(
+                        "Session Navigator discovery provider {provider:?} scanned {} records in {} ms",
+                        provider_records.len(),
+                        elapsed.as_millis(),
+                    );
+                    records.extend(provider_records);
+                }
+                Ok(ProviderScan::SourceMissing(provider)) => {
+                    log::info!(
+                        "Session Navigator discovery provider {provider:?} source disappeared after {} ms",
+                        elapsed.as_millis(),
+                    );
+                    return AgentSessionDiscoveryResult::SourceMissing(provider);
+                }
+                Err(error) => {
+                    log::warn!(
+                        "Session Navigator discovery provider {provider:?} failed after {} ms: {error}",
+                        elapsed.as_millis(),
+                    );
+                    return AgentSessionDiscoveryResult::Failed(error);
+                }
             }
-            match scan_agent_session_provider(*provider, roots, self.logical_limit) {
-                Ok(provider_records) => records.extend(provider_records),
-                Err(error) => return AgentSessionDiscoveryResult::Failed(error),
+        }
+        log::info!(
+            "Session Navigator discovery scanned {} providers in {} ms",
+            self.providers.len(),
+            scan_started_at.elapsed().as_millis(),
+        );
+
+        let mut scope_records = records
+            .iter()
+            .filter(|record| {
+                record.cwd.as_deref().is_some_and(|cwd| {
+                    let cwd = Path::new(cwd);
+                    self.scope_paths
+                        .iter()
+                        .any(|scope| cwd == scope || cwd.starts_with(scope))
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut limited = limit_cli_agent_session_sources(records, self.logical_limit);
+        let mut selected = limited
+            .iter()
+            .map(|record| (record.agent, record.provider_session_id.clone()))
+            .collect::<HashSet<_>>();
+        for record in scope_records.drain(..) {
+            let identity = (record.agent, record.provider_session_id.clone());
+            if selected.insert(identity) {
+                limited.push(record);
             }
         }
         AgentSessionDiscoveryResult::Complete {
             providers: self.providers.clone(),
-            records: limit_cli_agent_session_sources(records, self.logical_limit),
+            records: limited,
         }
     }
 }
@@ -254,14 +355,26 @@ impl CliAgentSessionSource for AgentSessionDiscoveryRecord {
 }
 
 #[cfg(feature = "local_fs")]
-fn provider_source_exists(
+pub(crate) fn provider_source_exists(
     provider: AgentSessionDiscoveryProvider,
     roots: &CliAgentStoreRoots,
 ) -> Result<bool, CliAgentSessionScanError> {
     let paths = match provider {
         AgentSessionDiscoveryProvider::Claude => vec![roots.claude_projects()],
         AgentSessionDiscoveryProvider::Codex => vec![roots.codex_sessions(), roots.codex_index()],
-        AgentSessionDiscoveryProvider::Jcode => vec![roots.jcode_sessions()],
+        AgentSessionDiscoveryProvider::Droid => {
+            vec![roots.droid_sessions(), roots.droid_projects()]
+        }
+        AgentSessionDiscoveryProvider::OpenCode => {
+            vec![
+                roots.opencode_legacy_sessions(),
+                roots.opencode_databases_dir(),
+            ]
+        }
+        AgentSessionDiscoveryProvider::Copilot => vec![roots.copilot_sessions()],
+        AgentSessionDiscoveryProvider::Pi => vec![roots.pi_sessions()],
+        AgentSessionDiscoveryProvider::Cursor => vec![roots.cursor_projects()],
+        AgentSessionDiscoveryProvider::Antigravity => vec![roots.antigravity_brain()],
         AgentSessionDiscoveryProvider::Omp => vec![roots.omp_sessions()],
     };
     paths.into_iter().try_fold(false, |found, path| {
@@ -310,21 +423,44 @@ pub(crate) fn scan_agent_session_provider(
             )?);
             Ok(records)
         }
-        AgentSessionDiscoveryProvider::Jcode => {
-            let mut records = Vec::new();
-            for file in recent_jcode_session_files(
-                &roots.jcode_sessions(),
-                crate::app_state::WORKSPACE_SESSION_NAVIGATOR_PHYSICAL_SOURCE_LIMIT_PER_PROVIDER,
-            )? {
-                if records.len() == logical_limit {
-                    break;
-                }
-                if let Some(record) = parse_jcode_discovery_record(file, roots)? {
-                    records.push(record);
-                }
-            }
-            Ok(records)
+        AgentSessionDiscoveryProvider::Droid => scan_jsonl_provider_roots(
+            CLIAgent::Droid,
+            &[roots.droid_sessions(), roots.droid_projects()],
+            logical_limit,
+            roots,
+            parse_droid_discovery_record,
+        ),
+        AgentSessionDiscoveryProvider::OpenCode => {
+            scan_opencode_discovery_records(roots, logical_limit)
         }
+        AgentSessionDiscoveryProvider::Copilot => scan_jsonl_provider_roots(
+            CLIAgent::Copilot,
+            &[roots.copilot_sessions()],
+            logical_limit,
+            roots,
+            parse_copilot_discovery_record,
+        ),
+        AgentSessionDiscoveryProvider::Pi => scan_jsonl_provider_roots(
+            CLIAgent::Pi,
+            &[roots.pi_sessions()],
+            logical_limit,
+            roots,
+            parse_pi_discovery_record,
+        ),
+        AgentSessionDiscoveryProvider::Cursor => scan_jsonl_provider_roots(
+            CLIAgent::CursorCli,
+            &[roots.cursor_projects()],
+            logical_limit,
+            roots,
+            parse_cursor_discovery_record,
+        ),
+        AgentSessionDiscoveryProvider::Antigravity => scan_jsonl_provider_roots(
+            CLIAgent::Antigravity,
+            &[roots.antigravity_brain()],
+            logical_limit,
+            roots,
+            parse_antigravity_discovery_record,
+        ),
         AgentSessionDiscoveryProvider::Omp => recent_omp_session_files(
             &roots.omp_sessions(),
             logical_limit,
@@ -334,6 +470,513 @@ pub(crate) fn scan_agent_session_provider(
         .map(|file| parse_omp_discovery_record(file, roots))
         .collect(),
     }
+}
+
+#[cfg(feature = "local_fs")]
+fn scan_jsonl_provider_roots(
+    _agent: CLIAgent,
+    provider_roots: &[PathBuf],
+    logical_limit: usize,
+    roots: &CliAgentStoreRoots,
+    parser: fn(
+        RecentJsonlFile,
+        &CliAgentStoreRoots,
+    ) -> Result<Option<AgentSessionDiscoveryRecord>, CliAgentSessionScanError>,
+) -> Result<Vec<AgentSessionDiscoveryRecord>, CliAgentSessionScanError> {
+    let physical_limit =
+        crate::app_state::WORKSPACE_SESSION_NAVIGATOR_PHYSICAL_SOURCE_LIMIT_PER_PROVIDER;
+    let mut files = Vec::new();
+    for provider_root in provider_roots {
+        files.extend(recent_jsonl_files(
+            provider_root,
+            physical_limit,
+            Some(physical_limit),
+        )?);
+    }
+    sort_recent_files(&mut files);
+    let mut records = Vec::new();
+    for file in files {
+        if let Some(record) = parser(file, roots)? {
+            records.push(record);
+        }
+    }
+    Ok(limit_cli_agent_session_sources(records, logical_limit))
+}
+
+#[cfg(feature = "local_fs")]
+fn generic_session_record(
+    agent: CLIAgent,
+    file: RecentJsonlFile,
+    roots: &CliAgentStoreRoots,
+    provider_session_id: Option<String>,
+    label: Option<String>,
+    cwd: Option<String>,
+) -> AgentSessionDiscoveryRecord {
+    let fallback_id = file
+        .path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    AgentSessionDiscoveryRecord {
+        agent,
+        provider_session_id: provider_session_id.unwrap_or(fallback_id),
+        source: AgentSessionDiscoverySource::Transcript(file.path),
+        label: label.and_then(|label| super::parse::first_message_excerpt(&label)),
+        cwd: normalize_cli_agent_session_cwd(cwd.as_deref(), roots),
+        modified_epoch_millis: system_time_to_epoch_millis(file.modified),
+    }
+}
+
+#[cfg(feature = "local_fs")]
+fn json_content_text(value: &serde_json::Value) -> Option<String> {
+    value.as_str().map(str::to_owned).or_else(|| {
+        value.as_array().and_then(|items| {
+            items.iter().find_map(|item| {
+                first_string(&[string_field(item, "text"), string_field(item, "content")])
+            })
+        })
+    })
+}
+
+#[cfg(feature = "local_fs")]
+fn json_message_text(value: &serde_json::Value) -> Option<String> {
+    first_string(&[
+        string_field(value, "text"),
+        string_field(value, "content"),
+        super::parse::nested_string(value, &["message", "content"]),
+        super::parse::nested_string(value, &["data", "content"]),
+        super::parse::nested_string(value, &["data", "transformedContent"]),
+    ])
+    .or_else(|| value.get("content").and_then(json_content_text))
+    .or_else(|| {
+        value
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(json_content_text)
+    })
+    .or_else(|| {
+        value
+            .get("data")
+            .and_then(|data| data.get("content"))
+            .and_then(json_content_text)
+    })
+}
+
+#[cfg(feature = "local_fs")]
+fn record_role(value: &serde_json::Value) -> Option<&str> {
+    string_field(value, "role")
+        .or_else(|| super::parse::nested_string(value, &["message", "role"]))
+        .or_else(|| super::parse::nested_string(value, &["data", "role"]))
+}
+
+#[cfg(feature = "local_fs")]
+fn parse_generic_jsonl_metadata(
+    path: &Path,
+) -> Result<(Option<String>, Option<String>, Option<String>), CliAgentSessionScanError> {
+    let values = read_jsonl_values_from_path(path, Some(300))?;
+    let mut session_id = None;
+    let mut cwd = None;
+    let mut title = None;
+    for value in &values {
+        if session_id.is_none() {
+            session_id = first_string(&[
+                string_field(value, "session_id"),
+                string_field(value, "sessionId"),
+                string_field(value, "id"),
+                super::parse::nested_string(value, &["data", "sessionId"]),
+            ]);
+        }
+        if cwd.is_none() {
+            cwd = first_string(&[
+                string_field(value, "cwd"),
+                string_field(value, "directory"),
+                string_field(value, "working_directory"),
+                super::parse::nested_string(value, &["data", "cwd"]),
+            ]);
+        }
+        if title.is_none() {
+            title = first_string(&[
+                string_field(value, "title"),
+                string_field(value, "customTitle"),
+                super::parse::nested_string(value, &["data", "title"]),
+            ]);
+        }
+        if title.is_none() && record_role(value) == Some("user") {
+            title = json_message_text(value);
+        }
+        if title.is_none() && string_field(value, "type") == Some("user.message") {
+            title = json_message_text(value);
+        }
+    }
+    Ok((session_id, cwd, title))
+}
+
+#[cfg(feature = "local_fs")]
+fn parse_droid_discovery_record(
+    file: RecentJsonlFile,
+    roots: &CliAgentStoreRoots,
+) -> Result<Option<AgentSessionDiscoveryRecord>, CliAgentSessionScanError> {
+    let (session_id, cwd, title) = parse_generic_jsonl_metadata(&file.path)?;
+    Ok(Some(generic_session_record(
+        CLIAgent::Droid,
+        file,
+        roots,
+        session_id,
+        title,
+        cwd,
+    )))
+}
+
+#[cfg(feature = "local_fs")]
+fn parse_copilot_discovery_record(
+    file: RecentJsonlFile,
+    roots: &CliAgentStoreRoots,
+) -> Result<Option<AgentSessionDiscoveryRecord>, CliAgentSessionScanError> {
+    let (session_id, cwd, title) = parse_generic_jsonl_metadata(&file.path)?;
+    Ok(Some(generic_session_record(
+        CLIAgent::Copilot,
+        file,
+        roots,
+        session_id,
+        title,
+        cwd,
+    )))
+}
+
+#[cfg(feature = "local_fs")]
+fn parse_pi_discovery_record(
+    file: RecentJsonlFile,
+    roots: &CliAgentStoreRoots,
+) -> Result<Option<AgentSessionDiscoveryRecord>, CliAgentSessionScanError> {
+    let (session_id, cwd, title) = parse_generic_jsonl_metadata(&file.path)?;
+    Ok(Some(generic_session_record(
+        CLIAgent::Pi,
+        file,
+        roots,
+        session_id,
+        title,
+        cwd,
+    )))
+}
+
+#[cfg(feature = "local_fs")]
+fn parse_cursor_discovery_record(
+    file: RecentJsonlFile,
+    roots: &CliAgentStoreRoots,
+) -> Result<Option<AgentSessionDiscoveryRecord>, CliAgentSessionScanError> {
+    if !file
+        .path
+        .components()
+        .any(|component| component.as_os_str() == "agent-transcripts")
+    {
+        return Ok(None);
+    }
+    let (session_id, cwd, title) = parse_generic_jsonl_metadata(&file.path)?;
+    Ok(Some(generic_session_record(
+        CLIAgent::CursorCli,
+        file,
+        roots,
+        session_id,
+        title,
+        cwd,
+    )))
+}
+
+#[cfg(feature = "local_fs")]
+fn parse_antigravity_discovery_record(
+    file: RecentJsonlFile,
+    roots: &CliAgentStoreRoots,
+) -> Result<Option<AgentSessionDiscoveryRecord>, CliAgentSessionScanError> {
+    if file.path.file_name().and_then(|name| name.to_str()) != Some("transcript.jsonl") {
+        return Ok(None);
+    }
+    let session_id = file
+        .path
+        .ancestors()
+        .nth(3)
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned());
+    let values = read_jsonl_values_from_path(&file.path, Some(300))?;
+    let title = values.iter().find_map(|value| {
+        let source = string_field(value, "source");
+        let kind = string_field(value, "type");
+        if matches!(source, Some("USER_EXPLICIT") | Some("USER"))
+            && matches!(kind, Some("USER_INPUT") | Some("REQUEST"))
+        {
+            let content = string_field(value, "content")?;
+            let content = content
+                .split_once("<USER_REQUEST>")
+                .map(|(_, content)| content.split("</USER_REQUEST>").next().unwrap_or(content))
+                .unwrap_or(content);
+            return super::parse::first_message_excerpt(content);
+        }
+        None
+    });
+    Ok(Some(generic_session_record(
+        CLIAgent::Antigravity,
+        file,
+        roots,
+        session_id,
+        title,
+        None,
+    )))
+}
+
+#[cfg(feature = "local_fs")]
+#[derive(QueryableByName)]
+struct SqliteColumnName {
+    #[diesel(sql_type = Text)]
+    name: String,
+}
+
+#[cfg(feature = "local_fs")]
+#[derive(QueryableByName)]
+struct OpenCodeSqliteSessionRow {
+    #[diesel(sql_type = Text)]
+    id: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    title: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    directory: Option<String>,
+    #[diesel(sql_type = BigInt)]
+    time_created: i64,
+    #[diesel(sql_type = BigInt)]
+    time_updated: i64,
+}
+
+#[cfg(feature = "local_fs")]
+fn scan_opencode_discovery_records(
+    roots: &CliAgentStoreRoots,
+    logical_limit: usize,
+) -> Result<Vec<AgentSessionDiscoveryRecord>, CliAgentSessionScanError> {
+    let physical_limit =
+        crate::app_state::WORKSPACE_SESSION_NAVIGATOR_PHYSICAL_SOURCE_LIMIT_PER_PROVIDER;
+    let mut sqlite_records = scan_opencode_sqlite_records(roots, physical_limit)?;
+    let sqlite_ids = sqlite_records
+        .iter()
+        .map(|record| record.provider_session_id.clone())
+        .collect::<HashSet<_>>();
+    let mut legacy_records =
+        recent_files_with_extensions(&roots.opencode_legacy_sessions(), &["json"], physical_limit)?
+            .into_iter()
+            .map(|file| parse_opencode_legacy_record(file, roots))
+            .collect::<Result<Vec<_>, _>>()?;
+    legacy_records.retain(|record| !sqlite_ids.contains(&record.provider_session_id));
+    sqlite_records.extend(legacy_records);
+    Ok(limit_cli_agent_session_sources(
+        sqlite_records,
+        logical_limit,
+    ))
+}
+
+#[cfg(feature = "local_fs")]
+fn scan_opencode_sqlite_records(
+    roots: &CliAgentStoreRoots,
+    physical_limit: usize,
+) -> Result<Vec<AgentSessionDiscoveryRecord>, CliAgentSessionScanError> {
+    let data_dir = roots.opencode_databases_dir();
+    let entries = match fs::read_dir(&data_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(CliAgentSessionScanError::io(
+                &data_dir,
+                "读取 OpenCode 数据目录",
+                error,
+            ));
+        }
+    };
+    let mut database_paths = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            CliAgentSessionScanError::io(&data_dir, "遍历 OpenCode 数据目录", error)
+        })?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if entry
+            .file_type()
+            .map_err(|error| {
+                CliAgentSessionScanError::io(&path, "读取 OpenCode 数据库文件类型", error)
+            })?
+            .is_file()
+            && name.starts_with("opencode")
+            && name.ends_with(".db")
+        {
+            database_paths.push(path);
+        }
+    }
+    database_paths.sort();
+
+    let mut records_by_id = HashMap::<String, AgentSessionDiscoveryRecord>::new();
+    for path in database_paths {
+        let mut connection = diesel::sqlite::SqliteConnection::establish(&path.to_string_lossy())
+            .map_err(|error| {
+            invalid_session_record_owned(&path, format!("打开 OpenCode SQLite: {error}"))
+        })?;
+        connection
+            .batch_execute("PRAGMA query_only = ON")
+            .map_err(|error| {
+                invalid_session_record_owned(&path, format!("设置 OpenCode SQLite 只读: {error}"))
+            })?;
+        let columns = diesel::sql_query("PRAGMA table_info(session)")
+            .load::<SqliteColumnName>(&mut connection)
+            .map_err(|error| {
+                invalid_session_record_owned(
+                    &path,
+                    format!("读取 OpenCode session schema: {error}"),
+                )
+            })?
+            .into_iter()
+            .map(|column| column.name)
+            .collect::<HashSet<_>>();
+        if !["id", "time_created", "time_updated"]
+            .iter()
+            .all(|column| columns.contains(*column))
+        {
+            continue;
+        }
+        let title = columns
+            .contains("title")
+            .then_some("title")
+            .unwrap_or("NULL");
+        let directory = columns
+            .contains("directory")
+            .then_some("directory")
+            .unwrap_or("NULL");
+        let parent = columns
+            .contains("parent_id")
+            .then_some("AND parent_id IS NULL")
+            .unwrap_or("");
+        let archived = columns
+            .contains("time_archived")
+            .then_some("AND time_archived IS NULL")
+            .unwrap_or("");
+        let query = format!(
+            "SELECT id, {title} AS title, {directory} AS directory, time_created, time_updated \
+             FROM session WHERE 1=1 {parent} {archived} \
+             ORDER BY CASE WHEN time_updated > 0 THEN time_updated ELSE time_created END DESC \
+             LIMIT {physical_limit}"
+        );
+        let rows = diesel::sql_query(query)
+            .load::<OpenCodeSqliteSessionRow>(&mut connection)
+            .map_err(|error| {
+                invalid_session_record_owned(&path, format!("读取 OpenCode sessions: {error}"))
+            })?;
+        for row in rows {
+            let modified_epoch_millis = if row.time_updated > 0 {
+                row.time_updated
+            } else {
+                row.time_created
+            };
+            let record = AgentSessionDiscoveryRecord {
+                agent: CLIAgent::OpenCode,
+                provider_session_id: row.id.clone(),
+                source: AgentSessionDiscoverySource::OpenCodeSqliteEntry {
+                    path: path.clone(),
+                    provider_session_id: row.id.clone(),
+                },
+                label: row
+                    .title
+                    .and_then(|title| super::parse::first_message_excerpt(&title)),
+                cwd: normalize_cli_agent_session_cwd(row.directory.as_deref(), roots),
+                modified_epoch_millis,
+            };
+            if records_by_id
+                .get(&row.id)
+                .is_none_or(|existing| existing.modified_epoch_millis < modified_epoch_millis)
+            {
+                records_by_id.insert(row.id, record);
+            }
+        }
+    }
+    Ok(records_by_id.into_values().collect())
+}
+
+#[cfg(feature = "local_fs")]
+fn parse_opencode_legacy_record(
+    file: RecentJsonlFile,
+    roots: &CliAgentStoreRoots,
+) -> Result<AgentSessionDiscoveryRecord, CliAgentSessionScanError> {
+    let value = serde_json::from_reader::<_, serde_json::Value>(
+        fs::File::open(&file.path).map_err(|error| {
+            CliAgentSessionScanError::io(&file.path, "读取 OpenCode legacy session", error)
+        })?,
+    )
+    .map_err(|error| {
+        invalid_session_record_owned(&file.path, format!("解析 OpenCode legacy session: {error}"))
+    })?;
+    let provider_session_id = string_field(&value, "id")
+        .map(str::to_owned)
+        .or_else(|| {
+            file.path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+        })
+        .ok_or_else(|| invalid_session_record(&file.path, "OpenCode legacy session 缺少 id"))?;
+    Ok(AgentSessionDiscoveryRecord {
+        agent: CLIAgent::OpenCode,
+        provider_session_id,
+        source: AgentSessionDiscoverySource::Transcript(file.path),
+        label: string_field(&value, "title").and_then(super::parse::first_message_excerpt),
+        cwd: normalize_cli_agent_session_cwd(string_field(&value, "directory"), roots),
+        modified_epoch_millis: value
+            .get("time")
+            .and_then(|time| time.get("updated").or_else(|| time.get("created")))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or_else(|| system_time_to_epoch_millis(file.modified)),
+    })
+}
+
+#[cfg(feature = "local_fs")]
+fn recent_files_with_extensions(
+    root: &Path,
+    extensions: &[&str],
+    physical_limit: usize,
+) -> Result<Vec<RecentJsonlFile>, CliAgentSessionScanError> {
+    let metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(CliAgentSessionScanError::io(
+                root,
+                "读取 session 目录",
+                error,
+            ))
+        }
+    };
+    if !metadata.file_type().is_dir() {
+        return Err(CliAgentSessionScanError::expected_directory(root));
+    }
+    let mut files = Vec::new();
+    let mut candidate_count = 0;
+    for entry in walkdir::WalkDir::new(root).follow_links(false) {
+        let entry = entry.map_err(|error| CliAgentSessionScanError::walk(root, error))?;
+        if !entry.file_type().is_file()
+            || !entry
+                .path()
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extensions.contains(&extension))
+        {
+            continue;
+        }
+        reserve_discovery_candidate(root, &mut candidate_count, Some(physical_limit))?;
+        let metadata = fs::metadata(entry.path()).map_err(|error| {
+            CliAgentSessionScanError::io(entry.path(), "读取 session metadata", error)
+        })?;
+        let modified = metadata.modified().map_err(|error| {
+            CliAgentSessionScanError::io(entry.path(), "读取 session mtime", error)
+        })?;
+        files.push(RecentJsonlFile {
+            path: entry.path().to_path_buf(),
+            modified,
+        });
+    }
+    sort_recent_files(&mut files);
+    Ok(files)
 }
 
 #[cfg(feature = "local_fs")]
@@ -406,92 +1049,6 @@ fn parse_codex_discovery_record(
 }
 
 #[cfg(feature = "local_fs")]
-fn parse_jcode_discovery_record(
-    file: RecentJsonlFile,
-    roots: &CliAgentStoreRoots,
-) -> Result<Option<AgentSessionDiscoveryRecord>, CliAgentSessionScanError> {
-    let session_file = fs::File::open(&file.path)
-        .map_err(|error| CliAgentSessionScanError::io(&file.path, "读取 Jcode session", error))?;
-    let metadata =
-        serde_json::from_reader::<_, JcodeDiscoveryMetadata>(session_file).map_err(|error| {
-            CliAgentSessionScanError::io(
-                &file.path,
-                "解析 Jcode session metadata",
-                io::Error::new(io::ErrorKind::InvalidData, error),
-            )
-        })?;
-    let provider_session_id = metadata
-        .id
-        .as_deref()
-        .filter(|id| !id.trim().is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| invalid_session_record(&file.path, "Jcode session 缺少非空 id"))?;
-    let file_stem = file
-        .path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .ok_or_else(|| invalid_session_record(&file.path, "Jcode session filename 无法解析"))?;
-    if !provider_session_id.starts_with("session_") || file_stem != provider_session_id {
-        return Err(invalid_session_record(
-            &file.path,
-            "Jcode session id 必须与 session_*.json filename 一致",
-        ));
-    }
-    if !jcode_session_is_default_discoverable(&metadata) {
-        return Ok(None);
-    }
-    let modified_epoch_millis = metadata
-        .updated_at
-        .as_deref()
-        .and_then(|updated_at| DateTime::parse_from_rfc3339(updated_at).ok())
-        .map(|updated_at| updated_at.timestamp_millis())
-        .unwrap_or_else(|| system_time_to_epoch_millis(file.modified));
-
-    Ok(Some(AgentSessionDiscoveryRecord {
-        agent: CLIAgent::Jcode,
-        provider_session_id,
-        source: AgentSessionDiscoverySource::Transcript(file.path),
-        label: first_string(&[metadata.title.as_deref(), metadata.short_name.as_deref()]),
-        cwd: normalize_cli_agent_session_cwd(metadata.working_dir.as_deref(), roots),
-        modified_epoch_millis,
-    }))
-}
-
-/// 只反序列化 Jcode default picker 可见性所需的 root metadata。messages
-/// 的每项都由 `IgnoredAny` 消耗，不会将 message content 保留到内存。
-#[cfg(feature = "local_fs")]
-#[derive(Deserialize)]
-struct JcodeDiscoveryMetadata {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    short_name: Option<String>,
-    #[serde(default)]
-    working_dir: Option<String>,
-    #[serde(default)]
-    updated_at: Option<String>,
-    #[serde(default)]
-    is_debug: bool,
-    #[serde(default)]
-    messages: Option<Vec<IgnoredAny>>,
-}
-
-/// Jcode 的默认 picker 会隐藏 self-dev/swarm debug 会话，且不展示没有
-/// 结构化 messages 的空 session。这里仅检查 root metadata 与数组长度；
-/// `parent_id` 不是可见性条件。
-#[cfg(feature = "local_fs")]
-fn jcode_session_is_default_discoverable(metadata: &JcodeDiscoveryMetadata) -> bool {
-    !metadata.is_debug && jcode_session_has_structural_messages(metadata.messages.as_deref())
-}
-
-#[cfg(feature = "local_fs")]
-fn jcode_session_has_structural_messages(messages: Option<&[IgnoredAny]>) -> bool {
-    messages.is_some_and(|messages| !messages.is_empty())
-}
-
-#[cfg(feature = "local_fs")]
 fn parse_omp_discovery_record(
     file: RecentJsonlFile,
     roots: &CliAgentStoreRoots,
@@ -537,6 +1094,15 @@ fn parse_omp_discovery_record(
 
 #[cfg(feature = "local_fs")]
 fn invalid_session_record(path: &Path, message: &'static str) -> CliAgentSessionScanError {
+    CliAgentSessionScanError::io(
+        path,
+        "解析 CLI-agent session metadata",
+        io::Error::new(io::ErrorKind::InvalidData, message),
+    )
+}
+
+#[cfg(feature = "local_fs")]
+fn invalid_session_record_owned(path: &Path, message: String) -> CliAgentSessionScanError {
     CliAgentSessionScanError::io(
         path,
         "解析 CLI-agent session metadata",
@@ -655,42 +1221,6 @@ pub(crate) fn recent_jsonl_files(
     Ok(files)
 }
 
-/// 发现 Jcode 正本目录中最近的 `session_*.json` 文件。
-///
-/// Jcode 的 `cache/session-picker-list-v1.json` 只是 picker cache，不是会话
-/// authority；`.bak` 同样不能代表当前 session state，因此两者均不在这里读取。
-#[cfg(feature = "local_fs")]
-pub(crate) fn recent_jcode_session_files(
-    root: &Path,
-    physical_limit: usize,
-) -> Result<Vec<RecentJsonlFile>, CliAgentSessionScanError> {
-    match fs::symlink_metadata(root) {
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(CliAgentSessionScanError::io(
-                root,
-                "读取 Jcode session 目录",
-                error,
-            ));
-        }
-    }
-    let mut candidate_count = 0;
-    let mut files = direct_regular_files(
-        root,
-        "读取 Jcode session 目录",
-        physical_limit,
-        &mut candidate_count,
-        |path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("session_") && name.ends_with(".json"))
-        },
-    )?;
-    sort_recent_files(&mut files);
-    Ok(files)
-}
-
 /// 发现 Omp 默认 storage 中恰好一层 project bucket 下的 `.jsonl` session。
 ///
 /// Omp 可能在同名目录中保存 tool log；只扫描 `sessions/*/*.jsonl`，不能递归
@@ -738,10 +1268,7 @@ pub(crate) fn recent_omp_session_files(
             "读取 Omp project session 目录",
             physical_limit,
             &mut candidate_count,
-            |path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "jsonl")
-            },
+            |path| is_omp_session_source(root, path),
         )?);
     }
     sort_and_limit_recent_files(&mut files, limit);

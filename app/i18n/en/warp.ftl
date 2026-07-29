@@ -2400,6 +2400,7 @@ workspace-environment-provider-picker-refresh-error = Refresh failed: { $message
 workspace-environment-provider-picker-key-auth = key
 workspace-environment-provider-picker-alias-only = OpenSSH alias
 workspace-environment-provider-picker-empty = No usable Host entries found.
+workspace-environment-provider-picker-no-matches = No matching environment targets.
 workspace-environment-provider-picker-not-found = ~/.ssh/config was not found.
 workspace-environment-provider-picker-error = Could not read provider targets: { $message }
 workspace-restored-sessions-agent-fallback = agent session

@@ -159,7 +159,7 @@ impl IndexedCliAgentSessionScanToken {
 /// scan generation、source observation 与 session projection 必须由
 /// [`EnvironmentTable`] 原子持有；delivery adapter 只能提供这个结果，不能自行
 /// 替换、过滤或推断删除。
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum IndexedCliAgentSessionScanOutcome {
     Complete {
         observed_agents: HashSet<CLIAgent>,
@@ -1087,6 +1087,14 @@ impl EnvironmentTable {
         token
     }
 
+    /// 被动 lifecycle reconciliation 只能合并同一逻辑 Environment 正在执行的
+    /// scan，不能以新的 token 饿死当前 worker。显式用户刷新仍会创建新 token，
+    /// 因而能抢占可能停滞的旧扫描。
+    pub(crate) fn has_indexed_cli_agent_session_scan_in_flight(&self, authority: &str) -> bool {
+        self.indexed_cli_agent_session_scan_by_navigation_key
+            .contains_key(&Self::projection_navigation_key(authority))
+    }
+
     pub(crate) fn commit_indexed_cli_agent_session_discovery<E>(
         &mut self,
         token: IndexedCliAgentSessionScanToken,
@@ -1392,9 +1400,9 @@ mod tests {
         let baseline = vec![
             indexed_session_for_agent("unrelated-claude", authority, CLIAgent::Claude),
             indexed_session_for_agent("target-codex", authority, CLIAgent::Codex),
-            indexed_session_for_agent("unrelated-jcode", authority, CLIAgent::Jcode),
+            indexed_session_for_agent("unrelated-omp", authority, CLIAgent::Omp),
         ];
-        let observed_agents = HashSet::from([CLIAgent::Claude, CLIAgent::Codex, CLIAgent::Jcode]);
+        let observed_agents = HashSet::from([CLIAgent::Claude, CLIAgent::Codex, CLIAgent::Omp]);
         let token = table.begin_indexed_cli_agent_session_scan(authority, None);
         assert!(table
             .commit_indexed_cli_agent_session_discovery(
@@ -1448,13 +1456,13 @@ mod tests {
                 .into_iter()
                 .map(|session| session.cli_agent_session_id.expect("fixture session id"))
                 .collect::<Vec<_>>(),
-            ["unrelated-claude", "unrelated-jcode"],
+            ["unrelated-claude", "unrelated-omp"],
             "only the explicitly deleted provider may leave the canonical collection",
         );
     }
 
     #[test]
-    fn remote_session_refresh_scan_failure_preserves_cached_rows() {
+    fn expanded_provider_failure_preserves_committed_collection() {
         let authority = "ssh:test";
         let mut table = EnvironmentTable::default();
         table.upsert(ssh_environment(authority));
@@ -1518,6 +1526,47 @@ mod tests {
         assert_eq!(
             table.indexed_cli_agent_sessions_for_authority(authority),
             vec![indexed_session("unrelated-newer", authority)]
+        );
+    }
+
+    #[test]
+    fn indexed_session_scan_in_flight_is_authority_scoped_and_clears_on_completion() {
+        let local_authority = "local";
+        let remote_authority = "ssh:test";
+        let mut table = EnvironmentTable::default();
+        table.upsert(ssh_environment(remote_authority));
+
+        assert!(
+            !table.has_indexed_cli_agent_session_scan_in_flight(local_authority),
+            "an authority without a token must accept its first passive scan"
+        );
+        assert!(
+            !table.has_indexed_cli_agent_session_scan_in_flight(remote_authority),
+            "independent authorities must not inherit each other's scan state"
+        );
+
+        let local_token = table.begin_indexed_cli_agent_session_scan(local_authority, None);
+        assert!(
+            table.has_indexed_cli_agent_session_scan_in_flight(local_authority),
+            "a pending local worker must coalesce later passive refreshes"
+        );
+        assert!(
+            !table.has_indexed_cli_agent_session_scan_in_flight(remote_authority),
+            "a local worker must not block a remote authority"
+        );
+
+        assert!(table
+            .commit_indexed_cli_agent_session_discovery(
+                local_token,
+                Ok::<_, &str>(IndexedCliAgentSessionScanOutcome::Complete {
+                    observed_agents: HashSet::new(),
+                    sessions: Vec::new(),
+                }),
+            )
+            .expect("current local completion commits"));
+        assert!(
+            !table.has_indexed_cli_agent_session_scan_in_flight(local_authority),
+            "completion must release the authority for a later passive refresh"
         );
     }
 

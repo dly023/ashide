@@ -55,7 +55,7 @@ impl DataSourceStore {
             ctx.add_model(|ctx| CommandBindingDataSource::new(binding_source.clone(), ctx));
 
         let sessions_data_source =
-            ctx.add_model(|_| navigation::DataSource::new(active_session_handle));
+            ctx.add_model(|ctx| navigation::DataSource::new(active_session_handle, ctx));
 
         let local_drive_data_source = ctx.add_model(local_drive::DataSource::new);
 

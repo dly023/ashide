@@ -3,9 +3,9 @@
 /// Bump this whenever protobuf compatibility would preserve decoding while changing
 /// request meaning or required fields. Initialize rejects every mismatch.
 ///
-/// Revision 6 requires `ScanCliAgentSessions` agent fields to use the canonical
-/// `CLIAgent` serialized identity rather than a CLI command prefix.
-pub const REMOTE_SERVER_PROTOCOL_REVISION: u32 = 6;
+/// Revision 7 extends `CliAgentSessionStoreRoots` and discovery semantics for
+/// Droid/OpenCode/Copilot/Pi/Cursor/Antigravity persisted sessions.
+pub const REMOTE_SERVER_PROTOCOL_REVISION: u32 = 7;
 
 pub mod auth;
 pub mod client;

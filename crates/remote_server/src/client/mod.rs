@@ -622,6 +622,7 @@ impl RemoteServerClient {
         roots: CliAgentSessionStoreRoots,
         enabled_agents: Vec<String>,
         previously_observed_agents: Vec<String>,
+        scope_paths: Vec<String>,
     ) -> Result<ScanCliAgentSessionsResponse, ClientError> {
         let request_id = RequestId::new();
         let msg = ClientMessage {
@@ -632,6 +633,7 @@ impl RemoteServerClient {
                     roots: Some(roots),
                     enabled_agents,
                     previously_observed_agents,
+                    scope_paths,
                 },
             )),
         };

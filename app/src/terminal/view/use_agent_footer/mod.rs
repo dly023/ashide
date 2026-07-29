@@ -121,8 +121,7 @@ fn rich_input_submit_strategy(agent: CLIAgent) -> RichInputSubmitStrategy {
     match agent {
         CLIAgent::Codex | CLIAgent::DeepSeek => RichInputSubmitStrategy::BracketedPaste,
         CLIAgent::Copilot => RichInputSubmitStrategy::BracketedPasteDelayedEnter,
-        CLIAgent::Jcode
-        | CLIAgent::Claude
+        CLIAgent::Claude
         | CLIAgent::OpenCode
         | CLIAgent::Auggie
         | CLIAgent::CursorCli

@@ -21,6 +21,7 @@ use session_display::{
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use crate::app_state::{WorkspaceSessionKind, WorkspaceSessionSnapshot};
@@ -67,15 +68,19 @@ use warp_core::ui::color::coloru_with_opacity;
 use warp_core::ui::theme::color::internal_colors;
 use warp_core::ui::theme::{AnsiColorIdentifier, Fill as WarpThemeFill, WarpTheme};
 use warp_core::ui::Icon as WarpIcon;
+use warpui::elements::new_scrollable::{
+    NewScrollable, NewScrollableElement, ScrollableAppearance, SingleAxisConfig,
+};
 use warpui::elements::DispatchEventResult;
 use warpui::elements::{
     resizable_state_handle, AcceptedByDropTarget, Border, ChildAnchor, ChildView, Clipped,
     ClippedScrollStateHandle, ClippedScrollable, ConstrainedBox, Container, CornerRadius,
     CrossAxisAlignment, DragAxis, DragBarSide, Draggable, DraggableState, DropShadow, DropTarget,
-    Element, Empty, EventHandler, Fill as ElementFill, Flex, Hoverable, MainAxisAlignment,
-    MainAxisSize, MouseStateHandle, OffsetPositioning, Padding, ParentAnchor, ParentElement,
-    ParentOffsetBounds, PositionedElementAnchor, PositionedElementOffsetBounds, Radius, Resizable,
-    ResizableStateHandle, SavePosition, ScrollbarWidth, Shrinkable, Stack, Text,
+    Element, Empty, EventHandler, Fill as ElementFill, Flex, Hoverable, List, ListState,
+    MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning, Padding, ParentAnchor,
+    ParentElement, ParentOffsetBounds, PositionedElementAnchor, PositionedElementOffsetBounds,
+    Radius, Resizable, ResizableStateHandle, SavePosition, ScrollStateHandle, ScrollbarWidth,
+    Shrinkable, Stack, Text,
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::platform::Cursor;
@@ -83,7 +88,7 @@ use warpui::prelude::Align;
 use warpui::text_layout::ClipConfig;
 use warpui::ui_components::components::{UiComponent, UiComponentStyles};
 use warpui::ui_components::text_input::TextInput;
-use warpui::{AppContext, EntityId, SingletonEntity, ViewHandle, WindowId};
+use warpui::{AppContext, EntityId, SingletonEntity, ViewContext, ViewHandle, WindowId};
 
 const PANEL_WIDTH: f32 = 248.;
 const MIN_PANEL_WIDTH: f32 = 200.;
@@ -367,6 +372,7 @@ fn render_restored_session_row(
     render_identity: SessionNavigatorRowIdentity,
     is_resuming: bool,
     is_selected: bool,
+    is_keyboard_cursor: bool,
     same_window_split_group_number: Option<usize>,
     is_renaming: bool,
     alias_editor: ViewHandle<EditorView>,
@@ -457,6 +463,9 @@ fn render_restored_session_row(
             restored_session_row_background(is_selected, is_resuming, hovered, theme)
         {
             container = container.with_background(background);
+        }
+        if is_keyboard_cursor {
+            container = container.with_border(Border::all(1.).with_border_fill(theme.outline()));
         }
         container.finish()
     })
@@ -555,19 +564,252 @@ fn render_restored_session_row(
         .finish()
 }
 
-fn render_restored_sessions_group(
+#[derive(Clone)]
+struct SessionNavigatorViewportRow {
+    session: WorkspaceSessionSnapshot,
+    activity_indicator: Option<RestoredSessionActivityIndicator>,
+    render_identity: SessionNavigatorRowIdentity,
+    is_resuming: bool,
+    is_keyboard_cursor: bool,
+    is_renaming: bool,
+    same_window_split_group_number: Option<usize>,
+    alias_editor: ViewHandle<EditorView>,
+    mouse_state: MouseStateHandle,
+    drag_state: DraggableState,
+    reorder_unit_id: String,
+    detail_hover_state: VerticalTabsDetailHoverState,
+}
+
+#[derive(Clone)]
+struct SessionNavigatorViewportUnit {
+    identity: String,
+    content_signature: String,
+    target_index: usize,
+    is_first_visible_unit: bool,
+    is_last_visible_unit: bool,
+    rows: Vec<SessionNavigatorViewportRow>,
+}
+
+#[derive(Clone)]
+enum SessionNavigatorViewportItem {
+    Header,
+    Unit(SessionNavigatorViewportUnit),
+    Empty { query_is_empty: bool },
+}
+
+fn session_navigator_viewport_unit_identity(
+    unit: &super::session_navigator_reducer::ReorderUnit,
+) -> String {
+    unit.id()
+}
+
+impl SessionNavigatorViewportItem {
+    fn identity(&self) -> String {
+        match self {
+            Self::Header => "session-navigator:header".to_owned(),
+            Self::Unit(unit) => format!("session-navigator:unit:{}", unit.identity),
+            Self::Empty { query_is_empty } => format!("session-navigator:empty:{query_is_empty}"),
+        }
+    }
+
+    fn content_signature(&self) -> String {
+        match self {
+            Self::Header => "header".to_owned(),
+            Self::Unit(unit) => unit.content_signature.clone(),
+            Self::Empty { query_is_empty } => format!("empty:{query_is_empty}"),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct SessionNavigatorViewportProjection {
+    query: String,
+    keyboard_cursor: Option<SessionNavigatorRowIdentity>,
+    items: Vec<SessionNavigatorViewportItem>,
+}
+
+impl SessionNavigatorViewportProjection {
+    fn keyboard_row_identities(&self) -> Vec<SessionNavigatorRowIdentity> {
+        self.items
+            .iter()
+            .filter_map(|item| match item {
+                SessionNavigatorViewportItem::Unit(unit) => Some(unit),
+                SessionNavigatorViewportItem::Header
+                | SessionNavigatorViewportItem::Empty { .. } => None,
+            })
+            .flat_map(|unit| unit.rows.iter().map(|row| row.render_identity.clone()))
+            .collect()
+    }
+
+    fn keyboard_session_target(
+        &self,
+        cursor: &SessionNavigatorRowIdentity,
+    ) -> Option<WorkspaceSessionActionTarget> {
+        self.items.iter().find_map(|item| {
+            let SessionNavigatorViewportItem::Unit(unit) = item else {
+                return None;
+            };
+            unit.rows.iter().find_map(|row| {
+                (row.render_identity == *cursor && !row.is_resuming && !row.is_renaming).then(
+                    || {
+                        WorkspaceSessionActionTarget::new(
+                            row.session.id.clone(),
+                            row.session.environment_authority_key.clone(),
+                        )
+                    },
+                )
+            })
+        })
+    }
+
+    fn item_index_for_session_row(
+        &self,
+        row_id: &str,
+        environment_navigation_key: &str,
+    ) -> Option<usize> {
+        self.items.iter().position(|item| {
+            let SessionNavigatorViewportItem::Unit(unit) = item else {
+                return false;
+            };
+            unit.rows.iter().any(|row| {
+                row.render_identity.row_id == row_id
+                    && row.render_identity.environment_navigation_key == environment_navigation_key
+            })
+        })
+    }
+
+    fn render_item(&self, index: usize, app: &AppContext) -> Box<dyn Element> {
+        let appearance = Appearance::as_ref(app);
+        let theme = appearance.theme();
+        match self
+            .items
+            .get(index)
+            .expect("Session Navigator viewport requested an unknown item")
+        {
+            SessionNavigatorViewportItem::Header => Container::new(
+                Text::new_inline(
+                    crate::t!("workspace-session-navigator-title"),
+                    appearance.ui_font_family(),
+                    11.,
+                )
+                .with_color(theme.sub_text_color(theme.background()).into())
+                .with_style(Properties::default().weight(Weight::Semibold))
+                .with_clip(ClipConfig::ellipsis())
+                .finish(),
+            )
+            .with_padding(Padding::uniform(8.).with_top(4.).with_bottom(4.))
+            .finish(),
+            SessionNavigatorViewportItem::Unit(unit) => {
+                let mut column = Flex::column()
+                    .with_main_axis_size(MainAxisSize::Min)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                    .with_spacing(GROUP_ITEM_SPACING)
+                    .with_child(render_session_unit_insertion_target(
+                        unit.target_index,
+                        false,
+                        theme,
+                    ));
+                for row in &unit.rows {
+                    column.add_child(render_restored_session_row(
+                        &row.session,
+                        row.activity_indicator,
+                        row.render_identity.clone(),
+                        row.is_resuming,
+                        row.session.is_active,
+                        row.is_keyboard_cursor,
+                        row.same_window_split_group_number,
+                        row.is_renaming,
+                        row.alias_editor.clone(),
+                        row.mouse_state.clone(),
+                        row.drag_state.clone(),
+                        row.reorder_unit_id.clone(),
+                        row.detail_hover_state.clone(),
+                        appearance,
+                    ));
+                }
+                if unit.is_last_visible_unit {
+                    column.add_child(render_session_unit_insertion_target(
+                        unit.target_index + 1,
+                        false,
+                        theme,
+                    ));
+                }
+                let padding = if unit.is_first_visible_unit {
+                    Padding::uniform(8.).with_top(0.)
+                } else {
+                    Padding::uniform(8.).with_top(GROUP_ITEM_SPACING)
+                };
+                Container::new(column.finish())
+                    .with_padding(padding)
+                    .finish()
+            }
+            SessionNavigatorViewportItem::Empty { query_is_empty } => {
+                let message = if *query_is_empty {
+                    crate::t!("workspace-session-navigator-empty")
+                } else {
+                    crate::t!("workspace-session-navigator-no-matches")
+                };
+                Container::new(
+                    Text::new_inline(message, appearance.ui_font_family(), 12.)
+                        .with_color(theme.sub_text_color(theme.background()).into())
+                        .finish(),
+                )
+                .with_padding(Padding::uniform(12.))
+                .finish()
+            }
+        }
+    }
+}
+
+pub(super) fn session_navigator_keyboard_cursor_normalized(
+    visible_rows: &[SessionNavigatorRowIdentity],
+    cursor: Option<&SessionNavigatorRowIdentity>,
+) -> Option<SessionNavigatorRowIdentity> {
+    cursor
+        .filter(|cursor| visible_rows.iter().any(|row| row == *cursor))
+        .cloned()
+}
+
+pub(super) fn session_navigator_keyboard_cursor_navigate(
+    visible_rows: &[SessionNavigatorRowIdentity],
+    cursor: Option<&SessionNavigatorRowIdentity>,
+    forward: bool,
+) -> Option<SessionNavigatorRowIdentity> {
+    let current_index = cursor.and_then(|cursor| visible_rows.iter().position(|row| row == cursor));
+    let next_index = match (current_index, forward) {
+        (Some(index), true) => index
+            .saturating_add(1)
+            .min(visible_rows.len().saturating_sub(1)),
+        (Some(index), false) => index.saturating_sub(1),
+        (None, true) => 0,
+        (None, false) => visible_rows.len().saturating_sub(1),
+    };
+    visible_rows.get(next_index).cloned()
+}
+
+fn new_session_navigator_viewport_state() -> (
+    ListState<()>,
+    Rc<RefCell<SessionNavigatorViewportProjection>>,
+) {
+    let projection = Rc::new(RefCell::new(SessionNavigatorViewportProjection::default()));
+    let render_projection = projection.clone();
+    let list_state = ListState::new(move |index, _scroll_offset, app| {
+        render_projection.borrow().render_item(index, app)
+    });
+    (list_state, projection)
+}
+
+fn build_session_navigator_viewport_projection(
     state: &VerticalTabsPanelState,
     workspace: &Workspace,
     sessions: &[WorkspaceSessionSnapshot],
     navigator_state: &super::session_navigator_reducer::SessionNavigatorState,
-    query: &str,
-    appearance: &Appearance,
     app: &AppContext,
-) -> Option<Box<dyn Element>> {
-    use super::session_navigator_reducer::{build_reorder_units, ReorderUnit};
+) -> SessionNavigatorViewportProjection {
+    use super::session_navigator_reducer::build_reorder_units;
 
-    let query_lower = query.to_lowercase();
-    let kind_sessions: Vec<WorkspaceSessionSnapshot> = sessions
+    let query_lower = state.search_query.to_lowercase();
+    let kind_sessions: Vec<&WorkspaceSessionSnapshot> = sessions
         .iter()
         .filter(|session| {
             matches!(
@@ -577,127 +819,159 @@ fn render_restored_sessions_group(
                     | WorkspaceSessionKind::Welcome
             )
         })
-        .cloned()
         .collect();
     if kind_sessions.is_empty() {
-        return None;
+        return SessionNavigatorViewportProjection {
+            query: state.search_query.clone(),
+            keyboard_cursor: None,
+            items: vec![SessionNavigatorViewportItem::Empty {
+                query_is_empty: state.search_query.is_empty(),
+            }],
+        };
     }
 
-    // Group identity from full kind list (not search-filtered) so hidden sibling
-    // leaves still keep the split unit intact (EC-17).
-    let units = build_reorder_units(&kind_sessions);
-    let unit_index_by_key: HashMap<String, usize> = units
+    let kind_sessions_owned: Vec<WorkspaceSessionSnapshot> = kind_sessions
         .iter()
-        .enumerate()
-        .flat_map(|(index, unit)| {
-            unit.logical_keys()
-                .iter()
-                .cloned()
-                .map(move |key| (key, index))
-        })
+        .map(|session| (*session).clone())
         .collect();
-
-    let visible: Vec<&WorkspaceSessionSnapshot> = kind_sessions
+    let sessions_by_logical_key: HashMap<String, &WorkspaceSessionSnapshot> = kind_sessions
         .iter()
-        .filter(|session| {
-            query.is_empty()
-                || search_fragments_contain_query(
-                    &restored_session_search_fragments(session),
-                    &query_lower,
-                )
-        })
+        .map(|session| (Workspace::workspace_session_logical_key(session), *session))
         .collect();
-    if visible.is_empty() {
-        return None;
-    }
-
+    let units = build_reorder_units(&kind_sessions_owned);
     let split_group_numbers =
-        workspace.same_window_split_group_numbers_for_sessions(&kind_sessions, app);
-    let theme = appearance.theme();
+        workspace.same_window_split_group_numbers_for_sessions(&kind_sessions_owned, app);
+    let detail_hover_state = state.detail_hover_state(workspace.window_id);
+    let mut visible_units = Vec::new();
 
-    let header = Text::new_inline(
-        crate::t!("workspace-session-navigator-title"),
-        appearance.ui_font_family(),
-        11.,
-    )
-    .with_color(theme.sub_text_color(theme.background()).into())
-    .with_style(Properties::default().weight(Weight::Semibold))
-    .with_clip(ClipConfig::ellipsis())
-    .finish();
-
-    let mut column = Flex::column()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_spacing(GROUP_ITEM_SPACING)
-        .with_child(header);
-
-    let mut last_unit_index: Option<usize> = None;
-    for session in visible {
-        let activity_indicator = live_cli_agent_activity_indicator(workspace, session, app);
-        let logical_key = Workspace::workspace_session_logical_key(session);
-        let unit_index = unit_index_by_key.get(&logical_key).copied().unwrap_or(0);
-        if last_unit_index != Some(unit_index) {
-            // Unit-boundary drop slot (not between sibling leaves).
-            column.add_child(render_session_unit_insertion_target(
-                unit_index, false, theme,
-            ));
-            last_unit_index = Some(unit_index);
+    for (target_index, unit) in units.iter().enumerate() {
+        let reorder_unit_id = unit.id();
+        let rows = unit
+            .logical_keys()
+            .iter()
+            .filter_map(|logical_key| sessions_by_logical_key.get(logical_key).copied())
+            .filter(|session| {
+                state.search_query.is_empty()
+                    || search_fragments_contain_query(
+                        &restored_session_search_fragments(session),
+                        &query_lower,
+                    )
+            })
+            .map(|session| {
+                let render_identity =
+                    SessionNavigatorRowIdentity::for_session(session, navigator_state);
+                let row_key = render_identity.row_key();
+                let mouse_state = state
+                    .session_row_mouse_states
+                    .borrow_mut()
+                    .entry(row_key.clone())
+                    .or_default()
+                    .clone();
+                let drag_state = state
+                    .session_row_drag_states
+                    .borrow_mut()
+                    .entry(row_key)
+                    .or_default()
+                    .clone();
+                SessionNavigatorViewportRow {
+                    session: session.clone(),
+                    activity_indicator: live_cli_agent_activity_indicator(workspace, session, app),
+                    is_resuming: workspace.is_restoring_workspace_session(session),
+                    is_keyboard_cursor: false,
+                    is_renaming: workspace
+                        .renaming_workspace_session_identity
+                        .as_ref()
+                        .is_some_and(|identity| identity == &render_identity),
+                    same_window_split_group_number: workspace
+                        .workspace_session_same_window_split_group_number(
+                            session,
+                            &split_group_numbers,
+                        ),
+                    alias_editor: workspace.workspace_session_title_editor.clone(),
+                    mouse_state,
+                    drag_state,
+                    reorder_unit_id: reorder_unit_id.clone(),
+                    detail_hover_state: detail_hover_state.clone(),
+                    render_identity,
+                }
+            })
+            .collect::<Vec<_>>();
+        if rows.is_empty() {
+            continue;
         }
-
-        let render_identity = SessionNavigatorRowIdentity::for_session(session, navigator_state);
-        let row_key = render_identity.row_key();
-        let mouse_state = state
-            .session_row_mouse_states
-            .borrow_mut()
-            .entry(row_key.clone())
-            .or_default()
-            .clone();
-        let drag_state = state
-            .session_row_drag_states
-            .borrow_mut()
-            .entry(row_key)
-            .or_default()
-            .clone();
-        let reorder_unit_id = units
-            .get(unit_index)
-            .map(ReorderUnit::id)
-            .unwrap_or_else(|| format!("row:{logical_key}"));
-        let is_renaming = workspace
-            .renaming_workspace_session_identity
-            .as_ref()
-            .is_some_and(|identity| identity == &render_identity);
-
-        column.add_child(render_restored_session_row(
-            session,
-            activity_indicator,
-            render_identity,
-            workspace.is_restoring_workspace_session(session),
-            session.is_active,
-            workspace
-                .workspace_session_same_window_split_group_number(session, &split_group_numbers),
-            is_renaming,
-            workspace.workspace_session_title_editor.clone(),
-            mouse_state,
-            drag_state,
-            reorder_unit_id,
-            state.detail_hover_state(workspace.window_id),
-            appearance,
-        ));
+        visible_units.push(SessionNavigatorViewportUnit {
+            identity: session_navigator_viewport_unit_identity(unit),
+            content_signature: String::new(),
+            target_index,
+            is_first_visible_unit: false,
+            is_last_visible_unit: false,
+            rows,
+        });
     }
 
-    if last_unit_index.is_some() {
-        column.add_child(render_session_unit_insertion_target(
-            units.len(),
-            false,
-            theme,
-        ));
+    if visible_units.is_empty() {
+        return SessionNavigatorViewportProjection {
+            query: state.search_query.clone(),
+            keyboard_cursor: None,
+            items: vec![SessionNavigatorViewportItem::Empty {
+                query_is_empty: state.search_query.is_empty(),
+            }],
+        };
     }
 
-    Some(
-        Container::new(column.finish())
-            .with_padding(Padding::uniform(8.).with_top(4.))
-            .finish(),
-    )
+    let keyboard_rows = visible_units
+        .iter()
+        .flat_map(|unit| unit.rows.iter().map(|row| row.render_identity.clone()))
+        .collect::<Vec<_>>();
+    let keyboard_cursor = session_navigator_keyboard_cursor_normalized(
+        &keyboard_rows,
+        state.session_navigator_keyboard_cursor.borrow().as_ref(),
+    );
+    for unit in &mut visible_units {
+        for row in &mut unit.rows {
+            row.is_keyboard_cursor = keyboard_cursor
+                .as_ref()
+                .is_some_and(|cursor| cursor == &row.render_identity);
+        }
+        unit.content_signature = unit
+            .rows
+            .iter()
+            .map(|row| {
+                format!(
+                    "{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                    row.render_identity.row_key(),
+                    row.session.label.as_deref().unwrap_or_default(),
+                    row.session.is_active,
+                    row.session.is_pinned,
+                    row.is_resuming,
+                    row.is_keyboard_cursor,
+                    row.is_renaming,
+                    row.same_window_split_group_number.unwrap_or_default(),
+                    row.activity_indicator.is_some(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+    }
+
+    let last_visible_unit = visible_units.len() - 1;
+    for (index, unit) in visible_units.iter_mut().enumerate() {
+        unit.is_first_visible_unit = index == 0;
+        unit.is_last_visible_unit = index == last_visible_unit;
+    }
+
+    let mut items = Vec::with_capacity(visible_units.len() + 1);
+    items.push(SessionNavigatorViewportItem::Header);
+    items.extend(
+        visible_units
+            .into_iter()
+            .map(SessionNavigatorViewportItem::Unit),
+    );
+    SessionNavigatorViewportProjection {
+        query: state.search_query.clone(),
+        keyboard_cursor,
+        items,
+    }
 }
 
 fn render_session_unit_insertion_target(
@@ -1189,7 +1463,11 @@ impl VerticalTabsDetailHoverState {
 }
 
 pub(super) struct VerticalTabsPanelState {
-    scroll_state: ClippedScrollStateHandle,
+    session_navigator_scroll_state: ScrollStateHandle,
+    session_navigator_list_state: ListState<()>,
+    session_navigator_viewport: Rc<RefCell<SessionNavigatorViewportProjection>>,
+    session_navigator_model_revision: RefCell<Option<u64>>,
+    session_navigator_keyboard_cursor: RefCell<Option<SessionNavigatorRowIdentity>>,
     resizable_state: ResizableStateHandle,
     group_mouse_states: RefCell<HashMap<EntityId, PaneGroupStateHandles>>,
     pane_row_mouse_states: RefCell<HashMap<PaneId, MouseStateHandle>>,
@@ -1210,8 +1488,14 @@ pub(super) struct VerticalTabsPanelState {
 
 impl Default for VerticalTabsPanelState {
     fn default() -> Self {
+        let (session_navigator_list_state, session_navigator_viewport) =
+            new_session_navigator_viewport_state();
         Self {
-            scroll_state: ClippedScrollStateHandle::default(),
+            session_navigator_scroll_state: ScrollStateHandle::default(),
+            session_navigator_list_state,
+            session_navigator_viewport,
+            session_navigator_model_revision: RefCell::new(None),
+            session_navigator_keyboard_cursor: RefCell::new(None),
             resizable_state: resizable_state_handle(PANEL_WIDTH),
             group_mouse_states: RefCell::default(),
             pane_row_mouse_states: RefCell::default(),
@@ -1232,6 +1516,173 @@ impl Default for VerticalTabsPanelState {
 }
 
 impl VerticalTabsPanelState {
+    /// Reconcile the index-addressed WarpUI list only when the canonical
+    /// Environment-owned Navigator projection (or its query) changes. RowId
+    /// remains inside the projection; `ListState` indices are geometry only.
+    fn sync_session_navigator_viewport(&self, workspace: &Workspace, app: &AppContext) {
+        let model_revision = workspace
+            .committed_session_navigator_model()
+            .map(|model| model.revision)
+            .unwrap_or_default();
+        let current_viewport = self.session_navigator_viewport.borrow();
+        let query_changed = current_viewport.query != self.search_query;
+        let keyboard_cursor_changed =
+            current_viewport.keyboard_cursor != *self.session_navigator_keyboard_cursor.borrow();
+        drop(current_viewport);
+        if self
+            .session_navigator_model_revision
+            .borrow()
+            .is_some_and(|revision| revision == model_revision)
+            && !query_changed
+            && !keyboard_cursor_changed
+        {
+            return;
+        }
+
+        let empty_navigator_state = super::session_navigator_reducer::SessionNavigatorState::new();
+        let (sessions, navigator_state) = workspace
+            .committed_session_navigator_model()
+            .map(|model| (model.sessions.as_slice(), &model.state))
+            .unwrap_or((&[][..], &empty_navigator_state));
+        let next = build_session_navigator_viewport_projection(
+            self,
+            workspace,
+            sessions,
+            navigator_state,
+            app,
+        );
+
+        let (old_items, top_identity, top_offset) = {
+            let current = self.session_navigator_viewport.borrow();
+            let scroll_index = self.session_navigator_list_state.get_scroll_index();
+            (
+                current.items.clone(),
+                current
+                    .items
+                    .get(scroll_index)
+                    .map(SessionNavigatorViewportItem::identity),
+                self.session_navigator_list_state.get_scroll_offset(),
+            )
+        };
+        let shared_len = old_items.len().min(next.items.len());
+        for index in 0..shared_len {
+            if old_items[index].identity() != next.items[index].identity()
+                || old_items[index].content_signature() != next.items[index].content_signature()
+            {
+                self.session_navigator_list_state
+                    .invalidate_height_for_index(index);
+            }
+        }
+        for _ in old_items.len()..next.items.len() {
+            self.session_navigator_list_state.add_item();
+        }
+        for index in (next.items.len()..old_items.len()).rev() {
+            self.session_navigator_list_state.remove(index);
+        }
+        let normalized_keyboard_cursor =
+            self.normalize_session_navigator_keyboard_cursor(&next.keyboard_row_identities());
+        debug_assert_eq!(normalized_keyboard_cursor, next.keyboard_cursor);
+        *self.session_navigator_keyboard_cursor.borrow_mut() = normalized_keyboard_cursor;
+        *self.session_navigator_viewport.borrow_mut() = next;
+        *self.session_navigator_model_revision.borrow_mut() = Some(model_revision);
+
+        if let Some(top_identity) = top_identity {
+            if let Some(next_index) = self
+                .session_navigator_viewport
+                .borrow()
+                .items
+                .iter()
+                .position(|item| item.identity() == top_identity)
+            {
+                self.session_navigator_list_state
+                    .scroll_to_with_offset(next_index, top_offset);
+            }
+        }
+    }
+
+    fn normalize_session_navigator_keyboard_cursor(
+        &self,
+        visible_rows: &[SessionNavigatorRowIdentity],
+    ) -> Option<SessionNavigatorRowIdentity> {
+        session_navigator_keyboard_cursor_normalized(
+            visible_rows,
+            self.session_navigator_keyboard_cursor.borrow().as_ref(),
+        )
+    }
+
+    pub(super) fn navigate_session_navigator_keyboard_cursor(
+        &self,
+        workspace: &Workspace,
+        app: &AppContext,
+        forward: bool,
+    ) -> bool {
+        self.sync_session_navigator_viewport(workspace, app);
+        let visible_rows = self
+            .session_navigator_viewport
+            .borrow()
+            .keyboard_row_identities();
+        let next = session_navigator_keyboard_cursor_navigate(
+            &visible_rows,
+            self.session_navigator_keyboard_cursor.borrow().as_ref(),
+            forward,
+        );
+        let mut cursor = self.session_navigator_keyboard_cursor.borrow_mut();
+        if *cursor == next {
+            return false;
+        }
+        *cursor = next.clone();
+        drop(cursor);
+        self.sync_session_navigator_viewport(workspace, app);
+        if let Some(cursor) = next {
+            if let Some(index) = self
+                .session_navigator_viewport
+                .borrow()
+                .item_index_for_session_row(&cursor.row_id, &cursor.environment_navigation_key)
+            {
+                self.session_navigator_list_state.scroll_to(index);
+            }
+        }
+        true
+    }
+
+    pub(super) fn activate_session_navigator_keyboard_cursor(
+        &self,
+        workspace: &Workspace,
+        ctx: &mut ViewContext<Workspace>,
+    ) -> bool {
+        self.sync_session_navigator_viewport(workspace, ctx);
+        let Some(cursor) = self.session_navigator_keyboard_cursor.borrow().clone() else {
+            return false;
+        };
+        let Some(target) = self
+            .session_navigator_viewport
+            .borrow()
+            .keyboard_session_target(&cursor)
+        else {
+            return false;
+        };
+        ctx.dispatch_typed_action(&WorkspaceAction::ActivateRestoredWorkspaceSession { target });
+        true
+    }
+
+    pub(super) fn clear_session_navigator_keyboard_cursor(&self) -> bool {
+        self.session_navigator_keyboard_cursor
+            .borrow_mut()
+            .take()
+            .is_some()
+    }
+
+    fn session_navigator_session_row_is_viewport_visible(
+        &self,
+        row_id: &str,
+        environment_navigation_key: &str,
+    ) -> bool {
+        self.session_navigator_viewport
+            .borrow()
+            .item_index_for_session_row(row_id, environment_navigation_key)
+            .is_some_and(|index| self.session_navigator_list_state.is_item_visible(index))
+    }
+
     /// Returns a lightweight handle bundle for workspace-level visibility reconciliation while the
     /// detail sidecar is active.
     pub(super) fn detail_hover_state(&self, window_id: WindowId) -> VerticalTabsDetailHoverState {
@@ -2006,15 +2457,19 @@ fn render_vertical_tabs_panel(
     let appearance = Appearance::as_ref(app);
     let theme = appearance.theme();
 
-    let scrollable_groups = ClippedScrollable::vertical(
-        state.scroll_state.clone(),
-        render_groups(state, workspace, app),
-        ScrollbarWidth::Custom(4.),
+    state.sync_session_navigator_viewport(workspace, app);
+    let scrollable_groups = NewScrollable::vertical(
+        SingleAxisConfig::Manual {
+            handle: state.session_navigator_scroll_state.clone(),
+            child: NewScrollableElement::finish_scrollable(List::new(
+                state.session_navigator_list_state.clone(),
+            )),
+        },
         theme.nonactive_ui_detail().into(),
         theme.active_ui_detail().into(),
         ElementFill::None,
     )
-    .with_overlayed_scrollbar()
+    .with_vertical_scrollbar(ScrollableAppearance::new(ScrollbarWidth::Custom(4.), true))
     .finish();
 
     let panel_content = Flex::column()
@@ -2047,42 +2502,6 @@ fn render_vertical_tabs_panel(
             (MIN_PANEL_WIDTH, max_width.max(MIN_PANEL_WIDTH))
         }))
         .finish()
-}
-
-fn render_groups(
-    _state: &VerticalTabsPanelState,
-    workspace: &Workspace,
-    app: &AppContext,
-) -> Box<dyn Element> {
-    let appearance = Appearance::as_ref(app);
-    let theme = appearance.theme();
-    let query = _state.search_query.as_str();
-    let navigator_model = workspace.session_navigator_model();
-
-    if let Some(sessions) = render_restored_sessions_group(
-        _state,
-        workspace,
-        &navigator_model.sessions,
-        &navigator_model.state,
-        query,
-        appearance,
-        app,
-    ) {
-        return sessions;
-    }
-
-    let message = if query.is_empty() {
-        crate::t!("workspace-session-navigator-empty")
-    } else {
-        crate::t!("workspace-session-navigator-no-matches")
-    };
-    Container::new(
-        Text::new_inline(message, appearance.ui_font_family(), 12.)
-            .with_color(theme.sub_text_color(theme.background()).into())
-            .finish(),
-    )
-    .with_padding(Padding::uniform(12.))
-    .finish()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5538,6 +5957,14 @@ fn render_workspace_session_detail_sidecar(
     row_id: &str,
     environment_navigation_key: &str,
 ) -> Option<DetailSidecarOverlay> {
+    // `SavePosition` intentionally retains the last measured rect. A virtualized
+    // row that has scrolled out of the List therefore must be rejected by the
+    // current viewport projection before we consult that cached position.
+    if !state.session_navigator_session_row_is_viewport_visible(row_id, environment_navigation_key)
+    {
+        state.clear_detail_sidecar();
+        return None;
+    }
     let navigator_model = workspace.session_navigator_model();
     let session = navigator_model
         .sessions
@@ -5560,6 +5987,13 @@ fn render_workspace_session_detail_sidecar(
     let theme = appearance.theme();
     let sidecar_background = detail_sidecar_background(theme);
     let anchor_position_id = vtab_session_row_position_id(row_id, Some(environment_navigation_key));
+    if app
+        .element_position_by_id_at_last_frame(workspace.window_id, &anchor_position_id)
+        .is_none()
+    {
+        state.clear_detail_sidecar();
+        return None;
+    }
     let (offset, max_height, width, bounds, parent_anchor, child_anchor) =
         detail_sidecar_offset_and_max_height(&anchor_position_id, side, workspace.window_id, app);
     let source_row_mouse_state = state

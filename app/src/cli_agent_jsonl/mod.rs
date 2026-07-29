@@ -49,13 +49,13 @@ pub use parse::{
 #[allow(unused_imports)]
 #[cfg(feature = "local_fs")]
 pub(crate) use policy::{limit_cli_agent_session_sources, CliAgentSessionSource, RecentJsonlFile};
-pub(crate) use roots::CliAgentStoreRoots;
 #[allow(unused_imports)]
 #[cfg(feature = "local_fs")]
 pub(crate) use roots::{
     current_cli_agent_home, normalize_cli_agent_session_cwd, require_cli_agent_home,
     resolve_current_process_cli_agent_store_roots,
 };
+pub(crate) use roots::{is_omp_session_source, CliAgentStoreRoots};
 
 #[cfg(test)]
 #[path = "tests.rs"]

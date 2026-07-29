@@ -62,7 +62,7 @@ on formatBounds(windowBounds)
 	return (item 1 of windowBounds as text) & "|" & (item 2 of windowBounds as text) & "|" & (item 3 of windowBounds as text) & "|" & (item 4 of windowBounds as text)
 end formatBounds
 
-on assertLayout(volumeName, appName, backgroundName, expectedWindowSize)
+on assertLayout(volumeName, appName, backgroundName, expectedWindowSize, requireExactIconPositions)
 	tell application "Finder"
 		tell disk volumeName
 			set dmgWindow to container window
@@ -78,8 +78,17 @@ on assertLayout(volumeName, appName, backgroundName, expectedWindowSize)
 			if arrangement of viewOptions is not not arranged then error "DMG icons 不应自动排列" number 76
 			-- Finder 对 background picture 只可靠支持 setter；合法设置后 getter 仍会返回 -1728。
 			-- 最终只读镜像由 shell 复验背景文件与 .icvp 的 backgroundType 持久化字段。
-			if position of item appName is not {150, 250} then error "Ashide.app 位置不匹配" number 78
-			if position of item "Applications" is not {550, 250} then error "Applications 位置不匹配" number 79
+			set actualAppPosition to position of item appName
+			set actualApplicationsPosition to position of item "Applications"
+			if requireExactIconPositions then
+				if actualAppPosition is not {150, 250} then error "DMG app 位置不匹配: " & appName & " actual=" & (item 1 of actualAppPosition as text) & "," & (item 2 of actualAppPosition as text) number 78
+				if actualApplicationsPosition is not {550, 250} then error "Applications 位置不匹配: actual=" & (item 1 of actualApplicationsPosition as text) & "," & (item 2 of actualApplicationsPosition as text) number 79
+			else
+				-- 最终只读重挂时 Finder 会将同一组 icon 坐标整体平移，但应保持安装流程的相对几何关系。
+				set iconHorizontalSpacing to (item 1 of actualApplicationsPosition) - (item 1 of actualAppPosition)
+				if iconHorizontalSpacing is not 400 then error "DMG icons 水平间距不匹配: " & (iconHorizontalSpacing as text) number 78
+				if (item 2 of actualApplicationsPosition) is not (item 2 of actualAppPosition) then error "DMG icons 垂直位置不匹配: app=" & (item 2 of actualAppPosition as text) & " applications=" & (item 2 of actualApplicationsPosition as text) number 79
+			end if
 		end tell
 	end tell
 end assertLayout
@@ -123,7 +132,7 @@ on configureLayout(volumeName, mountPath, appName, backgroundName, deadlineAt)
 	-- Finder 的可观察状态必须先完全等于发布合同，再允许进入落盘阶段。
 	repeat
 		try
-			my assertLayout(volumeName, appName, backgroundName, expectedWindowSize)
+			my assertLayout(volumeName, appName, backgroundName, expectedWindowSize, true)
 			exit repeat
 		on error errorMessage number errorNumber
 			my failIfPast(deadlineAt, "Finder 未在截止时间前提交完整 DMG layout: " & errorMessage & " (" & errorNumber & ")")
@@ -173,7 +182,7 @@ on verifyPersistedLayout(volumeName, appName, backgroundName, deadlineAt)
 		end tell
 	end tell
 	my waitForWindow(volumeName, deadlineAt)
-	my assertLayout(volumeName, appName, backgroundName, expectedWindowSize)
+	my assertLayout(volumeName, appName, backgroundName, expectedWindowSize, false)
 	my closeWindowIfOpen(volumeName, deadlineAt)
 end verifyPersistedLayout
 

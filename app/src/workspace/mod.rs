@@ -186,6 +186,7 @@ use crate::workspace::view::{
 };
 pub use one_time_modal_model::OneTimeModalModel;
 pub use registry::WorkspaceRegistry;
+pub(crate) use registry::WorkspaceRegistryEvent;
 pub use toast_stack::ToastStack;
 
 pub fn init(app: &mut AppContext) {

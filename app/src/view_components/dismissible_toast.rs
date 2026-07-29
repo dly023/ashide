@@ -62,7 +62,7 @@ impl ToastIdentity {
         }
     }
 
-    fn action_required(
+    fn keyed(
         source: impl Into<String>,
         stable_key: impl Into<String>,
         category: ToastCategory,
@@ -92,14 +92,30 @@ enum ToastLifetime {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToastPolicy {
-    Transient { source: String },
-    ActionRequired { source: String, stable_key: String },
+    Transient {
+        source: String,
+    },
+    Operation {
+        source: String,
+        operation_key: String,
+    },
+    ActionRequired {
+        source: String,
+        stable_key: String,
+    },
 }
 
 impl ToastPolicy {
     pub fn transient(source: impl Into<String>) -> Self {
         Self::Transient {
             source: source.into(),
+        }
+    }
+
+    pub fn operation(source: impl Into<String>, operation_key: impl Into<String>) -> Self {
+        Self::Operation {
+            source: source.into(),
+            operation_key: operation_key.into(),
         }
     }
 
@@ -116,8 +132,15 @@ impl ToastPolicy {
                 ToastIdentity::coalesced(source, category),
                 ToastLifetime::Transient,
             ),
+            Self::Operation {
+                source,
+                operation_key,
+            } => (
+                ToastIdentity::keyed(source, operation_key, category),
+                ToastLifetime::Transient,
+            ),
             Self::ActionRequired { source, stable_key } => (
-                ToastIdentity::action_required(source, stable_key, category),
+                ToastIdentity::keyed(source, stable_key, category),
                 ToastLifetime::ActionRequired,
             ),
         }
@@ -194,6 +217,16 @@ impl<A: Action + Clone> DismissibleToastStack<A> {
             ToastPolicy::transient(std::panic::Location::caller().file()),
             ctx,
         );
+    }
+
+    pub fn add_operation_toast(
+        &mut self,
+        toast: DismissibleToast<A>,
+        source: impl Into<String>,
+        operation_key: impl Into<String>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.add_toast(toast, ToastPolicy::operation(source, operation_key), ctx);
     }
 
     pub fn add_action_required_toast(

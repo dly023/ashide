@@ -69,10 +69,7 @@ fn canonical_temp_root(dir: &tempfile::TempDir) -> std::path::PathBuf {
 #[test]
 fn remote_cli_agent_scan_success_uses_serialized_agent_names() {
     let response = build_scan_cli_agent_sessions_response(Ok(ScannedSessionDiscovery::Complete {
-        observed_agents: vec![
-            crate::terminal::CLIAgent::Jcode,
-            crate::terminal::CLIAgent::Omp,
-        ],
+        observed_agents: vec![crate::terminal::CLIAgent::Omp],
         sessions: vec![ScannedSession {
             agent: crate::terminal::CLIAgent::Omp,
             id: "omp-session".to_owned(),
@@ -88,10 +85,7 @@ fn remote_cli_agent_scan_success_uses_serialized_agent_names() {
     };
     assert_eq!(
         success.observed_agents,
-        vec![
-            crate::terminal::CLIAgent::Jcode.to_serialized_name(),
-            crate::terminal::CLIAgent::Omp.to_serialized_name(),
-        ]
+        vec![crate::terminal::CLIAgent::Omp.to_serialized_name()]
     );
     assert_eq!(success.records.len(), 1);
     assert_eq!(
@@ -168,7 +162,7 @@ fn remote_cli_agent_scan_wire_fields_round_trip_every_known_agent() {
 fn remote_cli_agent_scan_source_missing_uses_serialized_agent_name() {
     let response =
         build_scan_cli_agent_sessions_response(Ok(ScannedSessionDiscovery::SourceMissing {
-            agent: crate::terminal::CLIAgent::Jcode,
+            agent: crate::terminal::CLIAgent::Omp,
         }));
 
     let Some(scan_cli_agent_sessions_response::Result::Success(success)) = response.result else {
@@ -178,7 +172,7 @@ fn remote_cli_agent_scan_source_missing_uses_serialized_agent_name() {
     assert!(success.observed_agents.is_empty());
     assert_eq!(
         success.source_missing_agent,
-        Some(crate::terminal::CLIAgent::Jcode.to_serialized_name())
+        Some(crate::terminal::CLIAgent::Omp.to_serialized_name())
     );
 }
 

@@ -133,7 +133,6 @@ const OMP_COLOR: ColorU = ColorU {
 /// Represents a CLI agent (e.g., Claude Code, Codex, Amp, Droid, OpenCode, Copilot, Pi, Auggie, Cursor, Goose)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Sequence, Serialize, Deserialize)]
 pub enum CLIAgent {
-    Jcode,
     Claude,
     Codex,
     Amp,
@@ -188,7 +187,6 @@ impl CLIAgent {
     /// The command prefix used to invoke this CLI agent.
     pub fn command_prefix(&self) -> &'static str {
         match self {
-            CLIAgent::Jcode => "jcode",
             CLIAgent::Claude => "claude",
             CLIAgent::Codex => "codex",
             CLIAgent::Amp => "amp",
@@ -208,6 +206,7 @@ impl CLIAgent {
 
     fn command_prefix_aliases(&self) -> &'static [&'static str] {
         match self {
+            CLIAgent::CursorCli => &["cursor-agent"],
             CLIAgent::DeepSeek => &["deepseek-tui"],
             _ => &[],
         }
@@ -235,12 +234,9 @@ impl CLIAgent {
     pub fn explicit_resume_command(
         &self,
         session_id: Option<&str>,
-        cwd: Option<&str>,
+        _cwd: Option<&str>,
     ) -> Option<String> {
         match self {
-            CLIAgent::Jcode => session_id
-                .and_then(non_empty_session_id)
-                .map(|session_id| format!("jcode --resume {}", shell_words::quote(&session_id))),
             CLIAgent::Claude => Some(match session_id.filter(|id| !id.trim().is_empty()) {
                 Some(session_id) => format!("claude --resume {}", shell_words::quote(session_id)),
                 None => "claude --continue".to_owned(),
@@ -249,13 +245,32 @@ impl CLIAgent {
                 .and_then(non_empty_session_id)
                 .and_then(|session_id| canonical_codex_session_id(&session_id))
                 .map(|session_id| format!("codex resume {}", shell_words::quote(&session_id))),
+            CLIAgent::Droid => session_id
+                .and_then(non_empty_session_id)
+                .map(|session_id| format!("droid --resume {}", shell_words::quote(&session_id))),
+            CLIAgent::OpenCode => session_id.and_then(non_empty_session_id).map(|session_id| {
+                format!("opencode --session {}", shell_words::quote(&session_id))
+            }),
+            CLIAgent::Copilot => session_id
+                .and_then(non_empty_session_id)
+                .map(|session_id| format!("copilot --resume={}", shell_words::quote(&session_id))),
+            CLIAgent::Pi => session_id
+                .and_then(non_empty_session_id)
+                .map(|session_id| format!("pi --session {}", shell_words::quote(&session_id))),
+            CLIAgent::CursorCli => session_id.and_then(non_empty_session_id).map(|session_id| {
+                format!("cursor-agent --resume {}", shell_words::quote(&session_id))
+            }),
+            CLIAgent::Antigravity => session_id.and_then(non_empty_session_id).map(|session_id| {
+                format!("agy --conversation {}", shell_words::quote(&session_id))
+            }),
             CLIAgent::Omp => session_id
                 .and_then(non_empty_session_id)
                 .map(|session_id| format!("omp --resume {}", shell_words::quote(&session_id))),
-            CLIAgent::Antigravity => cwd
-                .filter(|cwd| !cwd.trim().is_empty())
-                .map(|cwd| format!("agy {}", shell_words::quote(cwd))),
-            _ => None,
+            CLIAgent::Amp
+            | CLIAgent::Auggie
+            | CLIAgent::Goose
+            | CLIAgent::DeepSeek
+            | CLIAgent::Unknown => None,
         }
     }
 
@@ -271,17 +286,6 @@ impl CLIAgent {
         let args = &words[command_index + 1..];
 
         match self {
-            CLIAgent::Jcode => args.iter().enumerate().find_map(|(index, arg)| {
-                if let Some(session_id) = arg.strip_prefix("--resume=") {
-                    return non_empty_session_id(session_id);
-                }
-                if arg == "--resume" {
-                    return args
-                        .get(index + 1)
-                        .and_then(|session_id| non_empty_session_id(session_id));
-                }
-                None
-            }),
             CLIAgent::Claude => args.iter().enumerate().find_map(|(index, arg)| {
                 if let Some(session_id) = arg.strip_prefix("--resume=") {
                     return non_empty_session_id(session_id);
@@ -313,16 +317,42 @@ impl CLIAgent {
                 }
                 None
             }),
-            CLIAgent::Amp
-            | CLIAgent::Droid
+            CLIAgent::Droid
             | CLIAgent::OpenCode
             | CLIAgent::Copilot
             | CLIAgent::Pi
-            | CLIAgent::Auggie
             | CLIAgent::CursorCli
+            | CLIAgent::Antigravity => args.iter().enumerate().find_map(|(index, arg)| {
+                let flags: &[&str] = match self {
+                    CLIAgent::OpenCode | CLIAgent::Pi => &["--session"],
+                    CLIAgent::Copilot => &["--resume"],
+                    CLIAgent::Antigravity => &["--conversation"],
+                    CLIAgent::Droid | CLIAgent::CursorCli => &["--resume"],
+                    CLIAgent::Claude
+                    | CLIAgent::Codex
+                    | CLIAgent::Amp
+                    | CLIAgent::Auggie
+                    | CLIAgent::Goose
+                    | CLIAgent::DeepSeek
+                    | CLIAgent::Omp
+                    | CLIAgent::Unknown => unreachable!("provider handled by another match arm"),
+                };
+                flags.iter().find_map(|flag| {
+                    arg.strip_prefix(&format!("{flag}="))
+                        .and_then(non_empty_session_id)
+                        .or_else(|| {
+                            (arg == flag)
+                                .then(|| {
+                                    args.get(index + 1).and_then(|id| non_empty_session_id(id))
+                                })
+                                .flatten()
+                        })
+                })
+            }),
+            CLIAgent::Amp
+            | CLIAgent::Auggie
             | CLIAgent::Goose
             | CLIAgent::DeepSeek
-            | CLIAgent::Antigravity
             | CLIAgent::Unknown => None,
         }
     }
@@ -331,22 +361,21 @@ impl CLIAgent {
         let session_discovery_provider = match self {
             CLIAgent::Claude => Some(AgentSessionDiscoveryProvider::Claude),
             CLIAgent::Codex => Some(AgentSessionDiscoveryProvider::Codex),
-            CLIAgent::Jcode => Some(AgentSessionDiscoveryProvider::Jcode),
+            CLIAgent::Droid => Some(AgentSessionDiscoveryProvider::Droid),
+            CLIAgent::OpenCode => Some(AgentSessionDiscoveryProvider::OpenCode),
+            CLIAgent::Copilot => Some(AgentSessionDiscoveryProvider::Copilot),
+            CLIAgent::Pi => Some(AgentSessionDiscoveryProvider::Pi),
+            CLIAgent::CursorCli => Some(AgentSessionDiscoveryProvider::Cursor),
+            CLIAgent::Antigravity => Some(AgentSessionDiscoveryProvider::Antigravity),
             CLIAgent::Omp => Some(AgentSessionDiscoveryProvider::Omp),
             CLIAgent::Amp
-            | CLIAgent::Droid
-            | CLIAgent::OpenCode
-            | CLIAgent::Copilot
-            | CLIAgent::Pi
             | CLIAgent::Auggie
-            | CLIAgent::CursorCli
             | CLIAgent::Goose
             | CLIAgent::DeepSeek
-            | CLIAgent::Antigravity
             | CLIAgent::Unknown => None,
         };
         let capabilities = match self {
-            CLIAgent::Jcode | CLIAgent::Omp => AgentCapabilities {
+            CLIAgent::Omp => AgentCapabilities {
                 can_detect: true,
                 can_bind_live_session: true,
                 can_index_sessions: true,
@@ -376,14 +405,19 @@ impl CLIAgent {
                 can_write_native_history: true,
                 can_launch_derived_session: true,
             },
-            CLIAgent::Antigravity => AgentCapabilities {
+            CLIAgent::Droid
+            | CLIAgent::OpenCode
+            | CLIAgent::Copilot
+            | CLIAgent::Pi
+            | CLIAgent::CursorCli
+            | CLIAgent::Antigravity => AgentCapabilities {
                 can_detect: true,
                 can_bind_live_session: true,
-                can_index_sessions: false,
-                can_list_sessions: false,
-                can_cold_restore: false,
+                can_index_sessions: true,
+                can_list_sessions: true,
+                can_cold_restore: true,
                 can_resume: true,
-                can_attach: true,
+                can_attach: false,
                 can_target_environment_runtime: true,
                 can_read_session_ir: false,
                 can_fork: false,
@@ -391,29 +425,23 @@ impl CLIAgent {
                 can_write_native_history: false,
                 can_launch_derived_session: false,
             },
-            CLIAgent::Amp
-            | CLIAgent::Droid
-            | CLIAgent::OpenCode
-            | CLIAgent::Copilot
-            | CLIAgent::Pi
-            | CLIAgent::Auggie
-            | CLIAgent::CursorCli
-            | CLIAgent::Goose
-            | CLIAgent::DeepSeek => AgentCapabilities {
-                can_detect: true,
-                can_bind_live_session: true,
-                can_index_sessions: false,
-                can_list_sessions: false,
-                can_cold_restore: false,
-                can_resume: false,
-                can_attach: false,
-                can_target_environment_runtime: false,
-                can_read_session_ir: false,
-                can_fork: false,
-                can_edit_preview: false,
-                can_write_native_history: false,
-                can_launch_derived_session: false,
-            },
+            CLIAgent::Amp | CLIAgent::Auggie | CLIAgent::Goose | CLIAgent::DeepSeek => {
+                AgentCapabilities {
+                    can_detect: true,
+                    can_bind_live_session: true,
+                    can_index_sessions: false,
+                    can_list_sessions: false,
+                    can_cold_restore: false,
+                    can_resume: false,
+                    can_attach: false,
+                    can_target_environment_runtime: false,
+                    can_read_session_ir: false,
+                    can_fork: false,
+                    can_edit_preview: false,
+                    can_write_native_history: false,
+                    can_launch_derived_session: false,
+                }
+            }
             CLIAgent::Unknown => AgentCapabilities {
                 can_detect: false,
                 can_bind_live_session: false,
@@ -461,7 +489,6 @@ impl CLIAgent {
 
     pub fn display_name(&self) -> &'static str {
         match self {
-            CLIAgent::Jcode => "Jcode",
             CLIAgent::Claude => "Claude Code",
             CLIAgent::Codex => "Codex",
             CLIAgent::Amp => "Amp",
@@ -482,7 +509,6 @@ impl CLIAgent {
     /// Returns the Icon for this CLI agent, or `None` for unknown/custom agents.
     pub fn icon(&self) -> Option<Icon> {
         match self {
-            CLIAgent::Jcode => Some(Icon::JcodeLogo),
             CLIAgent::Claude => Some(Icon::ClaudeLogo),
             CLIAgent::Codex => Some(Icon::OpenAILogo),
             CLIAgent::Amp => Some(Icon::AmpLogo),
@@ -505,7 +531,6 @@ impl CLIAgent {
     /// in the slash menu. Returns an empty slice for agents with no known skills support.
     pub fn supported_skill_providers(&self) -> &'static [SkillProvider] {
         match self {
-            CLIAgent::Jcode => &[SkillProvider::Agents],
             CLIAgent::Claude => &[SkillProvider::Claude],
             CLIAgent::Codex => &[
                 SkillProvider::Agents,
@@ -556,7 +581,6 @@ impl CLIAgent {
     /// Returns the brand color for this CLI agent, or `None` for unknown/custom agents.
     pub fn brand_color(&self) -> Option<ColorU> {
         match self {
-            CLIAgent::Jcode => None,
             CLIAgent::Claude => Some(CLAUDE_ORANGE),
             CLIAgent::Codex => Some(OPENAI_COLOR),
             CLIAgent::Amp => Some(AMP_COLOR),

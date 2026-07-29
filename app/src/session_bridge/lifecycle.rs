@@ -494,7 +494,6 @@ fn validate_intent(
 
 fn source_provider_matches_agent(source: &str, agent: CLIAgent) -> bool {
     match agent {
-        CLIAgent::Jcode => source.eq_ignore_ascii_case("jcode"),
         CLIAgent::Claude => source.eq_ignore_ascii_case("claude"),
         CLIAgent::Codex => source.eq_ignore_ascii_case("codex"),
         CLIAgent::Amp

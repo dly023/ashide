@@ -161,6 +161,28 @@ impl<T> ListState<T> {
             && end_absolute >= viewport_top
             && end_absolute <= viewport_bottom
     }
+
+    /// Returns whether any portion of the item intersects the current viewport.
+    /// This is intentionally distinct from [`Self::is_vertical_range_visible`],
+    /// whose callers need an entire sub-range to fit. Viewport-owned overlays
+    /// use this to reject stale anchors after their backing item is unmounted.
+    pub fn is_item_visible(&self, item_index: usize) -> bool {
+        let inner = self.0.borrow();
+        let (item_start, item_end) = {
+            let mut cursor = inner.content.cursor::<Count, Height>();
+            cursor.seek(&Count(item_index), sum_tree::SeekBias::Right);
+            let item_start = cursor.start().0 .0;
+            let Some(item) = cursor.item() else {
+                return false;
+            };
+            let item_height = item.height.unwrap_or(Pixels::zero());
+            (item_start, item_start + item_height)
+        };
+        let viewport_top = inner.scroll_top_pixels();
+        let viewport_bottom = viewport_top + inner.viewport_height;
+
+        item_start <= viewport_bottom && item_end >= viewport_top
+    }
 }
 
 impl ListState<()> {

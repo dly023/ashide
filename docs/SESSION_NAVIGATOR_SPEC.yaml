@@ -1,8 +1,50 @@
-# Ashide Session Navigator 语义规范 v35
+# Ashide Session Navigator 语义规范 v41
 #
 # 这是 Session Navigator 排序、合并、置顶、删除、恢复、focus/active/selection
 # 行为的唯一权威定义。代码实现和所有测试必须与此 spec 一致。
 # 当 spec 与代码冲突时,以 spec 为准;修改行为先改 spec 再改代码。
+#
+# v41 变更摘要:
+#   - PassiveProjection 只允许由可能改变 provider 历史集合的语义事件触发：初始 authority
+#     discovery、history-enabled 设置变化、source mutation 成功、runtime HOME 首次就绪、
+#     agent-bound carrier 移除；generic terminal bootstrap/split 只提交 live projection，禁止扫描 provider store
+#   - 显式 Refresh 仍无条件重扫；现有 authority token 合并、完整提交与失败保留语义不变
+#
+# v40 变更摘要:
+#   - Session Navigator 只有显式 Refresh action 才拥有用户可见 refresh generation；进度只投影到
+#     Navigator header 图标，完整成功静默收敛，失败才按同一 operation identity 给出一次 transient toast
+#   - PassiveProjection（启动、设置、pin/reorder/source/runtime reconciliation）合并现有 scan，绝不抢占、
+#     不改变用户 progress、也不发全局反馈；SourceMissing/Cancelled/partial preserved 不得伪称完整成功
+#
+# v39 变更摘要:
+#   - local TerminalBootstrap 的普通 live terminal 不属于 Session Navigator；只有
+#     canonical PaneConfiguration binding 或 Ashide conversation 的 AgentTerminal 可作为 live row
+#   - 关闭 agent-bound pane/tab 后立即对其 authority 发起一次 passive native-history refresh；
+#     live carrier 消失后由已提交/刷新到的 native virtual history 接管，禁止把 tab 坐标另存为历史
+#   - local session_state.json 与 WindowSnapshot restored targets 在读写边界清理旧的
+#     generic local pane key / non-agent virtual row，不保留错误 terminal 历史配置
+#
+# v38 变更摘要:
+#   - Session Navigator 直接扩展既有 AgentSessionDiscoveryPlan，不创建第二套 AI Vault；
+#     Droid/OpenCode/Copilot/Pi/Cursor/Antigravity 与 Claude/Codex/Omp 共用
+#     EnvironmentTable generation、完整提交、身份、排序、Resume 与 local/runtime 语义
+#   - provider store 由 registry descriptor 穷尽声明 root/source shape/parser/resume；
+#     OpenCode legacy JSON 与 SQLite 先按 provider session id 去重，SQLite 为新格式正本
+#   - 当前 Environment 工作目录中的旧会话不受全局 recent limit 淘汰；任何 provider
+#     解析失败仍保留上一 committed collection，禁止逐文件 issue 形成成功子集
+#
+# v37 变更摘要:
+#   - 同 authority 的被动 Session Navigator refresh 必须合并到当前 in-flight
+#     token；不得由 terminal bootstrap/source reconciliation 连续替换 token，
+#     令所有后台 completion 都成为 stale
+#   - 显式用户刷新不合并，必须能抢占一个可能停滞的旧 scan；其后到来的被动 refresh
+#     再合并到新的 token，保证用户点击可获得一次可提交的完整结果
+#
+# v36 变更摘要:
+#   - Omp 的发现与远端 native mutation 共用唯一正本 source shape：
+#     `sessions/<project-bucket>/*.jsonl`
+#   - cache、backup、tool log 和更深层路径必须在 helper allow-list 处 fail-closed，
+#     拒绝物理副作用后保留 optimistic row 并走既有 rollback
 #
 # v35 变更摘要:
 #   - Resume 点击消费已提交的 render model，禁止在 UI action 热路径重做全量 pane/source snapshot
@@ -152,8 +194,8 @@
 # v2 = codex commit 8aef2d2 的隐式语义 (已废弃)
 # v1 = 更早的隐式语义 (已废弃)
 
-spec_version: 20
-last_updated: "2026-07-27"
+spec_version: 21
+last_updated: "2026-07-29"
 
 # ─────────────────────────────────────────────────────────
 # 0. 内聚状态模型 (Cohesive State Model)
@@ -216,6 +258,16 @@ state_model:
     identity_rule: "provider native session ID 可晚到，但必须作为同一 binding transition 持久化；container identity、RowId 与 order 不因 enrichment 改变。"
     carrier_missing_rule: "Agent-bound live/materializing container 缺 binding 属于模型破坏，立即失败；禁止 fallback 到 tab/leaf locator、terminal UUID、EntityId 或 environment authority。"
     forbidden_parallel_paths: ["Navigator CLIAgentSessionsModel enrichment", "placeholder metadata reconstruction", "render-time provider binding", "command-derived cold binding"]
+
+  local_agent_history_membership:
+    id: "SN-LOCAL-AGENT-HISTORY-MEMBERSHIP-67"
+    existing_abstractions: ["Workspace::live_workspace_sessions", "PaneConfiguration.session_binding", "WorkspaceSessionSnapshot", "EnvironmentTable indexed session cache"]
+    membership_rule: "TerminalBootstrap/local 的普通 live Terminal 在 canonical live projection 即排除；只有 AgentTerminal（canonical CLI binding 或 Ashide conversation）可进入 Navigator merge。SavedSsh/Runtime 的 live Terminal 不受该 local rule 影响。"
+    persistence_rule: "agent-bound pane 的 PaneConfiguration binding 随 container 生命周期保存；被动 projection、agent 进程退出与同一 tab 内再次 resume 都不得清 binding 或降级 live row。"
+    close_rule: "手动关闭含 agent binding/conversation 的 pane 或 tab 后，先移除 live carrier，再对关闭 authority 发起一次 PassiveProjection native-history refresh；已提交 indexed history 可立即接管，scan completion 必须保留 canonical collection 语义。"
+    virtual_history_rule: "WindowSnapshot.restored_workspace_sessions 只能保存带 durable agent identity 或 Ashide conversation identity 的 virtual AgentTerminal；普通 Terminal、Welcome、Other、tab/leaf locator 或 generic pane 不是可恢复历史，读写边界必须清理。"
+    local_user_state_cleanup_rule: "local session_state.json 不得保存 local::pane:<container_uuid> alias/pin；读取旧配置时原子移除。可恢复 native agent identity/source key 保留。"
+    forbidden_parallel_paths: ["render-time local terminal hide", "tab-coordinate history snapshot", "generic terminal alias/pin sidecar", "remote terminal membership filter", "agent-exit binding clear"]
 
   typed_materialization_completion:
     id: "SN-MATERIALIZATION-ATOMIC-COMPLETION-ROLLBACK-61"
@@ -327,12 +379,13 @@ state_model:
     id: "SN-ENV-SESSION-REFRESH-INTENT-25"
     existing_abstractions: ["EnvironmentBackend.refresh_indexed_sessions", "EnvironmentTable indexed session cache", "EnvironmentLifecycleState", "Session Navigator refresh generation"]
     intent_rule: "调用方必须显式提交 PassiveProjection 或 UserInitiated { generation }；禁止用 Option<generation> 同时表达副作用权限和 toast completion"
-    passive_rule: "启动、delete/source mutation 后的被动 cache projection 不得推进 runtime transport lifecycle；target/client 不可用时保留 cache 与 persisted Error/Disconnected 状态并返回同步未刷新"
-    explicit_rule: "只有 UserInitiated 才可按用户意图请求 reconnect，并由同一 generation 完成成功/失败反馈；local 同步 scan 仍消费相同 intent"
+    passive_rule: "PassiveProjection 只属于可能改变 provider 历史集合的语义事件：初始 authority discovery、history-enabled 设置变化、provider source mutation 成功、runtime target HOME 首次物化、agent-bound carrier 移除。generic TerminalSessionBootstrapped、split、普通 terminal 新建/关闭与纯 focus/layout reconciliation 只更新 committed live projection，禁止启动 provider discovery。target/client 不可用时保留 cache 与 persisted Error/Disconnected 状态并返回同步未刷新。"
+    explicit_rule: "只有 RefreshWorkspaceSessions action 才可创建 UserInitiated generation、无条件重扫、请求 reconnect 并驱动当前 Navigator header refresh icon；完整成功仅静默结束 spinner，显式失败才按同一 operation identity 发出一条 transient error。local/runtime 都消费相同 intent。"
+    feedback_rule: "PassiveProjection 只合并/收敛 canonical cache：不得创建或抢占 user generation、不得弹 toast。SourceMissing、PermanentlyDeleted、Cancelled 或 stale completion 只结束当前 operation/保留已提交 rows，绝不宣称完整刷新成功。"
     ownership_rule: "backend 只负责 I/O timing 与 transport side effect；EnvironmentTable cache、Navigator reducer、selection/order projection 继续共用"
-    wire_identity_rule: "ScanCliAgentSessions 的 request 与 records.agent、observed_agents、source_missing_agent 都必须使用 CLIAgent::to_serialized_name 的协议值；remote scanner 只产出 typed CLIAgent，server_model 是唯一 typed→wire 投影点，desktop 与 helper 都只从该格式解码，禁止 command_prefix / display name 穿过 transport。任何 protobuf 仍可解码的语义变更必须递增 REMOTE_SERVER_PROTOCOL_REVISION，使旧 helper 在 Initialize 时 fail-closed 且落入新安装 slot。"
+    wire_identity_rule: "ScanCliAgentSessions 的 request 与 records.agent、observed_agents、source_missing_agent 都必须使用 CLIAgent::to_serialized_name 的协议值；remote scanner 只产出 typed CLIAgent，server_model 是唯一 typed→wire 投影点，desktop 与 helper 都只从该格式解码，禁止 command_prefix / display name 穿过 transport。任何 protobuf 仍可解码的语义变更必须递增 REMOTE_SERVER_PROTOCOL_REVISION，使旧 helper 在 Initialize 时 fail-closed 且不能进入 scan。"
     wire_outcome_rule: "source_missing_agent 与 records/observed_agents 互斥；Complete 的每条 record.agent 必须存在于 observed_agents。desktop 必须在 mutation authority-scoped cache 之前一次性验证整帧，任一违反均拒绝整帧、保留上一 committed collection，绝不部分提交、更不回写 local。"
-    forbidden_parallel_paths: ["Option refresh generation intent", "configure-time implicit reconnect", "remote-only refresh wrapper", "passive refresh lifecycle mutation"]
+    forbidden_parallel_paths: ["Option refresh generation intent", "configure-time implicit reconnect", "remote-only refresh wrapper", "passive refresh lifecycle mutation", "passive trigger invoking user refresh", "generic terminal bootstrap provider scan", "split/new-terminal provider scan", "global start/success refresh toast", "partial-preserved reported as complete", "TTL/debounce freshness guess"]
 
   sourceless_restore_container_binding:
     id: "SN-SOURCELESS-RESTORE-CONTAINER-BINDING-26"
@@ -409,6 +462,36 @@ state_model:
     failure_rule: "点击时重新遍历全部 tabs/panes、构造 TerminalPaneSnapshot、或使用旧 state + 新 sessions 都属于热路径/半事务模型破坏；禁止 action-time speculative Refresh、lifecycle dispatch 内嵌 action_model、raw session helper、action 后补多次 sync、retry、freeze 或 UI masking"
     forbidden_parallel_paths: ["action-time full source refresh", "snapshot state then refresh sessions", "raw_session_navigator_sessions action input", "backend-specific action adapter", "post-action identity repair", "duplicate post-delivery sync", "PaneGroup::snapshot Navigator live projection", "live_or_pending full live_workspace_sessions"]
 
+  viewported_render_projection:
+    id: "SN-SESSION-NAVIGATOR-VIEWPORTED-PROJECTION-69"
+    existing_abstractions: ["EnvironmentTable active SessionNavigatorModel", "SessionNavigatorModel.revision", "SessionNavigatorRowIdentity", "ReorderUnit", "ListState", "VerticalTabsDetailTarget"]
+    owner_rule: "SessionNavigatorModel 是唯一 membership/RowId/order owner；VerticalTabs 只在 committed model revision 或 query 改变时生成 render-only viewport projection。ListState index 只表示瞬时几何位置，禁止进入 RowId registry、selection、pin、alias、persistence 或 action target。"
+    unit_rule: "每个 viewport item 必须对应一个 canonical ReorderUnit；split sibling rows 在同一 item 内渲染，insertion target 只出现在 unit boundary，禁止把 leaf/session row 作为独立 reorder/drop unit。"
+    scroll_rule: "projection 变更时以旧 top item 的 stable unit identity + offset 映射新 index；新增/删除严格同步 ListState count，identity 或 content 变化的 index 必须 invalidate height，禁止全量每帧 invalidate。"
+    sidecar_rule: "detail sidecar 只可锚定当前 viewport 内的 unit；虚拟化后不得信任 SavePosition 的离屏旧 rect，row 不可见或 anchor 缺失必须清理 overlay，不得 fallback 到 window 坐标。"
+    parity_rule: "local/runtime 共用 committed model revision、ReorderUnit projection、RowId identity、scroll/sidecar语义；backend 只影响 model commit 时机。"
+    forbidden_parallel_paths: ["render-time full session clone/filter/build", "index as persistent row identity", "leaf-level split drop target", "UI-owned membership cache", "offscreen SavePosition sidecar fallback", "per-frame ListState height invalidation", "backend-specific viewport adapter"]
+
+  incremental_command_palette_search:
+    id: "SN-SESSION-NAVIGATOR-INCREMENTAL-SEARCH-70"
+    existing_abstractions: ["EnvironmentTable active SessionNavigatorModel", "Workspace::apply_session_navigator_reduction", "WorkspaceRegistry", "SessionNavigationData", "command palette navigation DataSource"]
+    owner_rule: "SessionNavigatorModel 的 committed membership、RowId 与顺序是唯一 searchable document source。WorkspaceRegistry 只按 WindowId 保存瞬态 projection partition；WindowId、PaneViewLocator 与 Tantivy document id 都不得成为持久 identity、selection、pin、alias 或恢复 target。"
+    projection_rule: "每次 canonical reducer commit 只能由 Workspace 发布对应 window 的完整 projection。live terminal 仅能 enrich 已存在 live row 的 prompt/render data；carrier 暂缺时必须从同一 committed snapshot materialize restore target，禁止用 stale locator 新增 row 或把未观察到的 live carrier 解释为删除。window close 必须清除该 partition。"
+    query_rule: "command-palette fuzzy/full-text query 只匹配已发布 projection；禁止 query 内枚举 window、Workspace、PaneGroup 或调用 SessionNavigationData::all_sessions。Tantivy rebuild 只能由 WorkspaceRegistry projection-change event 在输入热路径外执行；generation 不一致必须 fail closed，不得 query-time rebuild。"
+    parity_rule: "local/runtime 共用同一 committed SessionNavigatorModel → WorkspaceRegistry → DataSource 语义；backend 只能影响 canonical commit 与 event 到达时机。"
+    failure_rule: "禁止 search-side membership discovery、WindowId/locator 持久化、live-only second collection、query-time Tantivy rebuild、stale generation 返回旧 documents、关闭 window 后残留 documents。"
+    forbidden_parallel_paths: ["app.window_ids search traversal", "app.views_of_type::<Workspace> search traversal", "SessionNavigationData::all_sessions query path", "search-owned live membership overlay", "query-time create_searcher/build_index", "tab/leaf-derived document identity"]
+
+  keyboard_navigation_surface:
+    id: "SN-SESSION-NAVIGATOR-KEYBOARD-CURSOR-72"
+    existing_abstractions: ["SessionNavigatorRowIdentity", "VerticalTabsPanelState", "SessionNavigatorViewportProjection", "ListState", "WorkspaceAction::ActivateRestoredWorkspaceSession"]
+    owner_rule: "EnvironmentTable SessionNavigatorState 的 selected_row_id 继续只表达 canonical Navigator selection；VerticalTabsPanelState 仅持有不可持久化的 keyboard cursor，并且 cursor 唯一身份必须是 SessionNavigatorRowIdentity（canonical RowId + environment navigation key）。"
+    projection_rule: "cursor 只在当前 committed、query-filtered viewport rows 中归一化；query、committed model revision、pin/order、split membership 或 virtual-to-live carrier 替换后，保留同一 stable identity，缺失时清空。ListState index 只用于几何 scroll-to-visible，绝不成为 cursor/persistence/action identity。"
+    action_rule: "Up/Down 在 flattened visible row projection 中移动；Enter 只能 dispatch 既有 ActivateRestoredWorkspaceSession typed action。Refresh、rename、pin、delete 必须继续走各自既有 WorkspaceAction/reducer，禁止 UI 第二套 mutation path。"
+    focus_rule: "Escape 清空 transient cursor，并在 query 非空时只清 query；query 已空时恢复 active tab focus。keyboard cursor 不得覆盖 Environment-owned canonical selection，也不得写入 SQLite、WorkspaceState 或 session snapshot。"
+    parity_rule: "local/runtime 共用 committed viewport projection、row identity、typed action 与 cursor cleanup；backend 只影响 model revision 到达时机。"
+    forbidden_parallel_paths: ["tab/leaf/index/EntityId cursor", "cursor writes SessionNavigatorState::selected_row_id", "keyboard-owned session mutation", "query-time membership discovery", "persistent cursor/user-state sidecar", "backend-specific keyboard adapter"]
+
   indexed_session_scan_transaction:
     id: "SN-ENVIRONMENT-INDEXED-SESSION-SCAN-TRANSACTION-51"
     existing_abstractions: ["EnvironmentBackend::refresh_indexed_sessions", "EnvironmentTable indexed sessions", "Environment runtime SessionId", "SessionNavigatorModel", "SessionNavigator reducer Refresh"]
@@ -417,6 +500,19 @@ state_model:
     parity_rule: "local 同步 scan 与 runtime 异步 scan 共用 commit contract；只允许 delivery timing 不同"
     failure_rule: "旧成功子集覆盖较新完整结果属于模型破坏；禁止 UI/reducer cache、列表冻结、debounce/retry 或永久保留缺失行"
     forbidden_parallel_paths: ["callback-only SessionId guard", "unversioned destructive collection replace", "Vertical Tabs membership cache", "reducer preserve-all-missing rows", "remote-only list adapter"]
+
+  expanded_provider_discovery:
+    id: "SN-EXPANDED-PROVIDER-DISCOVERY-65"
+    existing_abstractions: ["AgentRecord", "AgentSessionDiscoveryPlan", "AgentSessionDiscoveryRecord", "CliAgentStoreRoots", "EnvironmentTable indexed session scan generation", "EnvironmentBackend::refresh_indexed_sessions", "SessionNavigatorModel"]
+    provider_rule: "Droid、OpenCode、Copilot、Pi、Cursor 与 Antigravity 作为现有 CLIAgent 的 persisted-session provider 加入同一 registry descriptor；Claude、Codex、Omp 与这些 provider 由同一个 plan 穷尽选择、扫描和投影。禁止创建 AI Vault、第二个 sidebar、provider switch 或 UI-owned source registry。"
+    source_rule: "每个 descriptor 唯一声明 target-HOME 派生 root、允许的正本 source shape 与 parser；OpenCode 同时读取 legacy storage/session/**/*.json 与 ~/.local/share/opencode/opencode*.db，按 provider session id 去重且 SQLite 记录优先。cache、backup、subagent/tool transcript 与非正本嵌套路径不进入顶层会话。"
+    metadata_rule: "轻量 discovery record 至少持有 typed agent、provider session id、source、标题、启动 cwd 与更新时间；标题优先 provider title，再取首条可信真实用户消息，禁止把注入 context/tool/system 内容当用户标题。"
+    scoped_rule: "当前 Environment 已知 workspace roots 下的会话必须在全局 recent logical limit 外保底合并；scope membership 只由 canonical cwd containment 决定，不复制 RowId/order/selection。"
+    resume_rule: "所有新增 provider 只有存在公开原生 exact-session Resume argv 才可进入 can_index_sessions；Resume 继续走 EnvironmentEntryIntent::SessionRestore 与现有 allocate-then-deliver owner，禁止直接在 UI 拼命令或跨 host 恢复。"
+    transaction_rule: "任一 enabled provider 的 root traversal、SQLite schema/read 或 metadata parse 失败使本 generation typed Failed，EnvironmentTable 保留上一完整 collection；不得移植 Orca 的 per-file issues + partial success 语义。"
+    parity_rule: "local 与 runtime 执行同一个 descriptor plan 和 parser；差异只在 filesystem/SQLite 位于 current host 还是 helper target host，以及 completion timing。"
+    protocol_rule: "ScanCliAgentSessions wire 仍只投影 typed CLIAgent 与 shared record；新增 provider 改变 request 语义，必须递增 REMOTE_SERVER_PROTOCOL_REVISION 并进入新 helper slot。"
+    forbidden_parallel_paths: ["AI Vault panel", "second session collection", "renderer-owned provider scanner", "partial scan success with issues", "local-only provider parser", "runtime-only provider allow-list", "UI-built resume argv", "cwd scope fallback to lexical prefix"]
 
   committed_render_projection:
     id: "SN-SESSION-NAVIGATOR-COMMITTED-RENDER-PROJECTION-52"
@@ -1377,6 +1473,12 @@ ux_contract_matrix:
       may_change: ["metadata", "lifecycle"]
       must_preserve: ["row_id", "position", "selection"]
       test: "test_sort_stability_multiple_sorts"
+    - id: "SN-INTRA-VIEWPORTED-PROJECTION-01"
+      scope: "within_environment"
+      event: "Committed Navigator model revision, query, pin/order, rename, activity, or split membership changes while the list is scrolled"
+      may_change: ["visible_viewport_items", "measured_item_heights", "scroll_geometry", "detail_overlay_visibility"]
+      must_preserve: ["canonical_row_id", "reorder_unit_boundary", "selection", "pin", "display_order", "stable_top_unit_when_present", "inline_editor_identity", "local_remote_projection_parity"]
+      test: "session_navigator_viewport_uses_reorder_units_and_stable_identities"
     - id: "SN-INTRA-ALIAS-01"
       scope: "within_environment"
       event: "InitialScan/Refresh observes external session user-state alias"
@@ -1425,6 +1527,12 @@ ux_contract_matrix:
       may_change: ["operation_error_feedback"]
       must_preserve: ["previous_indexed_rows", "filesystem_root_is_never_a_home_fallback", "no_wrong_store_access", "no_partial_delete_commit", "no_local_native_write", "local_remote_home_semantics"]
       test: "cli_agent_home_resolution_never_falls_back_to_filesystem_root"
+    - id: "SN-INTRA-NATIVE-SESSION-SOURCE-SHAPE-01"
+      scope: "cross_environment"
+      event: "DeleteOrArchive discovered Omp native session source"
+      may_change: ["provider_store_file", "indexed_source_cache", "lifecycle"]
+      must_preserve: ["shared_discovery_mutation_source_authority", "Omp_sessions_bucket_jsonl_only", "cache_backup_tool_log_rejection", "optimistic_delete_rollback_on_refusal", "local_remote_mutation_semantics"]
+      test: "remote_mutation_deletes_omp_authoritative_session_file + remote_mutation_rejects_omp_tool_log_paths"
     - id: "SN-INTRA-CWD-PARSER-PARITY-01"
       scope: "cross_environment"
       event: "LocalInitialScan and RemoteInitialScan read the same CLI-agent cwd metadata"
@@ -1527,6 +1635,12 @@ ux_contract_matrix:
       may_change: ["session_metadata"]
       must_preserve: ["logical_session_limit", "discovery_population_semantics"]
       test: "test_session_navigator_initial_refresh_and_remote_share_logical_limit"
+    - id: "SN-EXPANDED-PROVIDER-DISCOVERY-01"
+      scope: "cross_environment"
+      event: "InitialScan/Refresh discovers Droid/OpenCode/Copilot/Pi/Cursor/Antigravity stores including an old current-workspace session"
+      may_change: ["indexed_rows", "provider_metadata"]
+      must_preserve: ["single_environment_collection", "RowId_order_selection", "full_scan_commit", "scope_old_session", "local_remote_parser_parity", "exact_native_resume"]
+      test: "expanded_provider_discovery_is_registry_owned_complete_and_scope_preserving"
     - id: "SN-INTRA-REORDER-01"
       scope: "within_environment"
       event: "Reorder"
@@ -1783,6 +1897,13 @@ ux_contract_matrix:
       co_required_ownership: ["SN-LIVE-CONTAINER-TITLE-OWNERSHIP-60"]
       inheritance_rule: "热路径重写 live projection 时必须同时继承 live container title ownership 的 static gate；禁止只为不卡 UI 加门禁而放开 tab/env 标题回填"
 
+    - id: "SN-PASSIVE-DISCOVERY-SEMANTIC-TRIGGERS-68"
+      scope: "local_remote_parity"
+      event: "Generic terminal bootstrap or split completes without changing any provider history source"
+      may_change: ["live_container_projection", "focused_row", "terminal_readiness"]
+      must_preserve: ["indexed_session_collection", "scan_generation", "provider_store_io_count", "explicit_refresh_capability", "agent_close_history_takeover", "runtime_home_first_discovery"]
+      test: "generic_terminal_bootstrap_does_not_trigger_provider_history_scan"
+
   check:
     parser_test: "test_session_navigator_spec_matrix_is_complete_and_linked"
     static_guard: "script/check_local_remote_parity"
@@ -1980,8 +2101,10 @@ refresh_delivery:
   canonical_owner: "EnvironmentTable 的 authority-scoped IndexedCliAgentSessionScanToken + Workspace refresh generation"
   local: "UI action 只捕获 enabled_agents / observed_agents 并开始 token；provider store 的目录、JSON/JSONL 读取必须经 spawn_blocking 在 worker 执行。完成回调只能提交 current token 的 typed outcome。"
   runtime: "UI action 只开始 token；RPC 由 async transport 执行。完成回调遵守与 local 相同的 current-token atomic commit 与 refresh-generation feedback 规则。"
-  forbidden: ["在 WarpUI action/render/main callback 内同步扫描 provider store", "用 debounce/sleep 掩盖卡顿", "stale completion 覆盖 rows 或 refresh feedback", "source-missing/failure/cancel 清空 canonical rows"]
-  visible_semantics: "扫描期间旧会话列表保持可交互；成功后只重绘一次 committed projection；失败、取消或 source-missing 保留已提交 collection。"
+  coalescing: "同 navigation authority 的有权 PassiveProjection 遇到 in-flight token 时只合并，不得创建 replacement token；UserInitiated 必须创建 replacement token 以抢占停滞 worker，随后有权 passive event 合并到该 token。"
+  trigger_ownership: "PassiveProjection 的生产调用方集合必须 fail-closed：初始 Workspace authority discovery、history-enabled 设置变化、provider source mutation 成功、runtime target HOME 首次物化、agent-bound carrier 移除，以及通用 passive action wrapper。TerminalSessionBootstrapped/split/普通 terminal 新建关闭无权启动 provider discovery。"
+  forbidden: ["在 WarpUI action/render/main callback 内同步扫描 provider store", "用 debounce/sleep/TTL 猜 source freshness", "generic terminal bootstrap 或 split 启动 provider discovery", "被动 lifecycle event 连续替换同 authority token令所有 completion stale", "stale completion 覆盖 rows 或 refresh feedback", "source-missing/failure/cancel 清空 canonical rows"]
+  visible_semantics: "扫描期间旧会话列表保持可交互；只有显式用户 Refresh 的当前 Navigator header 图标显示 spinner，完整成功后静默结束 spinner 并只重绘一次 committed projection；失败、取消或 source-missing 保留已提交 collection。显式失败可发一个 operation-keyed transient error，绝不显示全局开始/成功 toast 或将 partial preserved 称为完整成功。"
 
 # ─────────────────────────────────────────────────────────
 # 12. 测试约束 (Test Constraints)

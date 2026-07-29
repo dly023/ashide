@@ -4297,11 +4297,11 @@ fn command_detected_structured_agent_stop_reaches_notification_model_without_ses
         let terminal = add_window_with_terminal(&mut app, None);
 
         terminal.update(&mut app, |view, ctx| {
-            view.register_cli_agent_listener_for_command_detection(CLIAgent::Jcode, ctx);
+            view.register_cli_agent_listener_for_command_detection(CLIAgent::Claude, ctx);
             view.model_events_handle.update(ctx, |_, ctx| {
                 ctx.emit(ModelEvent::PluggableNotification {
                     title: Some(CLI_AGENT_NOTIFICATION_SENTINEL.to_owned()),
-                    body: r#"{"v":1,"agent":"jcode","event":"stop","session_id":"session-bug","cwd":"/tmp/project"}"#.to_owned(),
+                    body: r#"{"v":1,"agent":"claude","event":"stop","session_id":"session-bug","cwd":"/tmp/project"}"#.to_owned(),
                 });
             });
         });
@@ -4310,7 +4310,7 @@ fn command_detected_structured_agent_stop_reaches_notification_model_without_ses
             let session = CLIAgentSessionsModel::as_ref(ctx)
                 .session(view.view_id)
                 .expect("command detection should create a CLI agent session");
-            assert_eq!(session.agent, CLIAgent::Jcode);
+            assert_eq!(session.agent, CLIAgent::Claude);
             assert_eq!(session.status, CLIAgentSessionStatus::Success);
             assert!(session.listener.is_some());
 
@@ -4322,7 +4322,7 @@ fn command_detected_structured_agent_stop_reaches_notification_model_without_ses
             assert_eq!(items[0].category, NotificationCategory::Complete);
             assert!(matches!(
                 items[0].agent,
-                NotificationSourceAgent::CLI(CLIAgent::Jcode)
+                NotificationSourceAgent::CLI(CLIAgent::Claude)
             ));
         });
     })

@@ -757,8 +757,9 @@ async fn empty_required_result_is_rejected_at_transport_boundary() {
         let Some(client_message::Message::ScanCliAgentSessions(request)) = &message.message else {
             panic!("Expected ScanCliAgentSessions, got {:?}", message.message);
         };
-        assert_eq!(request.enabled_agents, ["Jcode", "Omp"]);
+        assert_eq!(request.enabled_agents, ["Omp"]);
         assert!(request.previously_observed_agents.is_empty());
+        assert_eq!(request.scope_paths, ["/home/test/project"]);
         server_message::Message::ScanCliAgentSessionsResponse(
             crate::proto::ScanCliAgentSessionsResponse { result: None },
         )
@@ -772,9 +773,14 @@ async fn empty_required_result_is_rejected_at_transport_boundary() {
                     home_dir: "/home/test".to_owned(),
                     claude_config_dir: "/home/test/.claude".to_owned(),
                     codex_home: "/home/test/.codex".to_owned(),
+                    opencode_data_dir: "/home/test/.local/share/opencode".to_owned(),
+                    copilot_home: "/home/test/.copilot".to_owned(),
+                    pi_agent_home: "/home/test/.pi/agent".to_owned(),
+                    omp_agent_home: "/home/test/.omp/agent".to_owned(),
                 },
-                vec!["Jcode".to_owned(), "Omp".to_owned()],
+                vec!["Omp".to_owned()],
                 Vec::new(),
+                vec!["/home/test/project".to_owned()],
             )
             .await,
         Err(ClientError::UnexpectedResponse)

@@ -41,9 +41,11 @@ pub(crate) fn try_scan_current_app_cli_agent_session_discovery(
     logical_limit: usize,
     enabled_agents: impl IntoIterator<Item = CLIAgent>,
     previously_observed_agents: &HashSet<CLIAgent>,
+    scope_paths: impl IntoIterator<Item = PathBuf>,
 ) -> Result<IndexedCliAgentSessionScanOutcome, CliAgentSessionScanError> {
     let roots = resolve_current_process_cli_agent_store_roots()?;
-    let plan = AgentSessionDiscoveryPlan::from_enabled_agents(enabled_agents, logical_limit);
+    let plan = AgentSessionDiscoveryPlan::from_enabled_agents(enabled_agents, logical_limit)
+        .with_scope_paths(scope_paths);
     scan_current_app_cli_agent_session_discovery_with_plan(plan, &roots, previously_observed_agents)
 }
 
@@ -133,6 +135,10 @@ fn indexed_session_to_snapshot(session: AgentSessionDiscoveryRecord) -> Workspac
             external_session_snapshot_id(session.agent, path)
         }
         AgentSessionDiscoverySource::CodexIndexEntry {
+            provider_session_id,
+            ..
+        }
+        | AgentSessionDiscoverySource::OpenCodeSqliteEntry {
             provider_session_id,
             ..
         } => external_index_session_snapshot_id(session.agent, provider_session_id),
@@ -404,6 +410,10 @@ fn read_session_user_state(config_dir: Option<&Path>) -> SessionUserState {
 }
 
 fn sanitize_session_user_state(mut state: SessionUserState) -> SessionUserState {
+    fn is_persistable_local_agent_history_user_state_key(key: &str) -> bool {
+        !key.starts_with("local::pane:")
+    }
+
     state.aliases = state
         .aliases
         .into_iter()
@@ -412,7 +422,8 @@ fn sanitize_session_user_state(mut state: SessionUserState) -> SessionUserState 
             let alias = alias.trim().to_owned();
             (!key.is_empty()
                 && !alias.is_empty()
-                && !WorkspaceSessionSnapshot::is_volatile_layout_identity_key(&key))
+                && !WorkspaceSessionSnapshot::is_volatile_layout_identity_key(&key)
+                && is_persistable_local_agent_history_user_state_key(&key))
             .then_some((key, alias))
         })
         .collect();
@@ -421,7 +432,9 @@ fn sanitize_session_user_state(mut state: SessionUserState) -> SessionUserState 
         .into_iter()
         .map(|key| key.trim().to_owned())
         .filter(|key| {
-            !key.is_empty() && !WorkspaceSessionSnapshot::is_volatile_layout_identity_key(key)
+            !key.is_empty()
+                && !WorkspaceSessionSnapshot::is_volatile_layout_identity_key(key)
+                && is_persistable_local_agent_history_user_state_key(key)
         })
         .collect();
     state
@@ -594,7 +607,6 @@ fn validate_mutable_session_path_location(
     let allowed_roots = [
         roots.claude_projects(),
         roots.codex_sessions(),
-        roots.jcode_sessions(),
         roots.omp_sessions(),
     ];
 
@@ -788,30 +800,11 @@ mod tests {
     }
 
     #[test]
-    fn local_jcode_and_omp_cold_scan_project_stable_rows_without_layout_identity() {
+    fn local_omp_cold_scan_projects_stable_rows_without_layout_identity() {
         let home = test_home();
         let project = home.path().join("project");
         fs::create_dir(&project).expect("create indexed project");
-
-        let jcode_id = "session_bug_1784897411999_c3c24cb8ea67c6a2";
-        let jcode_path = home
-            .path()
-            .join(".jcode/sessions")
-            .join(format!("{jcode_id}.json"));
-        fs::create_dir_all(jcode_path.parent().expect("Jcode session parent"))
-            .expect("create Jcode session directory");
-        fs::write(
-            &jcode_path,
-            serde_json::json!({
-                "id": jcode_id,
-                "short_name": "bug",
-                "working_dir": project,
-                "updated_at": "2026-07-24T13:28:15.634345Z",
-                "messages": [{"role": "user", "content": "恢复这个 Jcode 会话"}],
-            })
-            .to_string(),
-        )
-        .expect("write Jcode session");
+        let canonical_project = fs::canonicalize(&project).expect("canonicalize indexed project");
 
         let omp_id = "019f0a0b-1111-4222-8333-444444444444";
         let omp_path = home
@@ -832,13 +825,12 @@ mod tests {
 
         let merged = WorkspaceSessionSnapshot::merge_for_session_navigator(
             scan_current_app_cli_agent_sessions_with_dirs(80, home.path())
-                .expect("scan local Jcode and Omp sessions"),
+                .expect("scan local Omp sessions"),
         );
 
-        for (agent, session_id, label, path) in [
-            (CLIAgent::Jcode, jcode_id, "bug", &jcode_path),
-            (CLIAgent::Omp, omp_id, "继续 Omp 会话", &omp_path),
-        ] {
+        for (agent, session_id, label, path) in
+            [(CLIAgent::Omp, omp_id, "继续 Omp 会话", &omp_path)]
+        {
             let session = merged
                 .iter()
                 .find(|session| session.cli_agent_session_id.as_deref() == Some(session_id))
@@ -854,7 +846,7 @@ mod tests {
             assert_eq!(session.cli_agent_session_id.as_deref(), Some(session_id));
             assert_eq!(session.cli_command.as_deref(), Some(agent.command_prefix()));
             assert_eq!(session.label.as_deref(), Some(label));
-            assert_eq!(session.cwd.as_deref(), project.to_str());
+            assert_eq!(session.cwd.as_deref(), canonical_project.to_str());
             assert_eq!(session.kind, WorkspaceSessionKind::AgentTerminal);
             assert_eq!(
                 session.cli_agent_origin,
@@ -1324,7 +1316,7 @@ mod session_user_state_identity_tests {
     use super::*;
 
     #[test]
-    fn test_session_user_state_drops_volatile_layout_identity_debt() {
+    fn local_session_user_state_drops_generic_pane_identity_debt() {
         let state = SessionUserState {
             aliases: HashMap::from([
                 ("tab:1:leaf:0".to_owned(), "旧坐标".to_owned()),
@@ -1332,7 +1324,10 @@ mod session_user_state_identity_tests {
                     "local::source:tab:1:leaf:0".to_owned(),
                     "旧逻辑坐标".to_owned(),
                 ),
-                ("local::pane:deadbeef".to_owned(), "稳定 pane".to_owned()),
+                (
+                    "local::pane:deadbeef".to_owned(),
+                    "错误终端 pane".to_owned(),
+                ),
                 (
                     "local::agent:Codex:provider-id".to_owned(),
                     "稳定 agent".to_owned(),
@@ -1342,13 +1337,14 @@ mod session_user_state_identity_tests {
         };
 
         let sanitized = sanitize_session_user_state(state);
-        assert_eq!(sanitized.aliases.len(), 2);
+        assert_eq!(sanitized.aliases.len(), 1);
         assert!(!sanitized.aliases.contains_key("tab:1:leaf:0"));
         assert!(!sanitized.aliases.contains_key("local::source:tab:1:leaf:0"));
-        assert_eq!(sanitized.aliases["local::pane:deadbeef"], "稳定 pane");
+        assert!(!sanitized.aliases.contains_key("local::pane:deadbeef"));
         assert_eq!(
-            sanitized.pinned,
-            HashSet::from(["local::pane:deadbeef".to_owned()])
+            sanitized.aliases["local::agent:Codex:provider-id"],
+            "稳定 agent"
         );
+        assert!(sanitized.pinned.is_empty());
     }
 }

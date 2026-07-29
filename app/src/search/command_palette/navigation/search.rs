@@ -6,79 +6,16 @@ use crate::search::data_source::QueryResult;
 use crate::search::SyncDataSource;
 use crate::session_management::{CommandContext, SessionNavigationData, SessionSource};
 use fuzzy_match::match_indices_case_insensitive;
-use std::collections::HashSet;
 use std::ops::Range;
-use warpui::{AppContext, ModelHandle};
+use warpui::{AppContext, ModelHandle, SingletonEntity};
 
-/// Collects the full set of sessions the command-palette search should surface:
-/// live terminal panes (via `SessionNavigationData::all_sessions`) PLUS the
-/// non-live sessions the Session Navigator sidebar shows — restored, CLI-agent-
-/// indexed, and historical Ashide conversation sessions — which have no live
-/// terminal pane and therefore were invisible to the search before this fix.
-///
-/// Non-live sessions are built per `WorkspaceSessionSnapshot` via
-/// `SessionNavigationData::from_workspace_session_snapshot` and deduplicated by
-/// their restore-target logical key so the merged navigator set and the search
-/// set agree.
-fn collect_search_sessions(app: &AppContext) -> Vec<SessionNavigationData> {
-    use crate::app_state::WorkspaceSessionSnapshot;
-    use crate::workspace::Workspace;
-
-    let live: Vec<SessionNavigationData> = SessionNavigationData::all_sessions(app).collect();
-
-    // Track live pane ids so we don't double-add a session that is both live
-    // and present in the navigator snapshot set (live wins — it has the real
-    // prompt/PS1).
-    let live_keys: HashSet<String> = live
-        .iter()
-        .map(|s| {
-            format!(
-                "tab::{}::{}",
-                s.pane_view_locator().pane_group_id,
-                s.pane_view_locator().pane_id
-            )
-        })
-        .collect();
-
-    let mut sessions = live;
-
-    let mut seen_restore_keys: HashSet<String> = HashSet::new();
-    for window_id in app.window_ids().collect::<Vec<_>>() {
-        let Some(workspace_handles) = app.views_of_type::<Workspace>(window_id) else {
-            continue;
-        };
-        for workspace_handle in workspace_handles.into_iter() {
-            let workspace = workspace_handle.as_ref(app);
-            let snapshots: Vec<WorkspaceSessionSnapshot> =
-                workspace.workspace_session_snapshots_for_search();
-            for snapshot in snapshots.into_iter() {
-                let logical_key = snapshot.logical_key();
-                if !seen_restore_keys.insert(logical_key.clone()) {
-                    continue;
-                }
-                // Skip sessions that are live panes — already covered above
-                // with richer prompt data.
-                if snapshot.id.starts_with("tab:") {
-                    // Live sessions have volatile ids; match by presence in the
-                    // live set is non-trivial, but live sessions are already in
-                    // `live`, so skip any snapshot whose id is a live tab id.
-                    // We approximate by skipping tab: snapshots entirely; the
-                    // live `all_sessions` set already represents them.
-                    continue;
-                }
-                // Avoid duplicating a session that happens to share a logical
-                // key with a live one.
-                if live_keys.contains(&logical_key) {
-                    continue;
-                }
-                sessions.push(SessionNavigationData::from_workspace_session_snapshot(
-                    &snapshot, window_id,
-                ));
-            }
-        }
-    }
-
-    sessions
+/// Returns the canonical session documents published by each Workspace when
+/// its Session Navigator projection commits. Query paths must not rediscover
+/// workspace membership or clone source snapshots on every keystroke.
+pub(super) fn collect_search_sessions(app: &AppContext) -> Vec<SessionNavigationData> {
+    crate::workspace::WorkspaceRegistry::as_ref(app)
+        .session_search_snapshot()
+        .1
 }
 
 /// A session that was fuzzy matched against a search term.
@@ -260,6 +197,7 @@ fn searchable_session_string_and_ranges(
     )
 }
 
+#[derive(Clone)]
 struct SearchableSessionStringRanges {
     command_range: Option<Range<usize>>,
     hint_text_range: Range<usize>,
@@ -275,6 +213,12 @@ pub trait SessionSearcher {
     ) -> anyhow::Result<Vec<QueryResult<SearcherAction>>>;
 
     fn active_session_id(&self, app: &AppContext) -> Option<PaneId>;
+
+    /// Refreshes derived search state after the canonical Navigator projection
+    /// commits. Query execution itself must not rediscover or rebuild it.
+    fn refresh_search_index(&mut self, _generation: u64, _app: &AppContext) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 pub struct FuzzySessionSearcher {
@@ -319,16 +263,19 @@ mod full_text_searcher {
     use crate::define_search_schema;
     use crate::pane_group::PaneId;
     use crate::search::command_palette::navigation::search::{
-        searchable_session_string_and_ranges, MatchedSession, SearcherAction,
-        SessionHighlightIndices, SessionMatchResult, SessionSearcher,
+        searchable_session_string_and_ranges, MatchedSession, SearchableSessionStringRanges,
+        SearcherAction, SessionHighlightIndices, SessionMatchResult, SessionSearcher,
     };
     use crate::search::command_palette::navigation::search_item::SearchItem;
     use crate::search::data_source::QueryResult;
-    use crate::search::searcher::{DEFAULT_MEMORY_BUDGET, SCORE_CONVERSION_FACTOR};
-    use crate::session_management::SessionSource;
+    use crate::search::searcher::{
+        SimpleFullTextSearcher, DEFAULT_MEMORY_BUDGET, SCORE_CONVERSION_FACTOR,
+    };
+    use crate::session_management::{SessionNavigationData, SessionSource};
+    use crate::workspace::WorkspaceRegistry;
     use itertools::Itertools;
     use std::collections::HashMap;
-    use warpui::{AppContext, ModelHandle};
+    use warpui::{AppContext, ModelHandle, SingletonEntity};
 
     define_search_schema!(
         schema_name: SESSION_SEARCH_SCHEMA,
@@ -341,6 +288,20 @@ mod full_text_searcher {
 
     pub struct FullTextSessionSearcher {
         pub(crate) session_source_handle: ModelHandle<SessionSource>,
+        index: Option<IndexedSessionSearch>,
+    }
+
+    struct IndexedSessionSearch {
+        generation: u64,
+        searcher: SimpleFullTextSearcher<SessionSearchConfig>,
+        sessions: HashMap<SessionSearchId, SessionSearchDocumentData>,
+    }
+
+    #[derive(Clone)]
+    struct SessionSearchDocumentData {
+        session: SessionNavigationData,
+        highlight: SearchableSessionStringRanges,
+        search_string: String,
     }
 
     impl SessionSearcher for FullTextSessionSearcher {
@@ -349,24 +310,15 @@ mod full_text_searcher {
             search_term: &str,
             app: &AppContext,
         ) -> anyhow::Result<Vec<QueryResult<SearcherAction>>> {
-            let searcher = SESSION_SEARCH_SCHEMA.create_searcher(DEFAULT_MEMORY_BUDGET);
-
-            let mut sessions = HashMap::new();
-            let documents = super::collect_search_sessions(app)
-                .into_iter()
-                .enumerate()
-                .map(|(idx, session)| {
-                    let (search_string, highlight) = searchable_session_string_and_ranges(&session);
-                    let search_id = SessionSearchId(idx);
-
-                    sessions.insert(search_id, (session, highlight, search_string.clone()));
-                    SessionSearchDocument {
-                        session: search_string,
-                        search_id: search_id.0 as u64,
-                    }
-                });
-
-            searcher.build_index(documents)?;
+            let index = self
+                .index
+                .as_ref()
+                .expect("full-text Session Navigator index must be initialized before query");
+            let generation = WorkspaceRegistry::as_ref(app).session_search_generation();
+            anyhow::ensure!(
+                index.generation == generation,
+                "Session Navigator search index is waiting for committed generation {generation}"
+            );
 
             let active_session_id = match self.session_source_handle.as_ref(app) {
                 SessionSource::None => None,
@@ -374,12 +326,14 @@ mod full_text_searcher {
             };
 
             if search_term.is_empty() {
-                return Ok(sessions
-                    .into_iter()
-                    .sorted_by_key(|(_, (session, ..))| session.last_focus_ts())
-                    .map(|(_, (session, ..))| {
+                return Ok(index
+                    .sessions
+                    .values()
+                    .cloned()
+                    .sorted_by_key(|document| document.session.last_focus_ts())
+                    .map(|document| {
                         let matched_session = MatchedSession {
-                            session,
+                            session: document.session,
                             match_result: SessionMatchResult::no_match(),
                         };
                         SearchItem::new(matched_session, active_session_id).into()
@@ -387,24 +341,26 @@ mod full_text_searcher {
                     .collect());
             }
 
-            let matched_sessions = searcher.search_id(search_term)?;
+            let matched_sessions = index.searcher.search_id(search_term)?;
             Ok(matched_sessions
                 .into_iter()
                 .filter_map(|search_match| {
-                    let (session, highlight, search_string) = sessions
-                        .remove(&SessionSearchId(search_match.values.search_id as usize))?;
+                    let document = index
+                        .sessions
+                        .get(&SessionSearchId(search_match.values.search_id as usize))?;
 
                     let char_indices = byte_indices_to_char_indices(
-                        &search_string,
+                        &document.search_string,
                         search_match.highlights.session,
                     );
-                    let highlight_indices = SessionHighlightIndices::new(char_indices, highlight);
+                    let highlight_indices =
+                        SessionHighlightIndices::new(char_indices, document.highlight.clone());
                     let match_result = SessionMatchResult {
                         score: (search_match.score * SCORE_CONVERSION_FACTOR) as i64,
                         highlight_indices,
                     };
                     let matched_session = MatchedSession {
-                        session,
+                        session: document.session.clone(),
                         match_result,
                     };
                     Some(SearchItem::new(matched_session, active_session_id).into())
@@ -418,13 +374,68 @@ mod full_text_searcher {
                 SessionSource::Set { active_pane_id, .. } => Some(*active_pane_id),
             }
         }
+
+        fn refresh_search_index(
+            &mut self,
+            generation: u64,
+            app: &AppContext,
+        ) -> anyhow::Result<()> {
+            if self
+                .index
+                .as_ref()
+                .is_some_and(|index| index.generation == generation)
+            {
+                return Ok(());
+            }
+            self.index = Some(Self::build_index(generation, app)?);
+            Ok(())
+        }
     }
 
     impl FullTextSessionSearcher {
-        pub fn new(session_source_handle: ModelHandle<SessionSource>) -> Self {
-            Self {
+        pub fn new(session_source_handle: ModelHandle<SessionSource>, app: &AppContext) -> Self {
+            let mut searcher = Self {
                 session_source_handle,
+                index: None,
+            };
+            let generation = WorkspaceRegistry::as_ref(app).session_search_generation();
+            if let Err(error) = searcher.refresh_search_index(generation, app) {
+                log::error!(
+                    "failed to initialize Session Navigator command-palette index at generation {generation}: {error:#}"
+                );
             }
+            searcher
+        }
+
+        fn build_index(generation: u64, app: &AppContext) -> anyhow::Result<IndexedSessionSearch> {
+            let searcher = SESSION_SEARCH_SCHEMA.create_searcher(DEFAULT_MEMORY_BUDGET);
+            let mut sessions = HashMap::new();
+            let documents = WorkspaceRegistry::as_ref(app)
+                .session_search_documents()
+                .cloned()
+                .enumerate()
+                .map(|(idx, session)| {
+                    let (search_string, highlight) = searchable_session_string_and_ranges(&session);
+                    let search_id = SessionSearchId(idx);
+                    sessions.insert(
+                        search_id,
+                        SessionSearchDocumentData {
+                            session,
+                            highlight,
+                            search_string: search_string.clone(),
+                        },
+                    );
+                    SessionSearchDocument {
+                        session: search_string,
+                        search_id: search_id.0 as u64,
+                    }
+                });
+            searcher.build_index(documents)?;
+            Ok(IndexedSessionSearch {
+                generation,
+                searcher,
+                sessions,
+            })
         }
     }
 

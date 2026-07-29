@@ -794,9 +794,14 @@ fn test_cli_agent_history_enabled_agents_default_to_all_discoverable_native_resu
             assert_eq!(
                 settings.cli_agent_history_enabled_agents(),
                 vec![
-                    CLIAgent::Jcode,
                     CLIAgent::Claude,
                     CLIAgent::Codex,
+                    CLIAgent::Droid,
+                    CLIAgent::OpenCode,
+                    CLIAgent::Copilot,
+                    CLIAgent::Pi,
+                    CLIAgent::CursorCli,
+                    CLIAgent::Antigravity,
                     CLIAgent::Omp,
                 ],
             );
@@ -814,7 +819,6 @@ fn test_cli_agent_history_enabled_agents_ignore_stale_names_and_deduplicate_sele
                 vec![
                     CLIAgent::Omp.to_serialized_name(),
                     "removed-provider".to_owned(),
-                    CLIAgent::Jcode.to_serialized_name(),
                     CLIAgent::Omp.to_serialized_name(),
                     CLIAgent::Amp.to_serialized_name(),
                 ],
@@ -825,9 +829,9 @@ fn test_cli_agent_history_enabled_agents_ignore_stale_names_and_deduplicate_sele
         AISettings::handle(&app).read(&app, |settings, _ctx| {
             assert_eq!(
                 settings.cli_agent_history_enabled_agents(),
-                vec![CLIAgent::Omp, CLIAgent::Jcode],
+                vec![CLIAgent::Omp],
             );
-            assert!(settings.is_cli_agent_history_enabled(CLIAgent::Jcode));
+            assert!(settings.is_cli_agent_history_enabled(CLIAgent::Omp));
             assert!(!settings.is_cli_agent_history_enabled(CLIAgent::Amp));
         });
     });

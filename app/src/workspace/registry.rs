@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::FairMutex;
@@ -6,7 +7,10 @@ use warpui::{
     AppContext, Entity, EntityId, ModelHandle, SingletonEntity, WeakViewHandle, WindowId,
 };
 
-use crate::terminal::{model::terminal_model::TerminalModel, TerminalManager};
+use crate::session_management::SessionNavigationData;
+use crate::terminal::{model::terminal_model::TerminalModel, CLIAgent, TerminalManager};
+use crate::workspace::environment_backend::EnvironmentSessionRefreshIntent;
+use crate::workspace::environment_table::IndexedCliAgentSessionScanToken;
 
 use super::{PaneViewLocator, Workspace};
 
@@ -16,7 +20,85 @@ use super::{PaneViewLocator, Workspace};
 /// that `views_of_type::<Workspace>` performs.
 pub struct WorkspaceRegistry {
     workspaces: HashMap<WindowId, WeakViewHandle<Workspace>>,
+    /// Canonical committed Session Navigator documents, partitioned by window.
+    /// Search only consumes this projection; it must never rediscover membership
+    /// by walking Workspace views on each keystroke.
+    session_search_documents: HashMap<WindowId, Vec<SessionNavigationData>>,
+    session_search_generation: u64,
     retiring_session_owners: HashMap<String, Vec<RetiringWorkspaceSessionOwner>>,
+    /// Process-scoped local provider-store scan transactions. The native source
+    /// is shared by every local Workspace, but each recipient still commits the
+    /// result through its own EnvironmentTable token.
+    local_cli_agent_session_scans: HashMap<LocalCliAgentSessionScanKey, LocalCliAgentSessionScan>,
+}
+
+/// Notification emitted after the canonical per-window Session Navigator
+/// projection changes. Consumers may rebuild derived, non-persistent indexes,
+/// but must not rediscover Workspace membership themselves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceRegistryEvent {
+    SessionSearchProjectionChanged { generation: u64 },
+}
+
+/// A source-read key, not a Session Navigator identity. Scope, enabled
+/// providers, and observed-provider semantics must all agree before two local
+/// Workspaces may share one filesystem scan.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct LocalCliAgentSessionScanKey {
+    enabled_agents: Vec<String>,
+    observed_agents: Vec<String>,
+    scope_paths: Vec<PathBuf>,
+}
+
+impl LocalCliAgentSessionScanKey {
+    pub(crate) fn new(
+        enabled_agents: &[CLIAgent],
+        observed_agents: &HashSet<CLIAgent>,
+        scope_paths: &[PathBuf],
+    ) -> Self {
+        let mut enabled_agents = enabled_agents
+            .iter()
+            .map(|agent| agent.to_serialized_name().to_owned())
+            .collect::<Vec<_>>();
+        enabled_agents.sort_unstable();
+        enabled_agents.dedup();
+
+        let mut observed_agents = observed_agents
+            .iter()
+            .map(|agent| agent.to_serialized_name().to_owned())
+            .collect::<Vec<_>>();
+        observed_agents.sort_unstable();
+        observed_agents.dedup();
+
+        let mut scope_paths = scope_paths.to_vec();
+        scope_paths.sort_unstable();
+        scope_paths.dedup();
+
+        Self {
+            enabled_agents,
+            observed_agents,
+            scope_paths,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LocalCliAgentSessionScanParticipant {
+    pub(crate) authority: String,
+    pub(crate) scan_token: IndexedCliAgentSessionScanToken,
+    pub(crate) refresh_generation: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+struct LocalCliAgentSessionScan {
+    generation: u64,
+    participants: HashMap<WindowId, LocalCliAgentSessionScanParticipant>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LocalCliAgentSessionScanRequest {
+    Started { generation: u64 },
+    Joined,
 }
 
 struct RetiringWorkspaceSessionOwner {
@@ -42,8 +124,72 @@ impl WorkspaceRegistry {
     pub fn new() -> Self {
         Self {
             workspaces: HashMap::new(),
+            session_search_documents: HashMap::new(),
+            session_search_generation: 0,
             retiring_session_owners: HashMap::new(),
+            local_cli_agent_session_scans: HashMap::new(),
         }
+    }
+
+    /// Registers one local Workspace as a recipient of a process-scoped source
+    /// scan. An explicit refresh replaces the worker generation while retaining
+    /// passive followers, so no EnvironmentTable token is stranded when a user
+    /// refresh overtakes startup reconciliation.
+    pub(crate) fn request_local_cli_agent_session_scan(
+        &mut self,
+        key: LocalCliAgentSessionScanKey,
+        window_id: WindowId,
+        participant: LocalCliAgentSessionScanParticipant,
+        intent: EnvironmentSessionRefreshIntent,
+    ) -> LocalCliAgentSessionScanRequest {
+        let Some(scan) = self.local_cli_agent_session_scans.get_mut(&key) else {
+            self.local_cli_agent_session_scans.insert(
+                key,
+                LocalCliAgentSessionScan {
+                    generation: 1,
+                    participants: HashMap::from([(window_id, participant)]),
+                },
+            );
+            return LocalCliAgentSessionScanRequest::Started { generation: 1 };
+        };
+
+        scan.participants.insert(window_id, participant);
+        if matches!(
+            intent,
+            EnvironmentSessionRefreshIntent::UserInitiated { .. }
+        ) {
+            scan.generation = scan
+                .generation
+                .checked_add(1)
+                .expect("local CLI-agent session scan generation exhausted");
+            LocalCliAgentSessionScanRequest::Started {
+                generation: scan.generation,
+            }
+        } else {
+            LocalCliAgentSessionScanRequest::Joined
+        }
+    }
+
+    /// Returns every still-live Workspace transaction that belongs to the
+    /// completing generation. A stale worker cannot clear or deliver a newer
+    /// explicit refresh generation.
+    pub(crate) fn complete_local_cli_agent_session_scan(
+        &mut self,
+        key: &LocalCliAgentSessionScanKey,
+        generation: u64,
+    ) -> Vec<(WindowId, LocalCliAgentSessionScanParticipant)> {
+        let Some(scan) = self.local_cli_agent_session_scans.get(key) else {
+            return Vec::new();
+        };
+        if scan.generation != generation {
+            return Vec::new();
+        }
+        self.local_cli_agent_session_scans
+            .remove(key)
+            .expect("current local CLI-agent scan must remain present")
+            .participants
+            .into_iter()
+            .collect()
     }
 
     /// Registers a workspace for the given window.
@@ -52,8 +198,48 @@ impl WorkspaceRegistry {
     }
 
     /// Unregisters the workspace for the given window.
-    pub fn unregister(&mut self, window_id: WindowId) {
+    pub fn unregister(&mut self, window_id: WindowId) -> Option<u64> {
         self.workspaces.remove(&window_id);
+        if self.session_search_documents.remove(&window_id).is_some() {
+            self.session_search_generation = self.session_search_generation.wrapping_add(1);
+            Some(self.session_search_generation)
+        } else {
+            None
+        }
+    }
+
+    /// Replaces one Workspace's already-committed Navigator search projection.
+    /// `WindowId` scopes this transient in-memory index only; stable RowId and
+    /// container identity remain owned by the Navigator model itself.
+    pub(crate) fn replace_session_search_documents(
+        &mut self,
+        window_id: WindowId,
+        documents: Vec<SessionNavigationData>,
+    ) -> u64 {
+        self.session_search_documents.insert(window_id, documents);
+        self.session_search_generation = self.session_search_generation.wrapping_add(1);
+        self.session_search_generation
+    }
+
+    /// Returns a clone suitable for a query-only search path. The clone is made
+    /// at projection commit time, not by discovering Workspace/session sources
+    /// during each palette keystroke.
+    pub(crate) fn session_search_snapshot(&self) -> (u64, Vec<SessionNavigationData>) {
+        (
+            self.session_search_generation(),
+            self.session_search_documents
+                .values()
+                .flat_map(|documents| documents.iter().cloned())
+                .collect(),
+        )
+    }
+
+    pub(crate) fn session_search_generation(&self) -> u64 {
+        self.session_search_generation
+    }
+
+    pub(crate) fn session_search_documents(&self) -> impl Iterator<Item = &SessionNavigationData> {
+        self.session_search_documents.values().flatten()
     }
 
     /// Retains process-level ownership after a pane/window has disappeared.
@@ -213,7 +399,11 @@ impl WorkspaceRegistry {
 }
 
 impl Entity for WorkspaceRegistry {
-    type Event = ();
+    type Event = WorkspaceRegistryEvent;
 }
 
 impl SingletonEntity for WorkspaceRegistry {}
+
+#[cfg(test)]
+#[path = "registry_tests.rs"]
+mod tests;

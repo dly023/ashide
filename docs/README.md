@@ -18,6 +18,7 @@ recovery, and local/remote separation.
 - [Local / remote capability matrix](design/local-remote-capability-matrix.md) — audit CSV for env routing parity
 - [Local / remote fix plan](design/local-remote-fix-plan.md) — staged plan for Environment/File Browser behavior parity
 - [Local / remote parity tracker](design/local-remote-parity-tracker.yaml) — per-item spec/check/test/runtime verification state
+- [Global performance and interaction optimization](design/global-performance-interaction-optimization.md) — measured audit baseline, ordered implementation list, and verification evidence
 - [Agent harness tool lifecycle](design/ashide-agent-harness-tool-lifecycle.md) — tool-call continuity, MCP recovery, and BYOP repair plan
 
 ## Maintenance scripts

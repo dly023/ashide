@@ -271,18 +271,15 @@ fn test_detect_known_agents() {
 }
 
 #[test]
-fn jcode_is_a_first_class_detectable_cli_agent() {
+fn omp_is_a_first_class_detectable_cli_agent() {
     App::test((), |mut app| async move {
         app.update(|ctx| {
             assert_eq!(
-                CLIAgent::detect("jcode", None, None, ctx),
-                Some(CLIAgent::Jcode),
+                CLIAgent::detect("omp", None, None, ctx),
+                Some(CLIAgent::Omp),
             );
-            assert_eq!(CLIAgent::Jcode.command_prefix(), "jcode");
-            assert_eq!(
-                CLIAgent::from_command_prefix("jcode"),
-                Some(CLIAgent::Jcode),
-            );
+            assert_eq!(CLIAgent::Omp.command_prefix(), "omp");
+            assert_eq!(CLIAgent::from_command_prefix("omp"), Some(CLIAgent::Omp),);
         });
     });
 }
@@ -347,6 +344,34 @@ fn test_resume_session_id_from_command_parses_explicit_restore_commands() {
 }
 
 #[test]
+fn expanded_provider_resume_commands_use_public_native_contracts() {
+    let cases = [
+        (CLIAgent::Droid, "droid-1", "droid --resume droid-1"),
+        (CLIAgent::OpenCode, "oc-1", "opencode --session oc-1"),
+        (CLIAgent::Copilot, "cp-1", "copilot --resume=cp-1"),
+        (CLIAgent::Pi, "pi-1", "pi --session pi-1"),
+        (
+            CLIAgent::CursorCli,
+            "cursor-1",
+            "cursor-agent --resume cursor-1",
+        ),
+        (CLIAgent::Antigravity, "agy-1", "agy --conversation agy-1"),
+    ];
+    for (agent, session_id, command) in cases {
+        assert_eq!(
+            agent.explicit_resume_command(Some(session_id), Some("/repo")),
+            Some(command.to_owned()),
+        );
+        assert_eq!(
+            agent.resume_session_id_from_command(command),
+            Some(session_id.to_owned()),
+        );
+        assert!(agent.capabilities().can_index_sessions);
+        assert!(agent.capabilities().can_resume);
+    }
+}
+
+#[test]
 fn test_codex_explicit_resume_command_uses_cli_session_uuid() {
     assert_eq!(
         CLIAgent::Codex.explicit_resume_command(
@@ -380,50 +405,6 @@ fn test_codex_explicit_resume_command_uses_cli_session_uuid() {
 }
 
 #[test]
-fn jcode_uses_its_official_icon_in_all_agent_entrypoints() {
-    assert_eq!(
-        CLIAgent::Jcode.icon(),
-        Some(warp_core::ui::icons::Icon::JcodeLogo)
-    );
-}
-
-#[test]
-fn jcode_explicit_resume_command_uses_public_cli_contract() {
-    assert_eq!(
-        CLIAgent::Jcode.explicit_resume_command(Some("session-123"), Some("/repo")),
-        Some("jcode --resume session-123".to_owned()),
-    );
-    assert_eq!(
-        CLIAgent::Jcode.resume_session_id_from_command("jcode --resume session-123"),
-        Some("session-123".to_owned()),
-    );
-    assert_eq!(
-        CLIAgent::Jcode.explicit_resume_command(
-            Some("session_bug_1784897411999_c3c24cb8ea67c6a2"),
-            Some("/repo"),
-        ),
-        Some("jcode --resume session_bug_1784897411999_c3c24cb8ea67c6a2".to_owned()),
-    );
-    assert_eq!(CLIAgent::Jcode.explicit_resume_command(None, None), None);
-}
-
-#[test]
-fn jcode_discovery_and_resume_do_not_require_a_daemon_handshake() {
-    let capabilities = CLIAgent::Jcode.capabilities();
-
-    assert!(capabilities.can_detect);
-    assert!(capabilities.can_bind_live_session);
-    assert!(capabilities.can_index_sessions);
-    assert!(capabilities.can_list_sessions);
-    assert!(capabilities.can_cold_restore);
-    assert!(capabilities.can_resume);
-    assert_eq!(
-        CLIAgent::Jcode.explicit_resume_command(Some("offline-session"), None),
-        Some("jcode --resume offline-session".to_owned()),
-    );
-}
-
-#[test]
 fn every_agent_has_one_layered_capability_record() {
     for agent in enum_iterator::all::<CLIAgent>() {
         let record = agent.record();
@@ -441,36 +422,20 @@ fn every_agent_has_one_layered_capability_record() {
 
     let antigravity = CLIAgent::Antigravity.capabilities();
     assert!(antigravity.can_detect && antigravity.can_bind_live_session);
-    assert!(!antigravity.can_index_sessions && !antigravity.can_cold_restore);
-    assert!(antigravity.can_resume && antigravity.can_attach);
+    assert!(antigravity.can_index_sessions && antigravity.can_cold_restore);
+    assert!(antigravity.can_resume && !antigravity.can_attach);
     assert!(!antigravity.can_read_session_ir && !antigravity.can_fork);
     assert!(!antigravity.can_write_native_history && !antigravity.can_launch_derived_session);
 
     let pi = CLIAgent::Pi.capabilities();
     assert!(pi.can_detect && pi.can_bind_live_session);
-    assert!(!pi.can_index_sessions && !pi.can_list_sessions && !pi.can_cold_restore);
-    assert!(!pi.can_resume && !pi.can_attach && !pi.can_target_environment_runtime);
+    assert!(pi.can_index_sessions && pi.can_list_sessions && pi.can_cold_restore);
+    assert!(pi.can_resume && !pi.can_attach && pi.can_target_environment_runtime);
     assert!(!pi.can_read_session_ir && !pi.can_fork && !pi.can_edit_preview);
     assert!(!pi.can_write_native_history && !pi.can_launch_derived_session);
 
     let unknown = CLIAgent::Unknown.capabilities();
     assert!(!unknown.can_detect && !unknown.can_bind_live_session);
-}
-
-#[test]
-fn jcode_readonly_discovery_capabilities_are_separate_from_advanced_session_actions() {
-    let capabilities = CLIAgent::Jcode.capabilities();
-
-    assert!(capabilities.can_detect);
-    assert!(capabilities.can_bind_live_session);
-    assert!(capabilities.can_index_sessions);
-    assert!(capabilities.can_list_sessions);
-    assert!(capabilities.can_cold_restore);
-    assert!(capabilities.can_resume);
-    assert!(capabilities.can_target_environment_runtime);
-
-    assert!(!capabilities.can_attach);
-    assert!(!capabilities.can_read_session_ir);
 }
 
 #[test]
@@ -487,16 +452,6 @@ fn omp_readonly_discovery_has_an_independent_explicit_resume_adapter() {
     );
     assert!(!capabilities.can_attach);
     assert!(!capabilities.can_read_session_ir);
-    assert!(!capabilities.can_fork);
-    assert!(!capabilities.can_edit_preview);
-    assert!(!capabilities.can_write_native_history);
-    assert!(!capabilities.can_launch_derived_session);
-}
-
-#[test]
-fn jcode_fork_edit_and_writeback_remain_disabled() {
-    let capabilities = CLIAgent::Jcode.capabilities();
-
     assert!(!capabilities.can_fork);
     assert!(!capabilities.can_edit_preview);
     assert!(!capabilities.can_write_native_history);

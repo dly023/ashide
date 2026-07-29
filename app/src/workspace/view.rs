@@ -135,7 +135,11 @@ use super::hoa_onboarding::{
 };
 use super::lightbox_view::{LightboxParams, LightboxView, LightboxViewEvent};
 use super::util;
-use super::WorkspaceRegistry;
+use super::registry::{
+    LocalCliAgentSessionScanKey, LocalCliAgentSessionScanParticipant,
+    LocalCliAgentSessionScanRequest,
+};
+use super::{WorkspaceRegistry, WorkspaceRegistryEvent};
 use crate::ai::execution_profiles::editor::ExecutionProfileEditorManager;
 use crate::ai::execution_profiles::profiles::{AIExecutionProfilesModel, ClientProfileId};
 use crate::app_state::PaneSessionBinding;
@@ -506,7 +510,6 @@ const ENVIRONMENT_RUNTIME_PREPARATION_TIMEOUT: Duration = Duration::from_secs(30
 const ENVIRONMENT_RUNTIME_RELEASE_INSTALLATION_TIMEOUT: Duration = Duration::from_secs(900);
 const ENVIRONMENT_RUNTIME_INSTALLATION_GRACE: Duration = Duration::from_secs(120);
 const ENVIRONMENT_RUNTIME_CONTROL_SOCKET_DIR: &str = "/tmp/ashe";
-const WORKSPACE_SESSIONS_REFRESH_TOAST_ID: &str = "workspace_sessions_refresh";
 const ENVIRONMENT_RUNTIME_FAILURE_TOAST_PREFIX: &str = "environment_runtime_failure:";
 
 /// The minimum font size at which terminal text will be rendered.
@@ -572,6 +575,40 @@ const ENVIRONMENT_PROVIDER_PICKER_ANCHOR_GAP: f32 = 6.;
 const ENVIRONMENT_STRIP_ADD_PROVIDER_CHIP_WIDTH: f32 = 28.;
 const ENVIRONMENT_PROVIDER_PICKER_POSITION_ID: &str =
     "workspace:environment_provider_picker_button";
+
+fn environment_provider_picker_filtered_candidates<'a>(
+    candidates: &'a [environment_provider::EnvironmentProviderCandidate],
+    query: &str,
+) -> Vec<&'a environment_provider::EnvironmentProviderCandidate> {
+    let query = query.trim().to_lowercase();
+    candidates
+        .iter()
+        .filter(|candidate| {
+            query.is_empty()
+                || format!(
+                    "{} {} {}",
+                    candidate.alias, candidate.title, candidate.detail
+                )
+                .to_lowercase()
+                .contains(&query)
+        })
+        .collect()
+}
+
+fn environment_provider_picker_normalized_selected_alias(
+    candidates: &[&environment_provider::EnvironmentProviderCandidate],
+    selected_alias: Option<&str>,
+) -> Option<String> {
+    selected_alias
+        .filter(|selected_alias| {
+            candidates
+                .iter()
+                .any(|candidate| candidate.alias == *selected_alias)
+        })
+        .map(ToOwned::to_owned)
+        .or_else(|| candidates.first().map(|candidate| candidate.alias.clone()))
+}
+
 const ASK_AI_ASSISTANT_KEYBINDING_NAME: &str = "workspace:toggle_ai_assistant";
 const TOGGLE_RESOURCE_CENTER_KEYBINDING_NAME: &str = "workspace:toggle_resource_center";
 
@@ -1815,7 +1852,6 @@ struct PendingEnvironmentRuntimeEntryPlan {
 #[derive(Default)]
 struct WorkspaceSessionsRefreshState {
     is_refreshing: bool,
-    message: Option<String>,
     generation: u64,
 }
 
@@ -1983,6 +2019,11 @@ pub struct Workspace {
     worktree_sidecar_active: bool,
     worktree_sidecar_search_editor: ViewHandle<EditorView>,
     worktree_sidecar_search_query: String,
+    /// Environment provider picker 的 transient keyboard state。候选 membership 始终归
+    /// SshTargetCatalog，不能写入 workspace snapshot 或 SQLite。
+    environment_provider_picker_search_editor: ViewHandle<EditorView>,
+    environment_provider_picker_query: String,
+    environment_provider_picker_selected_alias: Option<String>,
     new_session_sidecar_add_repo_mouse_state: MouseStateHandle,
     tab_config_action_sidecar_item: Option<SidecarItemKind>,
     tab_config_action_sidecar_mouse_states: crate::tab_configs::action_sidecar::SidecarMouseStates,
@@ -2423,11 +2464,171 @@ impl Workspace {
         editor
     }
 
+    fn build_environment_provider_picker_search_input(
+        ctx: &mut ViewContext<Self>,
+    ) -> ViewHandle<EditorView> {
+        let editor = ctx.add_typed_action_view(|ctx| {
+            let appearance = Appearance::as_ref(ctx);
+            let mut editor = EditorView::single_line(
+                SingleLineEditorOptions {
+                    text: TextOptions::ui_text(Some(appearance.ui_font_size()), appearance),
+                    select_all_on_focus: true,
+                    clear_selections_on_blur: true,
+                    propagate_and_no_op_vertical_navigation_keys:
+                        PropagateAndNoOpNavigationKeys::Always,
+                    ..Default::default()
+                },
+                ctx,
+            );
+            editor.set_placeholder_text(
+                crate::t!("search-filter-placeholder-environment-providers"),
+                ctx,
+            );
+            editor
+        });
+        ctx.subscribe_to_view(&editor, |me, editor_view, event, ctx| match event {
+            EditorEvent::Edited(_) => {
+                me.environment_provider_picker_query = editor_view.as_ref(ctx).buffer_text(ctx);
+                me.normalize_environment_provider_picker_selection(ctx);
+                ctx.notify();
+            }
+            EditorEvent::Escape => {
+                me.close_environment_provider_picker_and_restore_focus(ctx);
+            }
+            EditorEvent::Navigate(NavigationKey::Up) => {
+                me.navigate_environment_provider_picker_selection(false, ctx);
+            }
+            EditorEvent::Navigate(NavigationKey::Down) => {
+                me.navigate_environment_provider_picker_selection(true, ctx);
+            }
+            EditorEvent::Enter => {
+                me.confirm_environment_provider_picker_selection(ctx);
+            }
+            _ => {}
+        });
+        editor
+    }
+
+    fn clear_environment_provider_picker_ephemeral_state(&mut self, ctx: &mut ViewContext<Self>) {
+        self.environment_provider_picker_query.clear();
+        self.environment_provider_picker_selected_alias = None;
+        self.environment_provider_picker_search_editor
+            .update(ctx, |editor, ctx| editor.clear_buffer(ctx));
+    }
+
+    fn environment_provider_picker_filtered_candidates(
+        &self,
+        ctx: &AppContext,
+    ) -> Vec<environment_provider::EnvironmentProviderCandidate> {
+        let catalog = crate::ssh_manager::SshTargetCatalog::handle(ctx);
+        let load_result = environment_provider::provider_candidates(catalog.as_ref(ctx));
+        match load_result.outcome {
+            environment_provider::EnvironmentProviderCandidateLoadOutcome::Loaded(candidates) => {
+                environment_provider_picker_filtered_candidates(
+                    &candidates,
+                    &self.environment_provider_picker_query,
+                )
+                .into_iter()
+                .cloned()
+                .collect()
+            }
+            environment_provider::EnvironmentProviderCandidateLoadOutcome::NotFound
+            | environment_provider::EnvironmentProviderCandidateLoadOutcome::Error(_) => Vec::new(),
+        }
+    }
+
+    fn normalize_environment_provider_picker_selection(&mut self, ctx: &mut ViewContext<Self>) {
+        let candidates = self.environment_provider_picker_filtered_candidates(ctx);
+        let candidate_refs = candidates.iter().collect::<Vec<_>>();
+        self.environment_provider_picker_selected_alias =
+            environment_provider_picker_normalized_selected_alias(
+                &candidate_refs,
+                self.environment_provider_picker_selected_alias.as_deref(),
+            );
+    }
+
+    fn navigate_environment_provider_picker_selection(
+        &mut self,
+        next: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let candidates = self.environment_provider_picker_filtered_candidates(ctx);
+        if candidates.is_empty() {
+            self.environment_provider_picker_selected_alias = None;
+            ctx.notify();
+            return;
+        }
+        let selected_index = self
+            .environment_provider_picker_selected_alias
+            .as_deref()
+            .and_then(|alias| {
+                candidates
+                    .iter()
+                    .position(|candidate| candidate.alias == alias)
+            });
+        let index = match selected_index {
+            Some(index) if next => (index + 1) % candidates.len(),
+            Some(0) => candidates.len() - 1,
+            Some(index) => index - 1,
+            None => 0,
+        };
+        self.environment_provider_picker_selected_alias = Some(candidates[index].alias.clone());
+        ctx.notify();
+    }
+
+    fn confirm_environment_provider_picker_selection(&mut self, ctx: &mut ViewContext<Self>) {
+        self.normalize_environment_provider_picker_selection(ctx);
+        if let Some(alias) = self.environment_provider_picker_selected_alias.clone() {
+            ctx.dispatch_typed_action(&WorkspaceAction::OpenEnvironmentProviderCandidate { alias });
+        }
+    }
+
+    fn open_environment_provider_picker(&mut self, ctx: &mut ViewContext<Self>) {
+        if self
+            .current_workspace_state
+            .is_environment_provider_picker_open
+        {
+            return;
+        }
+        self.current_workspace_state
+            .is_environment_provider_picker_open = true;
+        self.clear_environment_provider_picker_ephemeral_state(ctx);
+        self.current_workspace_state
+            .is_workspace_session_restore_popover_open = false;
+        self.close_new_session_dropdown_menu(ctx);
+        self.normalize_environment_provider_picker_selection(ctx);
+        ctx.focus(&self.environment_provider_picker_search_editor);
+        ctx.notify();
+    }
+
+    fn dismiss_environment_provider_picker(&mut self, ctx: &mut ViewContext<Self>) -> bool {
+        if !self
+            .current_workspace_state
+            .is_environment_provider_picker_open
+        {
+            return false;
+        }
+        self.current_workspace_state
+            .is_environment_provider_picker_open = false;
+        self.clear_environment_provider_picker_ephemeral_state(ctx);
+        true
+    }
+
+    fn close_environment_provider_picker_and_restore_focus(&mut self, ctx: &mut ViewContext<Self>) {
+        if !self.dismiss_environment_provider_picker(ctx) {
+            return;
+        }
+        self.focus_active_tab(ctx);
+        ctx.notify();
+    }
+
     fn vertical_tabs_search_input(ctx: &mut ViewContext<Self>) -> ViewHandle<EditorView> {
         let editor = ctx.add_typed_action_view(|ctx| {
             let appearance = Appearance::as_ref(ctx);
             let options = SingleLineEditorOptions {
                 text: TextOptions::ui_text(Some(12.), appearance),
+                propagate_and_no_op_vertical_navigation_keys:
+                    PropagateAndNoOpNavigationKeys::Always,
                 ..Default::default()
             };
             EditorView::single_line(options, ctx)
@@ -2440,8 +2641,42 @@ impl Workspace {
                 me.vertical_tabs_panel.search_query = editor_view.as_ref(ctx).buffer_text(ctx);
                 ctx.notify();
             }
+            EditorEvent::Navigate(NavigationKey::Up) => {
+                if me
+                    .vertical_tabs_panel
+                    .navigate_session_navigator_keyboard_cursor(me, ctx, false)
+                {
+                    ctx.notify();
+                }
+            }
+            EditorEvent::Navigate(NavigationKey::Down) => {
+                if me
+                    .vertical_tabs_panel
+                    .navigate_session_navigator_keyboard_cursor(me, ctx, true)
+                {
+                    ctx.notify();
+                }
+            }
+            EditorEvent::Enter => {
+                if me
+                    .vertical_tabs_panel
+                    .activate_session_navigator_keyboard_cursor(me, ctx)
+                {
+                    ctx.notify();
+                }
+            }
             EditorEvent::Escape => {
+                let cursor_cleared = me
+                    .vertical_tabs_panel
+                    .clear_session_navigator_keyboard_cursor();
+                let query_was_empty = me.vertical_tabs_panel.search_query.is_empty();
+                if !query_was_empty {
+                    editor_view.update(ctx, |editor, ctx| editor.clear_buffer(ctx));
+                }
                 me.vertical_tabs_panel.search_query.clear();
+                if cursor_cleared || !query_was_empty {
+                    ctx.notify();
+                }
                 me.focus_active_tab(ctx);
             }
             _ => {}
@@ -4127,13 +4362,26 @@ impl Workspace {
                 ctx.notify();
             }
             AISettingsChangedEvent::CLIAgentHistoryEnabledAgents { .. } => {
-                // 设置是 scan-plan authority，而不是 render filter。刷新所有
-                // authority，确保 Navigator 重绘前已从 canonical indexed rows 移除 disabled provider。
-                me.refresh_workspace_sessions(ctx);
+                // 设置是 scan-plan authority，而不是 render filter。当前 Navigator
+                // authority 只做 PassiveProjection；不得抢占用户 refresh 或发全局反馈。
+                me.refresh_workspace_sessions_passively(ctx);
                 ctx.notify();
             }
             _ => (),
         });
+
+        ctx.subscribe_to_model(
+            &crate::ssh_manager::SshTargetCatalog::handle(ctx),
+            |me, _, _, ctx| {
+                if me
+                    .current_workspace_state
+                    .is_environment_provider_picker_open
+                {
+                    me.normalize_environment_provider_picker_selection(ctx);
+                    ctx.notify();
+                }
+            },
+        );
 
         ctx.subscribe_to_model(&OneTimeModalModel::handle(ctx), |me, model, event, ctx| {
             let OneTimeModalEvent::VisibilityChanged { is_open } = event;
@@ -4270,6 +4518,10 @@ impl Workspace {
             worktree_sidecar_active: false,
             worktree_sidecar_search_editor: Self::build_worktree_sidecar_search_input(ctx),
             worktree_sidecar_search_query: String::new(),
+            environment_provider_picker_search_editor:
+                Self::build_environment_provider_picker_search_input(ctx),
+            environment_provider_picker_query: String::new(),
+            environment_provider_picker_selected_alias: None,
             new_session_sidecar_add_repo_mouse_state: Default::default(),
             tab_config_action_sidecar_item: None,
             tab_config_action_sidecar_mouse_states: Default::default(),
@@ -4914,8 +5166,20 @@ impl Workspace {
                         .clone()
                         .map(Self::normalize_restored_environment_snapshot),
                 );
-                self.restored_workspace_sessions =
-                    window_snapshot.restored_workspace_sessions.clone();
+                let restored_workspace_sessions = window_snapshot
+                    .restored_workspace_sessions
+                    .clone()
+                    .into_iter()
+                    .filter(WorkspaceSessionSnapshot::is_persistable_navigator_history)
+                    .collect::<Vec<_>>();
+                let pruned_invalid_restored_workspace_sessions = restored_workspace_sessions.len()
+                    != window_snapshot.restored_workspace_sessions.len();
+                self.restored_workspace_sessions = restored_workspace_sessions;
+                if pruned_invalid_restored_workspace_sessions {
+                    // 旧版本曾把 generic tab/pane locator 写入 virtual history；读到即
+                    // 触发一次正常 app-state save，把这类无语义残留从持久化状态移除。
+                    ctx.dispatch_global_action("workspace:save_app", ());
+                }
                 self.current_workspace_state
                     .is_workspace_session_restore_popover_open = false;
                 let active_tab_index = window_snapshot.active_tab_index;
@@ -9487,8 +9751,7 @@ impl Workspace {
             transport.host_label(),
             transport.connection_ref()
         );
-        self.current_workspace_state
-            .is_environment_provider_picker_open = false;
+        self.dismiss_environment_provider_picker(ctx);
         self.current_workspace_state
             .is_workspace_session_restore_popover_open = false;
 
@@ -10048,6 +10311,13 @@ impl Workspace {
             self.begin_indexed_environment_cli_agent_session_scan(&authority, Some(session_id));
         let previously_observed_agents = scan_token.observed_agents().clone();
         let enabled_agents = AISettings::as_ref(ctx).cli_agent_history_enabled_agents();
+        let scope_paths = self
+            .environments
+            .snapshot_for_authority(&authority)
+            .and_then(|environment| environment.active_workspace_root)
+            .map(PathBuf::from)
+            .into_iter()
+            .collect::<Vec<_>>();
         ctx.spawn(
             async move {
                 let records =
@@ -10056,6 +10326,7 @@ impl Workspace {
                         session_id,
                         &enabled_agents,
                         &previously_observed_agents,
+                        &scope_paths,
                     )
                     .await?;
                 let user_state = match crate::workspace::environment_runtime::read_environment_cli_agent_session_user_state(
@@ -10104,11 +10375,7 @@ impl Workspace {
                         "Environment Session Navigator scan ignored stale result for {authority}/{session_id:?}"
                     );
                     if let Some(refresh_generation) = refresh_generation {
-                        workspace.finish_workspace_sessions_refresh_if_current(
-                            refresh_generation,
-                            "已切换环境，忽略旧刷新结果".to_owned(),
-                            ctx,
-                        );
+                        workspace.finish_workspace_sessions_refresh_if_current(refresh_generation, ctx);
                     }
                     return;
                 }
@@ -10145,11 +10412,7 @@ impl Workspace {
                         "Environment Session Navigator scan ignored stale generation for {authority}/{session_id:?}"
                     );
                     if let Some(refresh_generation) = refresh_generation {
-                        workspace.finish_workspace_sessions_refresh_if_current(
-                            refresh_generation,
-                            "已有更新的会话扫描，忽略旧结果".to_owned(),
-                            ctx,
-                        );
+                        workspace.finish_workspace_sessions_refresh_if_current(refresh_generation, ctx);
                     }
                     return;
                 }
@@ -10160,12 +10423,7 @@ impl Workspace {
                 }
                 workspace.sync_session_navigator_sessions(ctx);
                 if let Some(refresh_generation) = refresh_generation {
-                    let session_count = workspace.session_navigator_sessions().len();
-                    workspace.finish_workspace_sessions_refresh_if_current(
-                        refresh_generation,
-                        format!("已刷新会话列表：{session_count} 个会话"),
-                        ctx,
-                    );
+                    workspace.finish_workspace_sessions_refresh_if_current(refresh_generation, ctx);
                     return;
                 }
                 ctx.notify();
@@ -16371,7 +16629,12 @@ impl Workspace {
             });
         // tabs 是 live pane 的唯一持久化权威；这里只保存无法由 pane tree
         // 重建的 virtual targets，避免冷启动把同一 live row 反序列化成 virtual duplicate。
-        let restored_workspace_sessions = self.restored_workspace_sessions.clone();
+        let restored_workspace_sessions = self
+            .restored_workspace_sessions
+            .clone()
+            .into_iter()
+            .filter(WorkspaceSessionSnapshot::is_persistable_navigator_history)
+            .collect();
 
         WindowSnapshot {
             environment: active_environment,
@@ -16578,6 +16841,10 @@ impl Workspace {
         let removed_tab_had_terminal_panes = pane_group.as_ref(ctx).has_terminal_panes();
         let session_navigator_selection_key =
             self.session_navigator_selection_key_for_tab(index, ctx);
+        let closed_tab_environment = tab_data.environment.clone().unwrap_or_else(|| {
+            crate::workspace::environment_runtime::terminal_bootstrap_environment(None)
+        });
+        let closed_tab_history_authority = closed_tab_environment.authority_key.clone();
         let pending_materialization_owner = tab_data
             .environment
             .as_ref()
@@ -16606,6 +16873,19 @@ impl Workspace {
             }
             return false;
         }
+
+        // 跨窗口转移也会移出 source tab，但不等于关闭 carrier；只有实际
+        // detach 的 tab 才能在移除 live row 后触发一次原生 history 接管刷新。
+        let closed_tab_has_agent_history = detach_panes_for_close
+            && self
+                .live_workspace_sessions(ctx)
+                .into_iter()
+                .any(|session| {
+                    matches!(session.kind, WorkspaceSessionKind::AgentTerminal)
+                        && self
+                            .locator_for_workspace_session_snapshot(&session, ctx)
+                            .is_some_and(|locator| locator.pane_group_id == pane_group.id())
+                });
 
         if detach_panes_for_close {
             self.begin_retiring_terminal_session_owners(
@@ -16638,6 +16918,19 @@ impl Workspace {
         }
 
         let tab_data = self.tabs.remove(index);
+        if closed_tab_has_agent_history {
+            if let Err(error) = self.refresh_indexed_sessions_for_authority(
+                &closed_tab_history_authority,
+                EnvironmentSessionRefreshIntent::PassiveProjection,
+                ctx,
+            ) {
+                // 关闭路径不能因 provider 暂时不可用而回滚；原生 history 会在下一次
+                // passive 或用户刷新时继续由 EnvironmentTable 的唯一索引路径接管。
+                log::warn!(
+                    "remove_tab: failed to refresh native Agent history for closed tab: {error}"
+                );
+            }
+        }
         // 在 tab_data 移入撤销栈前记录它的逻辑 Environment；同一 Environment 内
         // 不同 tab 的 lifecycle/root/label 快照可能不同，不能拿展示元数据当分区身份。
         let closed_environment_navigation_key = tab_data.environment.as_ref().map(|environment| {
@@ -20574,23 +20867,11 @@ impl Workspace {
                 // ctx.notify();
             }
             pane_group::Event::TerminalSessionBootstrapped { pane_id } => {
-                let authority = self.environment_authority_for_pane_group(&pane_group);
                 self.complete_environment_runtime_terminal_materialization(
                     &pane_group,
                     *pane_id,
                     ctx,
                 );
-                if let Some(authority) = authority {
-                    if let Err(error) = self.refresh_indexed_sessions_for_authority(
-                        &authority,
-                        EnvironmentSessionRefreshIntent::PassiveProjection,
-                        ctx,
-                    ) {
-                        log::warn!(
-                            "Environment Session Navigator refresh after terminal execution-context bootstrap failed for {authority}: {error}"
-                        );
-                    }
-                }
             }
             pane_group::Event::TerminalSessionBootstrapFailed { pane_id } => {
                 self.fail_environment_runtime_terminal_materialization(&pane_group, *pane_id, ctx);
@@ -24733,8 +25014,7 @@ impl Workspace {
         authority_key: &str,
         ctx: &mut ViewContext<Self>,
     ) {
-        self.current_workspace_state
-            .is_environment_provider_picker_open = false;
+        self.dismiss_environment_provider_picker(ctx);
 
         if let Some(index) = self.preferred_tab_index_for_environment_authority(authority_key) {
             self.activate_tab_for_user_visible_navigation(index, ctx);
@@ -25133,6 +25413,7 @@ impl Workspace {
     fn render_environment_provider_picker_row(
         &self,
         candidate: &environment_provider::EnvironmentProviderCandidate,
+        is_selected: bool,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
         let theme = appearance.theme();
@@ -25192,6 +25473,10 @@ impl Workspace {
                 });
             } else if state.is_hovered() || is_open {
                 container = container.with_background(internal_colors::fg_overlay_1(theme));
+            }
+            if is_selected {
+                container =
+                    container.with_border(Border::all(1.).with_border_fill(theme.outline()));
             }
             container.finish()
         })
@@ -25302,7 +25587,34 @@ impl Workspace {
             .with_child(config_button.finish())
             .finish();
 
-        let mut list = Flex::column().with_spacing(9.).with_child(header);
+        let search_editor = self.environment_provider_picker_search_editor.clone();
+        let search_icon = ConstrainedBox::new(
+            icons::Icon::SearchSmall
+                .to_warpui_icon(theme.sub_text_color(theme.surface_2()))
+                .finish(),
+        )
+        .with_width(16.)
+        .with_height(16.)
+        .finish();
+        let search_input = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(Container::new(search_icon).with_margin_right(8.).finish())
+            .with_child(Shrinkable::new(1., ChildView::new(&search_editor).finish()).finish())
+            .with_main_axis_size(MainAxisSize::Max)
+            .finish();
+        let search_input = Container::new(search_input)
+            .with_padding_left(8.)
+            .with_padding_right(8.)
+            .with_padding_top(5.)
+            .with_padding_bottom(5.)
+            .with_border(Border::all(1.).with_border_fill(theme.surface_3()))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+            .finish();
+
+        let mut list = Flex::column()
+            .with_spacing(9.)
+            .with_child(header)
+            .with_child(search_input);
         let mut rows = Flex::column().with_spacing(2.);
 
         match load_result.outcome {
@@ -25320,10 +25632,29 @@ impl Workspace {
                 );
             }
             environment_provider::EnvironmentProviderCandidateLoadOutcome::Loaded(candidates) => {
-                for candidate in candidates.iter() {
+                let filtered = environment_provider_picker_filtered_candidates(
+                    &candidates,
+                    &self.environment_provider_picker_query,
+                );
+                if filtered.is_empty() {
                     rows.add_child(
-                        self.render_environment_provider_picker_row(candidate, appearance),
+                        Text::new_inline(
+                            crate::t!("workspace-environment-provider-picker-no-matches"),
+                            appearance.ui_font_family(),
+                            11.,
+                        )
+                        .with_color(theme.sub_text_color(theme.background()).into())
+                        .finish(),
                     );
+                } else {
+                    for candidate in filtered {
+                        rows.add_child(self.render_environment_provider_picker_row(
+                            candidate,
+                            self.environment_provider_picker_selected_alias.as_deref()
+                                == Some(candidate.alias.as_str()),
+                            appearance,
+                        ));
+                    }
                 }
             }
             environment_provider::EnvironmentProviderCandidateLoadOutcome::NotFound => {
@@ -25496,13 +25827,6 @@ impl Workspace {
                 .finish()) as _
             },
         )
-        .on_hover(|is_hovered, ctx, _, _| {
-            if is_hovered {
-                ctx.dispatch_typed_action(WorkspaceAction::SetEnvironmentProviderPickerOpen {
-                    open: true,
-                });
-            }
-        })
         .with_cursor(Cursor::PointingHand)
         .finish();
 
@@ -28281,28 +28605,10 @@ impl TypedActionView for Workspace {
                 self.disconnect_environment_authority(authority_key, ctx);
             }
             SetEnvironmentProviderPickerOpen { open } => {
-                if self
-                    .current_workspace_state
-                    .is_environment_provider_picker_open
-                    != *open
-                {
-                    self.current_workspace_state
-                        .is_environment_provider_picker_open = *open;
-                    if *open {
-                        crate::ssh_manager::SshTargetCatalog::handle(ctx).update(
-                            ctx,
-                            |catalog, ctx| {
-                                catalog.refresh(
-                                    crate::ssh_manager::SshTargetCatalogRefreshIntent::ExplicitRefresh,
-                                    ctx,
-                                )
-                            },
-                        );
-                        self.current_workspace_state
-                            .is_workspace_session_restore_popover_open = false;
-                        self.close_new_session_dropdown_menu(ctx);
-                    }
-                    ctx.notify();
+                if *open {
+                    self.open_environment_provider_picker(ctx);
+                } else {
+                    self.close_environment_provider_picker_and_restore_focus(ctx);
                 }
             }
             RefreshEnvironmentSshTargets => {
@@ -28317,8 +28623,7 @@ impl TypedActionView for Workspace {
                 self.open_environment_provider_candidate(alias.clone(), ctx);
             }
             OpenEnvironmentProviderManager => {
-                self.current_workspace_state
-                    .is_environment_provider_picker_open = false;
+                self.dismiss_environment_provider_picker(ctx);
                 self.open_left_panel_view(&LeftPanelAction::EnvironmentProviderManager, ctx);
             }
             SetWorkspaceSessionRestorePopoverOpen { open } => {
@@ -28330,8 +28635,7 @@ impl TypedActionView for Workspace {
                     self.current_workspace_state
                         .is_workspace_session_restore_popover_open = *open;
                     if *open {
-                        self.current_workspace_state
-                            .is_environment_provider_picker_open = false;
+                        self.dismiss_environment_provider_picker(ctx);
                         self.close_new_session_dropdown_menu(ctx);
                     }
                     ctx.notify();
@@ -31185,8 +31489,11 @@ impl View for Workspace {
 
         let window_id = ctx.window_id();
 
-        WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
-            registry.unregister(window_id);
+        WorkspaceRegistry::handle(ctx).update(ctx, |registry, registry_ctx| {
+            if let Some(generation) = registry.unregister(window_id) {
+                registry_ctx
+                    .emit(WorkspaceRegistryEvent::SessionSearchProjectionChanged { generation });
+            }
         });
 
         // If this workspace's close was registered as part of a tab-drag
@@ -32073,6 +32380,80 @@ fn set_opencode_warp_plugin(new_entry: &str) -> String {
 // kind live in `environment_backend.rs`. Adding a capability = add a trait
 // method + both impls; the compiler refuses to let the two sides drift.
 
+impl Workspace {
+    fn finish_local_cli_agent_session_scan(
+        &mut self,
+        participant: LocalCliAgentSessionScanParticipant,
+        result: Result<
+            (
+                crate::workspace::environment_table::IndexedCliAgentSessionScanOutcome,
+                crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserState,
+            ),
+            String,
+        >,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let LocalCliAgentSessionScanParticipant {
+            authority,
+            scan_token,
+            refresh_generation,
+        } = participant;
+        let (outcome, user_state) = match result {
+            Ok(result) => result,
+            Err(error) => {
+                let preserved = self
+                    .commit_indexed_environment_cli_agent_session_discovery(
+                        scan_token,
+                        Err(error.clone()),
+                    )
+                    .expect_err("failed local scan must not commit indexed rows");
+                log::warn!("Local Session Navigator scan failed: {error}");
+                debug_assert_eq!(preserved, error);
+                if let Some(refresh_generation) = refresh_generation {
+                    self.fail_workspace_sessions_refresh_if_current(
+                        refresh_generation,
+                        format!("刷新会话列表失败：{error}"),
+                        ctx,
+                    );
+                }
+                return;
+            }
+        };
+        let discovered_session_count = match &outcome {
+            crate::workspace::environment_table::IndexedCliAgentSessionScanOutcome::Complete {
+                sessions,
+                ..
+            } => Some(sessions.len()),
+            crate::workspace::environment_table::IndexedCliAgentSessionScanOutcome::SourceMissing(_)
+            | crate::workspace::environment_table::IndexedCliAgentSessionScanOutcome::PermanentlyDeleted(_)
+            | crate::workspace::environment_table::IndexedCliAgentSessionScanOutcome::Cancelled => None,
+        };
+        let committed = self
+            .commit_indexed_environment_cli_agent_session_discovery(scan_token, Ok(outcome))
+            .expect("complete local session scan commit cannot fail");
+        if !committed {
+            log::info!("Local Session Navigator scan ignored stale generation");
+            if let Some(refresh_generation) = refresh_generation {
+                self.finish_workspace_sessions_refresh_if_current(refresh_generation, ctx);
+            }
+            return;
+        }
+        self.remember_indexed_environment_cli_agent_session_user_state(authority, user_state);
+        if let Some(session_count) = discovered_session_count {
+            log::info!("Local Session Navigator scan committed {session_count} sessions");
+        }
+        if refresh_generation.is_some() {
+            self.prune_restored_workspace_sessions_with_missing_cli_sources();
+        }
+        self.sync_session_navigator_sessions(ctx);
+        if let Some(refresh_generation) = refresh_generation {
+            self.finish_workspace_sessions_refresh_if_current(refresh_generation, ctx);
+            return;
+        }
+        ctx.notify();
+    }
+}
+
 impl EnvironmentBackend for TerminalBootstrapEnvironmentBackend {
     fn cd_to_directory(
         &self,
@@ -32305,10 +32686,39 @@ impl EnvironmentBackend for TerminalBootstrapEnvironmentBackend {
         let scan_token = ws.begin_indexed_environment_cli_agent_session_scan(authority, None);
         let previously_observed_agents = scan_token.observed_agents().clone();
         let enabled_agents = AISettings::as_ref(ctx).cli_agent_history_enabled_agents();
+        let scope_paths = ws
+            .environments
+            .snapshot_for_authority(authority)
+            .and_then(|environment| environment.active_workspace_root)
+            .map(PathBuf::from)
+            .into_iter()
+            .collect::<Vec<_>>();
         let authority = authority.to_owned();
         let refresh_generation = match intent {
             EnvironmentSessionRefreshIntent::PassiveProjection => None,
             EnvironmentSessionRefreshIntent::UserInitiated { generation } => Some(generation),
+        };
+        let scan_key = LocalCliAgentSessionScanKey::new(
+            &enabled_agents,
+            &previously_observed_agents,
+            &scope_paths,
+        );
+        let participant = LocalCliAgentSessionScanParticipant {
+            authority: authority.clone(),
+            scan_token,
+            refresh_generation,
+        };
+        let window_id = ctx.window_id();
+        let request = WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
+            registry.request_local_cli_agent_session_scan(
+                scan_key.clone(),
+                window_id,
+                participant,
+                intent,
+            )
+        });
+        let LocalCliAgentSessionScanRequest::Started { generation } = request else {
+            return Ok(true);
         };
 
         ctx.spawn(
@@ -32317,64 +32727,43 @@ impl EnvironmentBackend for TerminalBootstrapEnvironmentBackend {
                     Workspace::try_scan_terminal_cli_agent_session_discovery(
                         enabled_agents,
                         &previously_observed_agents,
+                        scope_paths,
                     )
                 })
                 .await
                 .map_err(|error| format!("local CLI-agent session scan task failed: {error}"))?
             },
             move |workspace, result, ctx| {
-                let (outcome, user_state) = match result {
-                    Ok(result) => result,
-                    Err(error) => {
-                        let preserved = workspace
-                            .commit_indexed_environment_cli_agent_session_discovery(
-                                scan_token,
-                                Err(error.clone()),
-                            )
-                            .expect_err("failed local scan must not commit indexed rows");
-                        log::warn!("Local Session Navigator scan failed: {error}");
-                        debug_assert_eq!(preserved, error);
-                        if let Some(refresh_generation) = refresh_generation {
-                            workspace.fail_workspace_sessions_refresh_if_current(
-                                refresh_generation,
-                                format!("刷新会话列表失败：{error}"),
-                                ctx,
-                            );
+                let current_window_id = ctx.window_id();
+                let (own_participant, deliveries) =
+                    WorkspaceRegistry::handle(ctx).update(ctx, |registry, app| {
+                        let mut own_participant = None;
+                        let mut deliveries = Vec::new();
+                        for (window_id, participant) in
+                            registry.complete_local_cli_agent_session_scan(&scan_key, generation)
+                        {
+                            if window_id == current_window_id {
+                                own_participant = Some(participant);
+                            } else if let Some(workspace) = registry.get(window_id, app) {
+                                deliveries.push((workspace, participant));
+                            }
                         }
-                        return;
-                    }
+                        (own_participant, deliveries)
+                    });
+                let Some(own_participant) = own_participant else {
+                    log::info!("Local Session Navigator scan ignored stale global generation");
+                    return;
                 };
-                let committed = workspace
-                    .commit_indexed_environment_cli_agent_session_discovery(scan_token, Ok(outcome))
-                    .expect("complete local session scan commit cannot fail");
-                if !committed {
-                    log::info!("Local Session Navigator scan ignored stale generation");
-                    if let Some(refresh_generation) = refresh_generation {
-                        workspace.finish_workspace_sessions_refresh_if_current(
-                            refresh_generation,
-                            "已有更新的会话扫描，忽略旧结果".to_owned(),
+                workspace.finish_local_cli_agent_session_scan(own_participant, result.clone(), ctx);
+                for (workspace_handle, participant) in deliveries {
+                    workspace_handle.update(ctx, |workspace, ctx| {
+                        workspace.finish_local_cli_agent_session_scan(
+                            participant,
+                            result.clone(),
                             ctx,
                         );
-                    }
-                    return;
+                    });
                 }
-                workspace.remember_indexed_environment_cli_agent_session_user_state(
-                    authority, user_state,
-                );
-                if refresh_generation.is_some() {
-                    workspace.prune_restored_workspace_sessions_with_missing_cli_sources();
-                }
-                workspace.sync_session_navigator_sessions(ctx);
-                if let Some(refresh_generation) = refresh_generation {
-                    let session_count = workspace.session_navigator_sessions().len();
-                    workspace.finish_workspace_sessions_refresh_if_current(
-                        refresh_generation,
-                        format!("已刷新会话列表：{session_count} 个会话"),
-                        ctx,
-                    );
-                    return;
-                }
-                ctx.notify();
             },
         );
         Ok(true)
