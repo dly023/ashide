@@ -12,7 +12,7 @@
 - 该启动时 Session Navigator 扫描 9 个 provider，一轮总耗时 342 ms（Claude 16 条 / 163 ms，Codex 82 条 / 342 ms），本地提交 89 条会话。此前 119 ms 是另一轮基线，不得与本轮运行混写。
 - 后续交互中 Codex 单源扫描观测到 42–190 ms；关闭/删除会话与新建 split 后可再次触发扫描。
 - 空闲采样中主线程仍持续执行 scene paint；样本落在 terminal grid、`ClippedScrollable` 和列表格式化路径。该采样只证明当前 paint 路径，不能单独量化各优化项收益。
-- GUI 可启动并有真实交互日志；当前执行环境没有 macOS Accessibility/Screen Recording 权限，无法自动截图或驱动视觉点击，后续 UI 项必须用已有 integration saved-position 入口或用户人工验收补齐。
+- GUI 可启动并有真实交互日志；当前执行环境没有 macOS Accessibility/Screen Recording 权限，无法自动截图或驱动视觉点击。UI 行为已改由隔离 fixture 的真实 WarpUI event loop + saved-position 入口验收；视觉布局与人工体验仍可在 dogfooding 时补充确认。
 
 ---
 
@@ -26,7 +26,7 @@
 ### 1.1 修复多窗口冷启动的重复 local provider 扫描
 - **现状**：2026-07-29 的当前 checkout 冷启动恢复 3 个窗口时，日志显示同一组 9 个 local provider 完成了 3 次 discovery（577 ms、246 ms、246 ms）。原有 coalescing 只覆盖单个 Workspace 的 `EnvironmentTable`，无法覆盖共享的本机 provider store。
 - **目标**：对 provider/observed-provider/scope 输入完全一致的 local Workspace，仅执行一个进程级 source worker；每个 Workspace 仍必须通过自己的 `EnvironmentTable` token 提交 canonical Navigator projection。不同 scope、显式 refresh 的 generation、stale completion 和关闭窗口都必须 fail closed。
-- **状态**：🟡 Registry source-transaction coordinator、scope / observed-provider 隔离、stale-generation fail-closed 与 recipient token fanout 已实现；2026-07-29 隔离 `AshideDev.app` 单窗口启动实际完成 9-provider discovery（342 ms）并提交 89 条。仍待有 3 个等价 local Workspace 的 cold restore runtime 证明只出现一轮 source scan；不可用单窗口日志替代该多窗口性能 gate。
+- **状态**：✅ 已完成 — 2026-07-29 使用带 `WARP_DATA_PROFILE=lr204-runtime` 的隔离当前 checkout `AshideLocal.app`，冷恢复 3 个等价 local Workspace（各自拥有不同 terminal/container UUID）。运行日志打开 window 0/1/2，仅出现一次 9-provider source scan（243 ms），随后出现三次独立的 89-session `EnvironmentTable` commit，证明 source worker 已进程级合并且 projection 仍按 Workspace 独立提交。
 
 ### 2. Session Navigator 大列表 viewport 化
 - **现状**：`vertical_tabs.rs` 每次 render 都 clone/filter 全量会话，构建 reorder units、split group、状态查询、搜索字符串以及每行 `Hoverable + Draggable + SavePosition` 元素；`ClippedScrollable` 只裁剪 paint，不裁剪元素构建。当前运行态已有本地 89 条、远端 82 条。
@@ -36,17 +36,17 @@
 ### 3. 会话全局搜索维护增量索引
 - **现状**：会话 query 每次跨所有 window 收集 live sessions，并 clone 各 Workspace 已提交的 Navigator snapshots；Tantivy 路径每次 query 都创建 searcher、重建完整索引。输入每个字符会重复窗口遍历、字符串拼装和索引构建。
 - **目标**：复用 `EnvironmentTable` / committed `SessionNavigatorModel` 的 canonical source，在 session projection 提交时增量更新共享 searchable documents；按键 query 只执行匹配。live prompt enrichments 保留，但不得创建第二套 identity、membership 或 local/remote overlay。
-- **状态**：🟡 代码与静态/单测验证已完成，等待当前构建的独立 GUI 进程验收 — canonical reducer commit 现在只发布本窗口 committed documents 到 `WorkspaceRegistry`，并通过 generation event 刷新 DataSource 的派生 Tantivy index。query 不再枚举 window/workspace、调用 `all_sessions` 或 rebuild index；generation 不一致 fail closed。live terminal 仅可 enrich 已存在 live row，window close 会清除 partition。已覆盖 partition replace/close、event delivery、query-time rebuild 禁止和原 navigation search；`cargo check` 通过。`./script/run` 于 2026-07-29 重新打包并 codesign 了当前 bundle，但 macOS 将启动请求转给已有旧进程，且本环境没有 Accessibility/Screen Recording 权限，故不声称当前代码的视觉交互已验收。
+- **状态**：✅ 已完成 — canonical reducer commit 只发布本窗口 committed documents 到 `WorkspaceRegistry`，并通过 generation event 刷新 DataSource 的派生 Tantivy index。query 不再枚举 window/workspace、调用 `all_sessions` 或 rebuild index；generation 不一致 fail closed。live terminal 仅可 enrich 已存在 live row，window close 会清除 partition。除 partition replace/close、event delivery、query-time rebuild 禁止外，隔离 Omp fixture 已在真实应用事件循环中完成 explicit Refresh → committed projection → Navigation Palette typed search，并断言选中结果仍是 canonical Session Navigator action；测试以 Escape 关闭，刻意不执行 `omp --resume`。当前环境没有 macOS Accessibility/Screen Recording，因此这证明键盘/事件路由与数据路径，不把它表述为视觉像素验收。
 
 ### 4. Environment 快速选择器改为明确且键盘优先
 - **现状**：Environment Strip 的 `+` 在 hover 时打开，打开即使用 `ExplicitRefresh`；popover 只有鼠标点击，没有 query、selected row、方向键、Enter/Escape。用户移动指针经过入口会触发弹层和潜在磁盘读取，目标多时定位效率低。
-- **目标**：点击或明确快捷键打开；立即展示 `SshTargetCatalog` 已提交候选，必要时后台 refresh，不因 hover 制造副作用。提供搜索、上下选择、Enter 打开、Escape 关闭；保留显式 Refresh 与配置入口，并清楚区分 current/open/dormant/loading/error。
-- **状态**：🟡 代码、静态门禁和特性编译已完成，等待隔离 GUI 验收 — `+` 现在仅在显式点击时打开，已删除 hover 打开与 open-time `ExplicitRefresh`；popover 直接显示 `SshTargetCatalog` 当前 committed snapshot，并提供搜索、stable alias 选中、Up/Down、Enter 和 Escape。Refresh 仍是唯一触发 catalog refresh 的显式入口；打开、关闭与其他 popover/环境导航的 transient query/selection 清理由 Workspace 统一拥有。已覆盖筛选/别名稳定性和源码负向探针，`cargo check -p warp --features gui,local_fs` 于 2026-07-29 通过；因当前 shell 无 Accessibility/Screen Recording 且已有旧进程可能接收 launch forwarding，暂不声明视觉交互验收。
+- **目标**：点击或明确快捷键打开；立即展示 `SshTargetCatalog` 已提交候选，必要时后台 refresh，不因 hover 制造副作用。提供搜索、上下选择、Enter 打开、Escape 关闭；关闭后的迟到 editor event 必须 fail-closed，既不能重建 transient selection，也不能激活环境。保留显式 Refresh 与配置入口，并清楚区分 current/open/dormant/loading/error。
+- **状态**：✅ 已完成 — `+` 仅在显式点击时打开，已删除 hover 打开与 open-time `ExplicitRefresh`；popover 直接显示 `SshTargetCatalog` 当前 committed snapshot，并提供搜索、stable alias 选中、Up/Down、Enter 和 Escape。Refresh 仍是唯一触发 catalog refresh 的显式入口；打开、关闭与其他 popover/环境导航的 transient query/selection 清理由 Workspace 统一拥有。隔离 `~/.ssh/config` fixture 已在真实应用事件循环中完成 painted-entry click → typed query → Down → Escape；该测试同时复现并修复了 `clear_buffer()` 触发的迟到 `EditorEvent::Edited`：picker 已关闭时 owner 立即清除 alias 并返回，不能复活 selection 或继续激活环境。当前环境没有 macOS Accessibility/Screen Recording，因此这证明键盘/事件路由与状态机，不把它表述为视觉像素验收。
 
 ### 5. Session Navigator 补齐键盘操作面
 - **现状**：搜索框只过滤文本；会话行主要依赖单击激活和右键菜单执行重命名、置顶、删除等动作。未发现列表 selection navigation 或针对 Navigator 的 Enter/快捷动作，键盘用户需要频繁切换到指针。
 - **目标**：搜索结果拥有稳定选中行；上下键移动、Enter 激活/聚焦、显式刷新快捷键、重命名/置顶/删除动作均走既有 typed `WorkspaceAction` 和 reducer，操作完成或取消后焦点返回合理位置。不得让键盘 selection 覆盖 Environment-owned Navigator selection 语义。
-- **状态**：🟡 代码、静态门禁、focused test 与 `cargo check` 已完成，等待隔离 GUI 验收 — `VerticalTabsPanelState` 现在持有不可持久化的 `SessionNavigatorRowIdentity` cursor；它在 committed/query-filtered viewport 中按 stable identity 归一化，永不写入 `SessionNavigatorState.selected_row_id` 或 list index。搜索框支持 Up/Down、Enter（复用 `ActivateRestoredWorkspaceSession` typed action）与 Escape（同时清 query 文本和 cursor）；cursor 变化会通过 `ListState` 将所属 split-aware reorder unit 滚动到可见区域。
+- **状态**：✅ 已完成 — `VerticalTabsPanelState` 持有不可持久化的 `SessionNavigatorRowIdentity` cursor；它在 committed/query-filtered viewport 中按 stable identity 归一化，永不写入 `SessionNavigatorState.selected_row_id` 或 list index。搜索框支持 Up/Down、Enter（复用 `ActivateRestoredWorkspaceSession` typed action）与 Escape（同时清 query 文本和 cursor）；cursor 变化会通过 `ListState` 将所属 split-aware reorder unit 滚动到可见区域。隔离 Omp fixture 已在真实应用事件循环中完成 explicit Refresh → committed projection → 搜索输入 click → Down → Escape，并确认 cursor 只保留在 UI 层。该验证刻意不按 Enter，避免发起 `omp --resume`；当前环境没有 macOS Accessibility/Screen Recording，故不把它表述为视觉像素验收。
 
 ---
 

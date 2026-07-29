@@ -399,6 +399,20 @@ impl View {
         }
     }
 
+    #[cfg(feature = "integration_tests")]
+    pub fn selected_result_is_session_navigation(&self, app: &AppContext) -> bool {
+        self.search_bar_state
+            .as_ref(app)
+            .selected_result()
+            .is_some_and(|result| {
+                matches!(
+                    result.accept_result(),
+                    CommandPaletteItemAction::NavigateToSession { .. }
+                        | CommandPaletteItemAction::ActivateRestoredWorkspaceSession { .. }
+                )
+            })
+    }
+
     pub fn set_fixed_query_filters(
         &mut self,
         title: String,

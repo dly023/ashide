@@ -1628,7 +1628,7 @@ ux_contract_matrix:
       event: "Read local/remote alias and pin sidecar containing historical layout-coordinate keys"
       may_change: ["sidecar_cleanup"]
       must_preserve: ["stable_pane_keys", "durable_agent_keys", "stable_aliases", "stable_pins"]
-      test: "test_session_user_state_drops_volatile_layout_identity_debt"
+      test: "local_session_user_state_drops_generic_pane_identity_debt + test_remote_session_user_state_drops_volatile_layout_identity_debt"
     - id: "SN-DISCOVERY-LIMIT-01"
       scope: "cross_environment"
       event: "InitialScan → Refresh → RemoteScan"

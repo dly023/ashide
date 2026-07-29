@@ -2489,6 +2489,15 @@ impl Workspace {
         ctx.subscribe_to_view(&editor, |me, editor_view, event, ctx| match event {
             EditorEvent::Edited(_) => {
                 me.environment_provider_picker_query = editor_view.as_ref(ctx).buffer_text(ctx);
+                if !me
+                    .current_workspace_state
+                    .is_environment_provider_picker_open
+                {
+                    // 关闭 picker 时清空编辑器会产生最后一次 Edited 事件。
+                    // 已关闭的 transient surface 不得因该迟到事件重建 selection。
+                    me.environment_provider_picker_selected_alias = None;
+                    return;
+                }
                 me.normalize_environment_provider_picker_selection(ctx);
                 ctx.notify();
             }
@@ -2552,6 +2561,15 @@ impl Workspace {
         next: bool,
         ctx: &mut ViewContext<Self>,
     ) {
+        if !self
+            .current_workspace_state
+            .is_environment_provider_picker_open
+        {
+            if self.environment_provider_picker_selected_alias.take().is_some() {
+                ctx.notify();
+            }
+            return;
+        }
         let candidates = self.environment_provider_picker_filtered_candidates(ctx);
         if candidates.is_empty() {
             self.environment_provider_picker_selected_alias = None;
@@ -2577,6 +2595,13 @@ impl Workspace {
     }
 
     fn confirm_environment_provider_picker_selection(&mut self, ctx: &mut ViewContext<Self>) {
+        if !self
+            .current_workspace_state
+            .is_environment_provider_picker_open
+        {
+            self.environment_provider_picker_selected_alias = None;
+            return;
+        }
         self.normalize_environment_provider_picker_selection(ctx);
         if let Some(alias) = self.environment_provider_picker_selected_alias.clone() {
             ctx.dispatch_typed_action(&WorkspaceAction::OpenEnvironmentProviderCandidate { alias });
@@ -20714,6 +20739,37 @@ impl Workspace {
     pub fn is_palette_open(&self) -> bool {
         self.current_workspace_state.is_palette_open
             || self.current_workspace_state.is_ctrl_tab_palette_open
+    }
+
+    #[cfg(feature = "integration_tests")]
+    pub fn integration_environment_provider_picker_state(&self) -> (bool, String, Option<String>) {
+        (
+            self.current_workspace_state
+                .is_environment_provider_picker_open,
+            self.environment_provider_picker_query.clone(),
+            self.environment_provider_picker_selected_alias.clone(),
+        )
+    }
+
+    #[cfg(feature = "integration_tests")]
+    pub fn integration_session_navigator_search_state(&self) -> (String, bool) {
+        (
+            self.vertical_tabs_panel.search_query.clone(),
+            self.vertical_tabs_panel
+                .integration_session_navigator_keyboard_cursor_is_set(),
+        )
+    }
+
+    #[cfg(feature = "integration_tests")]
+    pub fn integration_session_navigator_contains_labels(&self, labels: &[&str]) -> bool {
+        self.committed_session_navigator_model().is_some_and(|model| {
+            labels.iter().all(|label| {
+                model
+                    .sessions
+                    .iter()
+                    .any(|session| session.label.as_deref() == Some(*label))
+            })
+        })
     }
 
     pub fn is_workflow_modal_open(&self) -> bool {

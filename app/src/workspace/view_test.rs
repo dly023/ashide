@@ -1908,6 +1908,57 @@ fn add_get_started_tab(workspace: &mut Workspace, ctx: &mut ViewContext<Workspac
     );
 }
 
+/// 将测试中的真实 terminal carrier 标记为 Omp 语义 pane。
+///
+/// Session Navigator 不把普通本地 shell 当成可恢复历史；测试若要断言 live
+/// Navigator 行为，必须通过生产同一条 PaneSessionBinding 路径提供原生 agent
+/// 语义，不能恢复已删除的普通 shell membership。
+fn bind_test_omp_session_to_pane(
+    workspace: &Workspace,
+    tab_index: usize,
+    pane_index: usize,
+    session_id: &str,
+    ctx: &mut ViewContext<Workspace>,
+) {
+    let tab = workspace
+        .tabs
+        .get(tab_index)
+        .expect("测试 fixture 指向的 tab 必须存在");
+    let environment_authority_key = tab
+        .environment
+        .as_ref()
+        .map(|environment| environment.authority_key.clone());
+    let pane_group = tab.pane_group.clone();
+    let source = WorkspaceSessionSnapshot {
+        id: format!("test-omp-binding-{tab_index}-{pane_index}-{session_id}"),
+        container_uuid: None,
+        kind: WorkspaceSessionKind::AgentTerminal,
+        label: Some("Omp fixture".to_string()),
+        environment_authority_key,
+        cwd: Some("/Users/admin/ashide".to_string()),
+        startup_directory: None,
+        cli_agent: Some(CLIAgent::Omp.to_serialized_name()),
+        cli_command: Some(CLIAgent::Omp.command_prefix().to_string()),
+        cli_agent_origin: Some(CliAgentSessionOrigin::PluginObserved),
+        conversation_ids: Vec::new(),
+        active_conversation_id: None,
+        cli_agent_session_id: Some(session_id.to_string()),
+        is_active: false,
+        is_pinned: false,
+        updated_at_unix_ms: None,
+        is_live_container: false,
+    };
+    let binding = crate::app_state::PaneSessionBinding::from_workspace_session(&source)
+        .expect("agent fixture 必须产生 pane-owned session binding");
+
+    pane_group.update(ctx, |pane_group, ctx| {
+        let pane_id = pane_group
+            .pane_id_by_index(pane_index)
+            .expect("测试 fixture 指向的 pane 必须存在");
+        assert!(pane_group.restore_session_binding_for_pane_id(pane_id, Some(binding), ctx));
+    });
+}
+
 #[test]
 fn test_restored_runtime_placeholder_configuration_owns_leaf_session_binding() {
     App::test((), |mut app| async move {
@@ -4914,6 +4965,8 @@ fn test_session_navigator_groups_same_window_split_rows_next_to_each_other() {
                     ctx,
                 );
             });
+            bind_test_omp_session_to_pane(workspace, 0, 0, "split-group-left", ctx);
+            bind_test_omp_session_to_pane(workspace, 0, 1, "split-group-right", ctx);
             workspace.sync_session_navigator_sessions(ctx);
 
             let relevant_rows = workspace
@@ -8577,6 +8630,16 @@ fn test_restored_error_environment_browser_unavailable_stays_error() {
                 EnvironmentLifecycleState::Error,
             );
             let authority = environment.authority_key.clone();
+            let runtime_session_id = CoreSessionId::from(9084);
+            workspace.environments_mut().mark_connecting(
+                environment.clone(),
+                runtime_session_id,
+                PathBuf::from("/tmp/ashide-test-atomic-action-model.sock"),
+            );
+            workspace.environments_mut().mark_connected_session(
+                runtime_session_id,
+                HostId::new("atomic-action-model-host".to_owned()),
+            );
             workspace.set_active_tab_environment(environment);
 
             assert_eq!(
@@ -12560,6 +12623,7 @@ fn test_session_navigator_keeps_only_one_active_session_after_new_shell() {
             let second_key = Workspace::workspace_session_logical_key(&second);
             workspace.restored_workspace_sessions.push(first);
             workspace.restored_workspace_sessions.push(second);
+            workspace.sync_session_navigator_sessions(ctx);
             workspace.dispatch_session_navigator_state_action(
                 session_navigator_reducer::SessionNavigatorAction::SelectionChanged {
                     session_logical_key: Some(first_key.clone()),
@@ -12574,6 +12638,14 @@ fn test_session_navigator_keeps_only_one_active_session_after_new_shell() {
             );
 
             workspace.add_terminal_tab(false, ctx);
+            bind_test_omp_session_to_pane(
+                workspace,
+                workspace.active_tab_index(),
+                0,
+                "new-shell-active",
+                ctx,
+            );
+            workspace.sync_session_navigator_sessions(ctx);
 
             let selected_row_ids = workspace
                 .session_navigator_sessions()
@@ -12614,6 +12686,8 @@ fn test_session_navigator_materialized_unfocused_split_preserves_selection_and_p
                     .expect("first split pane should exist");
                 panes.focus_pane_by_id(first_pane_id, ctx);
             });
+            bind_test_omp_session_to_pane(workspace, 0, 0, "unfocused-split-left", ctx);
+            bind_test_omp_session_to_pane(workspace, 0, 1, "unfocused-split-right", ctx);
 
             let unfocused_live_session = workspace
                 .live_workspace_sessions(ctx)
@@ -12679,6 +12753,9 @@ fn test_session_navigator_tab_switch_preserves_selection_and_projects_focused_ro
         workspace.update(&mut app, |workspace, ctx| {
             workspace.add_terminal_tab(false, ctx);
             workspace.activate_tab(0, ctx);
+            bind_test_omp_session_to_pane(workspace, 0, 0, "tab-switch-first", ctx);
+            bind_test_omp_session_to_pane(workspace, 1, 0, "tab-switch-second", ctx);
+            workspace.sync_session_navigator_sessions(ctx);
 
             let authority = workspace.current_environment_authority_key(ctx);
             let restored = WorkspaceSessionSnapshot {
@@ -12702,6 +12779,7 @@ fn test_session_navigator_tab_switch_preserves_selection_and_projects_focused_ro
             };
             let restored_key = Workspace::workspace_session_logical_key(&restored);
             workspace.restored_workspace_sessions.push(restored);
+            workspace.sync_session_navigator_sessions(ctx);
             workspace.dispatch_session_navigator_state_action(
                 session_navigator_reducer::SessionNavigatorAction::SelectionChanged {
                     session_logical_key: Some(restored_key.clone()),
@@ -14274,7 +14352,10 @@ fn test_session_navigator_action_model_refreshes_sessions_and_state_atomically()
                         unrelated_older,
                     ]),
                 )
-                .expect("new source rows must commit without pre-refreshing owner state");
+                .expect("new source rows must commit");
+            // Source membership 只能由 owner 的 explicit Refresh 发布；后续
+            // RestoreStarted 只消费已提交 model，不能绕过同步偷带新集合。
+            workspace.sync_session_navigator_sessions(ctx);
 
             let target_key = Workspace::workspace_session_logical_key(&target);
             assert!(workspace.dispatch_session_navigator_state_action(
@@ -15518,6 +15599,8 @@ fn test_reorder_session_navigator_unit_moves_split_group() {
                     ctx,
                 );
             });
+            bind_test_omp_session_to_pane(workspace, 0, 0, "reorder-group-left", ctx);
+            bind_test_omp_session_to_pane(workspace, 0, 1, "reorder-group-right", ctx);
             workspace.sync_session_navigator_sessions(ctx);
 
             let sessions = workspace.session_navigator_sessions();
@@ -18816,6 +18899,68 @@ fn environment_provider_quick_picker_filter_and_selection_are_stable() {
 }
 
 #[test]
+fn environment_provider_quick_picker_workspace_lifecycle_uses_committed_catalog() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let server = test_ssh_server_for_environment_tests();
+            install_test_saved_ssh_target_catalog(&server, ctx);
+
+            workspace.environment_provider_picker_query = "stale query".to_owned();
+            workspace.environment_provider_picker_selected_alias =
+                Some("stale:alias".to_owned());
+            workspace.handle_action(
+                &WorkspaceAction::SetEnvironmentProviderPickerOpen { open: true },
+                ctx,
+            );
+
+            assert!(workspace
+                .current_workspace_state
+                .is_environment_provider_picker_open);
+            assert!(workspace.environment_provider_picker_query.is_empty());
+            assert_eq!(
+                workspace
+                    .environment_provider_picker_selected_alias
+                    .as_deref(),
+                Some("saved:remote-fixture-primary"),
+                "opening must consume the committed catalog and normalize stale selection by stable alias"
+            );
+
+            workspace.navigate_environment_provider_picker_selection(true, ctx);
+            assert_eq!(
+                workspace
+                    .environment_provider_picker_selected_alias
+                    .as_deref(),
+                Some("saved:remote-fixture-primary"),
+                "single-candidate keyboard navigation must remain on the committed candidate"
+            );
+
+            workspace.handle_action(
+                &WorkspaceAction::SetEnvironmentProviderPickerOpen { open: false },
+                ctx,
+            );
+            assert!(!workspace
+                .current_workspace_state
+                .is_environment_provider_picker_open);
+            assert!(workspace.environment_provider_picker_query.is_empty());
+            assert!(workspace.environment_provider_picker_selected_alias.is_none());
+
+            workspace.environment_provider_picker_selected_alias =
+                Some("saved:remote-fixture-primary".to_owned());
+            workspace.navigate_environment_provider_picker_selection(true, ctx);
+            assert!(workspace.environment_provider_picker_selected_alias.is_none());
+
+            workspace.environment_provider_picker_selected_alias =
+                Some("saved:remote-fixture-primary".to_owned());
+            workspace.confirm_environment_provider_picker_selection(ctx);
+            assert!(workspace.environment_provider_picker_selected_alias.is_none());
+        });
+    });
+}
+
+#[test]
 fn environment_provider_quick_picker_static_guard() {
     const VIEW_RS: &str = include_str!("view.rs");
 
@@ -18851,6 +18996,45 @@ fn environment_provider_quick_picker_static_guard() {
         .0;
     assert!(open_picker.contains("clear_environment_provider_picker_ephemeral_state"));
     assert!(open_picker.contains("ctx.focus(&self.environment_provider_picker_search_editor)"));
+
+    let picker_navigation = VIEW_RS
+        .split_once("fn navigate_environment_provider_picker_selection(")
+        .expect("picker navigation must have a Workspace-owned lifecycle boundary")
+        .1
+        .split_once("fn confirm_environment_provider_picker_selection(")
+        .expect("picker confirmation must follow navigation")
+        .0;
+    assert!(picker_navigation.contains("is_environment_provider_picker_open"));
+    assert!(picker_navigation.contains("environment_provider_picker_selected_alias.take()"));
+
+    let picker_editor = VIEW_RS
+        .split_once("fn build_environment_provider_picker_search_input(")
+        .expect("provider picker editor must exist")
+        .1
+        .split_once("fn clear_environment_provider_picker_ephemeral_state(")
+        .expect("provider picker editor must remain bounded")
+        .0;
+    assert!(picker_editor.contains("EditorEvent::Edited(_)"));
+    assert!(picker_editor.contains("is_environment_provider_picker_open"));
+    assert!(picker_editor.contains("environment_provider_picker_selected_alias = None"));
+
+    let picker_confirmation = VIEW_RS
+        .split_once("fn confirm_environment_provider_picker_selection(")
+        .expect("picker confirmation must have a Workspace-owned lifecycle boundary")
+        .1
+        .split_once("fn open_environment_provider_picker(")
+        .expect("picker opening must follow confirmation")
+        .0;
+    let closed_guard = picker_confirmation
+        .find("is_environment_provider_picker_open")
+        .expect("closed picker confirmation must fail closed");
+    let activation = picker_confirmation
+        .find("WorkspaceAction::OpenEnvironmentProviderCandidate")
+        .expect("confirmed picker selection must reuse typed activation");
+    assert!(
+        closed_guard < activation,
+        "closed picker must reject a late Enter before it can dispatch provider activation"
+    );
 
     let dismiss_picker = VIEW_RS
         .split_once("fn dismiss_environment_provider_picker(")

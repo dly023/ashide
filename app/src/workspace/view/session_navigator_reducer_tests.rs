@@ -2217,6 +2217,8 @@ fn test_session_navigator_spec_matrix_is_complete_and_linked() {
         include_str!("../../terminal/cli_agent_sessions/mod_tests.rs");
     let shared_cli_agent_jsonl_tests = include_str!("../../cli_agent_jsonl/tests.rs");
     let remote_cli_agent_session_tests = include_str!("../../remote_server/cli_agent_sessions.rs");
+    let remote_cli_agent_session_user_state_tests =
+        include_str!("../../remote_server/cli_agent_session_user_state.rs");
     let dev_remote_install_tests = include_str!("../../remote_server/dev_remote_install.rs");
     let session_bridge_cli_agent_reader_tests =
         include_str!("../../session_bridge/cli_agent_reader.rs");
@@ -2249,6 +2251,7 @@ fn test_session_navigator_spec_matrix_is_complete_and_linked() {
                     || cli_agent_session_ingress_tests.contains(&format!("fn {test}"))
                     || shared_cli_agent_jsonl_tests.contains(&format!("fn {test}"))
                     || remote_cli_agent_session_tests.contains(&format!("fn {test}"))
+                    || remote_cli_agent_session_user_state_tests.contains(&format!("fn {test}"))
                     || dev_remote_install_tests.contains(&format!("fn {test}"))
                     || session_bridge_cli_agent_reader_tests.contains(&format!("fn {test}"))
                     || session_bridge_tests.contains(&format!("fn {test}"))

@@ -647,6 +647,7 @@ mod uireq014_first_message_tests {
         std::fs::create_dir_all(home.path().join(".claude/projects"))
             .expect("create Claude sessions store");
         std::fs::create_dir(&project).expect("create index cwd");
+        let canonical_project = std::fs::canonicalize(&project).expect("canonicalize index cwd");
         std::fs::write(
             home.path().join(".codex/session_index.jsonl"),
             format!(
@@ -668,10 +669,7 @@ mod uireq014_first_message_tests {
             .expect("session_id fallback must be visible remotely");
 
         assert_eq!(session.label.as_deref(), Some("远程共享 Index Parser"));
-        assert_eq!(
-            session.cwd.as_deref(),
-            Some(project.to_string_lossy().as_ref())
-        );
+        assert_eq!(session.cwd.as_deref(), canonical_project.to_str());
         assert_eq!(session.modified_epoch_millis, Some(1234));
     }
 

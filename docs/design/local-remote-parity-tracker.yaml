@@ -5990,7 +5990,7 @@ items:
     cargo_check: '2026-07-29 cargo check -p warp --features gui,local_fs passed.'
     gui_or_runtime: '2026-07-29 TERM=xterm-256color ./script/run rebuilt target/debug/bundle/osx/AshideDev.app, assembled bundled resources, codesigned it and opened the current checkout. Startup logs opened windows and completed provider discovery without a viewport panic; this shell has no Accessibility/Screen Recording permission, so visual drag/scroll interaction is not claimed.'
 - id: LR-201
-  status: in_progress
+  status: verified
   category: session_navigator_incremental_command_palette_search
   discovered_at: '2026-07-29'
   summary: "会话命令面板每个字符都跨 window/Workspace 重建 membership，Tantivy 每次 query 重新建索引；89+ 本地和 82+ 远端条目放大输入热路径。"
@@ -6003,18 +6003,18 @@ items:
   reused_abstractions: [SessionNavigatorModel, "Workspace::apply_session_navigator_reduction", WorkspaceRegistry, SessionNavigationData, command palette navigation DataSource]
   removed_parallel_paths: [query-time Workspace enumeration, "query-time SessionNavigationData::all_sessions", query-time Tantivy rebuild, search-owned live membership collection]
   shared_paths: [app/src/workspace/registry.rs, app/src/workspace/view/session_navigator.rs, app/src/search/command_palette/navigation/search.rs, app/src/search/command_palette/navigation/data_source.rs]
-  required_tests: [session_search_projection_is_window_scoped_and_unregister_clears_it, session_search_projection_event_reaches_derived_index_owner, full_text_session_search_reuses_published_projection_until_generation_changes, session_search_static_guard]
+  required_tests: [session_search_projection_is_window_scoped_and_unregister_clears_it, session_search_projection_event_reaches_derived_index_owner, full_text_session_search_reuses_published_projection_until_generation_changes, session_search_static_guard, test_session_navigator_command_palette_event_loop_search]
   verification:
     focused_tests: '2026-07-29 focused registry partition/close, registry event delivery, full-text generation refresh and static guard tests passed; navigation::search passed 11/11.'
-    cargo_check: '2026-07-29 MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs passed.'
-    gui_or_runtime: '2026-07-29 TERM=xterm-256color ./script/run rebuilt, bundled, ad-hoc codesigned and opened target/debug/bundle/osx/AshideDev.app. macOS routed launch to the pre-existing old AshideDev process, and this shell lacks Accessibility/Screen Recording permission, so current-code visual input behavior is not claimed; tracker remains in_progress until an isolated current-process check.'
+    cargo_check: '2026-07-29 MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs and cargo check -p integration passed.'
+    gui_or_runtime: '2026-07-29 internal integration runner passed test_session_navigator_command_palette_event_loop_search against an isolated HOME Omp JSONL fixture with the target row and two unrelated rows: explicit refresh committed the collection, typed navigation-palette query produced results, and the selected result was the canonical Session Navigator action. The test closes with Escape and deliberately does not press Enter, so it never executes omp --resume; typed activation routing remains covered by the focused reducer/static tests.'
 - id: LR-202
-  status: in_progress
+  status: verified
   category: environment_provider_quick_picker_keyboard
   discovered_at: '2026-07-29'
   summary: "Environment Strip + 通过 hover 打开且立即显式刷新 SSH catalog；popover 没有 query、selection 或 keyboard path，鼠标经过会产生不必要副作用。"
-  root_cause: "picker 把 transient presentation state 简化为一个 bool，并把 open 与 I/O intent 绑定；候选列表渲染直接消费 catalog，没有 canonical keyboard selection owner。"
-  target_invariant: "Workspace 仅持有 ephemeral query/selected stable catalog identity，SshTargetCatalog 继续唯一拥有 committed candidates 和 refresh lifecycle。显式打开先显示已提交候选，键盘路径复用 OpenEnvironmentProviderCandidate typed action，hover 不得打开或刷新。"
+  root_cause: "picker 把 transient presentation state 简化为一个 bool，并把 open 与 I/O intent 绑定；候选列表渲染直接消费 catalog，没有 canonical keyboard selection owner。关闭后 editor subscription 的迟到 Navigate/Enter 也未检查 picker lifecycle，可能复活 selection 或继续 activation。"
+  target_invariant: "Workspace 仅持有 ephemeral query/selected stable catalog identity，SshTargetCatalog 继续唯一拥有 committed candidates 和 refresh lifecycle。显式打开先显示已提交候选，键盘路径复用 OpenEnvironmentProviderCandidate typed action，hover 不得打开或刷新。picker 关闭后任何迟到的 Navigate/Enter editor event 必须 fail-closed：不重建 selection，也不得派发 provider activation。"
   spec_path: docs/LOCAL_REMOTE_PARITY_SPEC.yaml
   spec_matrix_id: ENVIRONMENT-PROVIDER-QUICK-PICKER-KEYBOARD-71
   capability_matrix: 'Environment provider quick picker explicit keyboard interaction'
@@ -6022,13 +6022,13 @@ items:
   reused_abstractions: [SshTargetCatalog, EnvironmentProviderCandidate, EditorView, "WorkspaceAction::OpenEnvironmentProviderCandidate", Workspace focus restoration]
   removed_parallel_paths: [hover-open mutation, open-time ExplicitRefresh, mouse-only candidate activation, index-based picker selection]
   shared_paths: [app/src/workspace/view.rs, app/src/workspace/action.rs, app/src/workspace/environment_provider.rs, app/src/workspace/view_test.rs]
-  required_tests: [environment_provider_quick_picker_filter_and_selection_are_stable, environment_provider_quick_picker_static_guard]
+  required_tests: [environment_provider_quick_picker_filter_and_selection_are_stable, environment_provider_quick_picker_workspace_lifecycle_uses_committed_catalog, environment_provider_quick_picker_static_guard, test_environment_provider_picker_event_loop_keyboard_lifecycle]
   verification:
-    focused_tests: '2026-07-29 cargo test -p warp --lib --features gui,local_fs environment_provider_quick_picker --no-fail-fast passed (2/2): case-insensitive alias/title/detail filtering preserves or re-normalizes stable catalog aliases; static guard covers no hover state/I/O, separate ExplicitRefresh, keyboard event routing and index-free selection.'
-    cargo_check: '2026-07-29 MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs passed.'
-    gui_or_runtime: 'pending: the current shell has no Accessibility/Screen Recording permission, and an existing AshideDev process can receive macOS launch forwarding. Do not mark verified until an isolated current-checkout process exercises click-open, query, Up/Down, Enter, Escape, Refresh, empty/loading/error and current/open/dormant row states.'
+    focused_tests: '2026-07-29 cargo test -p warp --lib --features gui,local_fs environment_provider_quick_picker_ --no-fail-fast passed (3/3): case-insensitive alias/title/detail filtering; real Workspace action lifecycle consumes only committed catalog candidates and clears close state; late closed-picker Navigate/Enter cannot recreate selection or dispatch activation; static guard covers no hover state/I/O, separate ExplicitRefresh, keyboard event routing and index-free selection.'
+    cargo_check: '2026-07-29 MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs and cargo check -p integration passed after the closed-picker Edited fail-closed guard.'
+    gui_or_runtime: '2026-07-29 internal integration runner passed test_environment_provider_picker_event_loop_keyboard_lifecycle against an isolated ~/.ssh/config fixture: real painted-entry click opened the picker from committed catalog state, typed query and Down preserved the stable alias, and Escape closed it with query/selection cleared. This exposed and fixed the late clear_buffer → Edited selection resurrection. Enter dispatch remains covered by the focused typed-action lifecycle test; the integration test does not materialize a remote connection.'
 - id: LR-203
-  status: in_progress
+  status: verified
   category: session_navigator_keyboard_cursor
   discovered_at: '2026-07-29'
   summary: "Session Navigator 搜索输入只过滤文本；会话激活、重命名、置顶和删除仍主要依赖鼠标，且不能把键盘焦点误写入 Environment-owned canonical selection。"
@@ -6041,14 +6041,14 @@ items:
   reused_abstractions: [SessionNavigatorRowIdentity, VerticalTabsPanelState, SessionNavigatorViewportProjection, ListState, "WorkspaceAction::ActivateRestoredWorkspaceSession"]
   removed_parallel_paths: [mouse-only Navigator activation, reducer-selection-backed keyboard focus, index-backed cursor, keyboard-owned session mutation]
   shared_paths: [app/src/workspace/view.rs, app/src/workspace/view/vertical_tabs.rs, app/src/workspace/view_test.rs, docs/SESSION_NAVIGATOR_SPEC.yaml, docs/LOCAL_REMOTE_PARITY_SPEC.yaml, docs/design/local-remote-capability-matrix.csv, script/check_local_remote_parity]
-  required_tests: [session_navigator_keyboard_cursor_normalizes_by_stable_identity, session_navigator_keyboard_cursor_static_guard]
+  required_tests: [session_navigator_keyboard_cursor_normalizes_by_stable_identity, session_navigator_keyboard_cursor_static_guard, test_session_navigator_search_keyboard_event_loop_lifecycle]
   verification:
-    static_check: '2026-07-29 ./script/check_local_remote_parity: LR-203 static contract and index/reducer-write negative probes passed. The aggregate script remains non-zero only because LR-201/LR-202/LR-203 intentionally remain in_progress until isolated current-checkout GUI/runtime confirmation.'
+    static_check: '2026-07-29 ./script/check_local_remote_parity passed; LR-203 static contract and index/reducer-write negative probes remain fail-closed.'
     focused_tests: '2026-07-29 cargo test -p warp --lib --features gui,local_fs session_navigator_keyboard_cursor --no-fail-fast passed (2/2): stable RowId + authority normalization survives reorder, query/source removal clears cursor, edge navigation clamps, and source guard locks UI-only ownership plus Enter typed-action routing.'
-    cargo_check: '2026-07-29 MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs passed.'
-    gui_or_runtime: 'pending: verify in an isolated current-checkout macOS process (not launch-forwarded to an old AshideDev instance): search input query, Up/Down, Enter on historical/live/restoring/renaming rows, Escape clears both query text and cursor, scroll-to-visible across split units, query no-match and source deletion/reorder. Current shell lacks Accessibility/Screen Recording permission; no old app process was killed.'
+    cargo_check: '2026-07-29 MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs and cargo check -p integration passed.'
+    gui_or_runtime: '2026-07-29 internal integration runner passed test_session_navigator_search_keyboard_event_loop_lifecycle using an isolated Omp JSONL fixture with the target row and two unrelated rows: explicit refresh committed the collection, a real click focused the painted navigator search input, typed target filtering plus Down established the transient stable cursor, and Escape cleared both cursor and query. It intentionally never presses Enter against Omp; the existing focused/static tests cover the typed activation route without executing a provider resume.'
 - id: LR-204
-  status: in_progress
+  status: verified
   category: session_navigator_local_process_scan_coalescing
   discovered_at: '2026-07-29'
   summary: "当前 checkout 冷启动恢复 3 个窗口时，本地 provider discovery 对相同输入完成了 3 次 scan（577 ms、246 ms、246 ms），单 Workspace 的 in-flight token 无法跨窗口合并。"
@@ -6065,4 +6065,4 @@ items:
   verification:
     focused_tests: '2026-07-29 exact LR-204 tests passed 4/4: matching windows coalesce; explicit refresh preempts stale generation without losing passive recipients; scope and observed-provider input differences never coalesce; local worker remains off the UI thread and fans out only through recipient token commits.'
     cargo_check: '2026-07-29 MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs passed after coordinator integration and static-gate hardening.'
-    gui_or_runtime: 'pending: rebuild an isolated current checkout and confirm a cold restore with equal local workspaces emits one provider scan transaction, while different scope remains independent.'
+    gui_or_runtime: '2026-07-29 isolated current-checkout runtime verification passed: built/ad-hoc-sealed target/debug/bundle/osx/AshideLocal.app, launched it with WARP_DATA_PROFILE=lr204-runtime, and cold-restored three equal local WindowSnapshot fixtures with distinct terminal/container UUIDs. The runtime log opened windows 0/1/2, emitted exactly one "Session Navigator discovery scanned 9 providers in 243 ms", then emitted three independent "Local Session Navigator scan committed 89 sessions" events. This proves one process-scoped source transaction fans out through three EnvironmentTable recipient commits; the fixture profile is isolated from normal AshideDev data.'

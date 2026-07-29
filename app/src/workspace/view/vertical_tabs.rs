@@ -122,6 +122,13 @@ const VERTICAL_TABS_STATUS_BADGE_ICON_SIZE: f32 = 9.;
 const VERTICAL_TABS_STATUS_BADGE_PADDING: f32 = 1.5;
 const VERTICAL_TABS_STATUS_BADGE_OFFSET: (f32, f32) = (2., 2.);
 
+/// Session Navigator 查询编辑器的稳定 integration-test 锚点。
+///
+/// 该编辑器是 Navigator 唯一的键盘入口。显式保留其 paint position，才能让真实
+/// 应用事件循环测试覆盖焦点、光标移动和 Escape，而不依赖 macOS Accessibility。
+pub(crate) const SESSION_NAVIGATOR_SEARCH_INPUT_POSITION_ID: &str =
+    "workspace:session_navigator_search_input";
+
 const VERTICAL_TABS_SIZING: IconWithStatusSizing = IconWithStatusSizing {
     icon_size: 16.,
     padding: 4.,
@@ -1516,6 +1523,11 @@ impl Default for VerticalTabsPanelState {
 }
 
 impl VerticalTabsPanelState {
+    #[cfg(feature = "integration_tests")]
+    pub(super) fn integration_session_navigator_keyboard_cursor_is_set(&self) -> bool {
+        self.session_navigator_keyboard_cursor.borrow().is_some()
+    }
+
     /// Reconcile the index-addressed WarpUI list only when the canonical
     /// Environment-owned Navigator projection (or its query) changes. RowId
     /// remains inside the projection; `ListState` indices are geometry only.
@@ -2214,6 +2226,8 @@ fn render_control_bar(
     )
     .build()
     .finish();
+    let text_input =
+        SavePosition::new(text_input, SESSION_NAVIGATOR_SEARCH_INPUT_POSITION_ID).finish();
 
     let search_bar = Flex::row()
         .with_main_axis_size(MainAxisSize::Max)

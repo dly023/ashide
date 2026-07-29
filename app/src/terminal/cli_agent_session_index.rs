@@ -862,6 +862,7 @@ mod tests {
         let home = test_home();
         let cwd = home.path().join("manga_data");
         fs::create_dir(&cwd).expect("create Codex cwd");
+        let canonical_cwd = fs::canonicalize(&cwd).expect("canonicalize Codex cwd");
         let provider_session_id = "019f5629-5daf-7381-b33e-00d8efba617f";
         let rollout_dir = home.path().join(".codex/sessions/2026/07/12");
         fs::create_dir_all(&rollout_dir).expect("create rollout date directory");
@@ -901,7 +902,7 @@ mod tests {
             .expect("cold scan should discover the Codex session");
 
         assert_eq!(session.label.as_deref(), Some("打招呼"));
-        assert_eq!(session.cwd.as_deref(), Some(cwd.to_string_lossy().as_ref()));
+        assert_eq!(session.cwd.as_deref(), canonical_cwd.to_str());
         assert!(!session.is_live_container);
     }
 
@@ -911,6 +912,7 @@ mod tests {
         let project = home.path().join("index-project");
         let provider_session_id = "019f5f34-b6b7-70b3-8e50-e98504691ca1";
         fs::create_dir(&project).expect("create index cwd");
+        let canonical_project = fs::canonicalize(&project).expect("canonicalize index cwd");
         fs::write(
             home.path().join(".codex/session_index.jsonl"),
             format!(
@@ -940,10 +942,7 @@ mod tests {
             .expect("session_id fallback must be visible locally");
 
         assert_eq!(session.label.as_deref(), Some("本地共享 Index Parser"));
-        assert_eq!(
-            session.cwd.as_deref(),
-            Some(project.to_string_lossy().as_ref())
-        );
+        assert_eq!(session.cwd.as_deref(), canonical_project.to_str());
         assert_eq!(session.modified_epoch_millis, 1234);
     }
 
@@ -952,6 +951,7 @@ mod tests {
         let home = test_home();
         let project = home.path().join("project");
         fs::create_dir(&project).expect("create project cwd");
+        let canonical_project = fs::canonicalize(&project).expect("canonicalize project cwd");
 
         let valid_session_id = "019f5f34-b6b7-70b3-8e50-e98504691ca2";
         fs::write(
@@ -1001,10 +1001,7 @@ mod tests {
             .find(|session| session.provider_session_id == store_session_id)
             .expect("session-store cwd session");
 
-        assert_eq!(
-            valid.cwd.as_deref(),
-            Some(project.to_string_lossy().as_ref())
-        );
+        assert_eq!(valid.cwd.as_deref(), canonical_project.to_str());
         assert_eq!(store.cwd, None);
     }
 
