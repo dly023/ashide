@@ -21,8 +21,8 @@ use crate::settings_view::SettingsSection;
 use crate::tab::SelectedTabColor;
 use crate::terminal::{CLIAgent, ShellLaunchData};
 use crate::themes::theme::AnsiColorIdentifier;
-use crate::workspace::WorkspaceRegistry;
 use crate::workspace::view::left_panel::ToolPanelView;
+use crate::workspace::WorkspaceRegistry;
 use warpui::SingletonEntity as _;
 
 #[derive(Debug, Clone, PartialEq)]

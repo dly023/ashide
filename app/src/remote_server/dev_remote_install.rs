@@ -1740,11 +1740,7 @@ mod tests {
             assert!(DEV_REMOTE_BUILD_INPUT_SCOPES.contains(&path));
             assert!(deploy_script.contains(&format!("\"{path}\"")));
         }
-        for marker in [
-            "for pid_file in",
-            "kill -KILL",
-            "server.sock",
-        ] {
+        for marker in ["for pid_file in", "kill -KILL", "server.sock"] {
             assert!(deploy_script.contains(marker));
         }
     }

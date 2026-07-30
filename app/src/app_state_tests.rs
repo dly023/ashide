@@ -363,11 +363,9 @@ fn workspace_session_from_tabs_uses_leaf_title_not_tab_group_title() {
     assert_eq!(sessions[0].label.as_deref(), Some("API pane"));
     assert_eq!(sessions[1].container_uuid, Some(vec![2; 16]));
     assert_eq!(sessions[1].label.as_deref(), Some("Tests pane"));
-    assert!(
-        sessions
-            .iter()
-            .all(|session| session.label.as_deref() != Some("Backend group"))
-    );
+    assert!(sessions
+        .iter()
+        .all(|session| session.label.as_deref() != Some("Backend group")));
 }
 
 #[test]
@@ -730,11 +728,9 @@ fn test_session_navigator_merges_terminal_bootstrap_authority_variants() {
     assert_eq!(sessions[0].id, "tab:1:leaf:0");
     assert!(sessions[0].is_active);
     assert_eq!(sessions[0].logical_key(), live_container_key);
-    assert!(
-        sessions[0]
-            .stable_pin_keys()
-            .contains(&"local::agent:Codex:shared-local-session".to_string())
-    );
+    assert!(sessions[0]
+        .stable_pin_keys()
+        .contains(&"local::agent:Codex:shared-local-session".to_string()));
 }
 
 #[test]
@@ -1067,11 +1063,9 @@ fn test_live_pane_identity_uses_container_uuid_not_layout_coordinate() {
     );
     assert_eq!(first.logical_key(), "local::pane:10203040");
     assert!(!first.stable_user_state_keys().contains(&first.id));
-    assert!(
-        first
-            .stable_user_state_keys()
-            .contains(&"local::pane:10203040".to_owned())
-    );
+    assert!(first
+        .stable_user_state_keys()
+        .contains(&"local::pane:10203040".to_owned()));
 
     let shifted = WorkspaceSessionSnapshot::from_tabs(
         &[

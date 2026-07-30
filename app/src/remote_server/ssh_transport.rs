@@ -505,13 +505,14 @@ mod tests {
                 [crate::terminal::CLIAgent::Omp.to_serialized_name()]
             );
             assert!(scanned.source_missing_agent.is_none());
-            assert!(scanned.records.iter().any(|record| {
-                record.id == "019fa6d8-49ed-7000-b67f-09845d463582"
-            }));
+            assert!(scanned
+                .records
+                .iter()
+                .any(|record| { record.id == "019fa6d8-49ed-7000-b67f-09845d463582" }));
             assert!(scanned.records.iter().all(|record| {
-                !record
-                    .source
-                    .ends_with("2026-07-28T04-13-20-905Z_019fa6ed-5a89-7000-a812-947e32ee7656.jsonl")
+                !record.source.ends_with(
+                    "2026-07-28T04-13-20-905Z_019fa6ed-5a89-7000-a812-947e32ee7656.jsonl",
+                )
             }));
 
             let created = connection

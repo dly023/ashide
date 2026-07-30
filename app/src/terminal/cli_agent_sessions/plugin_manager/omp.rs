@@ -53,7 +53,9 @@ impl CliAgentPluginManager for OmpPluginManager {
                 if !path.exists() {
                     return true;
                 }
-                fs::read_to_string(&path).map(|content| content != BUNDLED_EXTENSION_SOURCE).unwrap_or(true)
+                fs::read_to_string(&path)
+                    .map(|content| content != BUNDLED_EXTENSION_SOURCE)
+                    .unwrap_or(true)
             }
             Err(_) => true,
         }

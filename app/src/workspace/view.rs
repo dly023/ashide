@@ -134,11 +134,11 @@ use super::hoa_onboarding::{
     mark_hoa_onboarding_completed, HoaOnboardingFlow, HoaOnboardingFlowEvent, HoaOnboardingStep,
 };
 use super::lightbox_view::{LightboxParams, LightboxView, LightboxViewEvent};
-use super::util;
 use super::registry::{
     LocalCliAgentSessionScanKey, LocalCliAgentSessionScanParticipant,
     LocalCliAgentSessionScanRequest,
 };
+use super::util;
 use super::{WorkspaceRegistry, WorkspaceRegistryEvent};
 use crate::ai::execution_profiles::editor::ExecutionProfileEditorManager;
 use crate::ai::execution_profiles::profiles::{AIExecutionProfilesModel, ClientProfileId};
@@ -2565,7 +2565,11 @@ impl Workspace {
             .current_workspace_state
             .is_environment_provider_picker_open
         {
-            if self.environment_provider_picker_selected_alias.take().is_some() {
+            if self
+                .environment_provider_picker_selected_alias
+                .take()
+                .is_some()
+            {
                 ctx.notify();
             }
             return;
@@ -20762,14 +20766,15 @@ impl Workspace {
 
     #[cfg(feature = "integration_tests")]
     pub fn integration_session_navigator_contains_labels(&self, labels: &[&str]) -> bool {
-        self.committed_session_navigator_model().is_some_and(|model| {
-            labels.iter().all(|label| {
-                model
-                    .sessions
-                    .iter()
-                    .any(|session| session.label.as_deref() == Some(*label))
+        self.committed_session_navigator_model()
+            .is_some_and(|model| {
+                labels.iter().all(|label| {
+                    model
+                        .sessions
+                        .iter()
+                        .any(|session| session.label.as_deref() == Some(*label))
+                })
             })
-        })
     }
 
     pub fn is_workflow_modal_open(&self) -> bool {

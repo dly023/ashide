@@ -650,9 +650,7 @@ fn omp_discovery_ignores_headerless_diagnostic_only_file_but_rejects_malformed_s
     )
     .expect("write valid Omp session");
     fs::write(
-        bucket.join(
-            "2026-07-28T04-13-20-905Z_019fa6ed-5a89-7000-a812-947e32ee7656.jsonl",
-        ),
+        bucket.join("2026-07-28T04-13-20-905Z_019fa6ed-5a89-7000-a812-947e32ee7656.jsonl"),
         serde_json::json!({
             "type": "custom",
             "customType": "session_exit",

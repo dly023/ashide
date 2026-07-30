@@ -135,7 +135,11 @@ pub fn test_environment_provider_picker_event_loop_keyboard_lifecycle() -> Build
                             workspace.integration_environment_provider_picker_state();
                         async_assert_eq!(
                             (is_open, query, selected.as_deref()),
-                            (true, "integration".to_owned(), Some("config:integration-picker")),
+                            (
+                                true,
+                                "integration".to_owned(),
+                                Some("config:integration-picker")
+                            ),
                             "typed query and Down must stay within the committed picker catalog"
                         )
                     })
