@@ -5002,6 +5002,68 @@ then
     fail=1
 fi
 
+# LR-205: Omp top-level JSONL is a physical candidate, not automatically a
+# resumable session. Shared discovery must exclude provider-native headerless
+# diagnostics while keeping malformed headers fail-closed, and parser-only
+# changes must invalidate the dev helper freshness stamp.
+require_contract_marker "LR-205" "SN-OMP-SESSION-CANDIDATE-CLASSIFICATION-74" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-205" "id: LR-205" docs/design/local-remote-parity-tracker.yaml
+require_rust_test_name "LR-205" "omp_discovery_ignores_headerless_diagnostic_only_file_but_rejects_malformed_session_header" app/src/cli_agent_jsonl/tests.rs
+require_rust_test_name "LR-205" "dev_remote_build_input_scopes_include_shared_cli_agent_discovery" app/src/remote_server/dev_remote_install.rs
+if ! python3 - <<'PYCONTRACT'
+from pathlib import Path
+
+discovery = Path("app/src/cli_agent_jsonl/discovery.rs").read_text()
+install = Path("app/src/remote_server/dev_remote_install.rs").read_text()
+deploy = Path("script/deploy_remote_server").read_text()
+
+for required in [
+    "Result<Option<AgentSessionDiscoveryRecord>, CliAgentSessionScanError>",
+    "let Some(header) = header else",
+    "return Ok(None);",
+    "parse_omp_discovery_record(file, roots).transpose()",
+    'invalid_session_record(&file.path, "Omp session header 缺少非空 id")',
+    "Omp session id 必须与 <timestamp>_<id>.jsonl filename 一致",
+]:
+    if required not in discovery:
+        raise SystemExit(f"Omp candidate classification marker missing: {required}")
+for path in [
+    "app/src/cli_agent_jsonl/discovery.rs",
+    "app/src/cli_agent_jsonl/error.rs",
+    "app/src/cli_agent_jsonl/mod.rs",
+    "app/src/cli_agent_jsonl/parse.rs",
+    "app/src/cli_agent_jsonl/roots.rs",
+]:
+    if f'"{path}"' not in install or f'"{path}"' not in deploy:
+        raise SystemExit(f"remote helper freshness omits shared discovery input: {path}")
+for required in [
+    "for pid_file in",
+    "kill -KILL",
+    "server.sock",
+]:
+    if required not in deploy:
+        raise SystemExit(f"manual helper deployment does not retire stale daemon: {required}")
+
+# Negative probes: replacing the typed Session/NotSession result or removing a
+# parser source from helper freshness must fail the same assertions.
+omp_parser = discovery.split("fn parse_omp_discovery_record", 1)[1].split("fn invalid_session_record", 1)[0]
+without_optional = omp_parser.replace(
+    "Result<Option<AgentSessionDiscoveryRecord>, CliAgentSessionScanError>",
+    "Result<AgentSessionDiscoveryRecord, CliAgentSessionScanError>",
+    1,
+)
+if "Result<Option<AgentSessionDiscoveryRecord>, CliAgentSessionScanError>" in without_optional:
+    raise SystemExit("negative probe failed to remove typed Omp candidate outcome")
+install_scopes = install.split("const DEV_REMOTE_BUILD_INPUT_SCOPES", 1)[1].split("];", 1)[0]
+without_parser_input = install_scopes.replace('    "app/src/cli_agent_jsonl/discovery.rs",\n', "", 1)
+if '"app/src/cli_agent_jsonl/discovery.rs"' in without_parser_input:
+    raise SystemExit("negative probe failed to remove helper parser freshness input")
+PYCONTRACT
+then
+    echo "[LR-205] Omp candidate classification/freshness contract failed" >&2
+    fail=1
+fi
+
 # LR-197: generic local terminals must not enter the canonical Navigator projection
 # or persist as recoverable history. The local-only membership branch belongs at
 # the live projection/read-write boundaries; runtime terminal rows remain valid.

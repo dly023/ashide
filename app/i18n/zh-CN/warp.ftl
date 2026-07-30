@@ -2559,6 +2559,14 @@ cli-agent-plugin-opencode-update-title = 更新 OpenCode 的 Warp 插件
 cli-agent-plugin-opencode-update-subtitle = 在 opencode.json 中将插件固定到最新版本。OpenCode 会按版本规格缓存插件，修改固定版本会强制它在重启时重新拉取。
 cli-agent-plugin-opencode-replace-plugin-step = 将 "plugin" 数组中现有的 "@warp-dot-dev/opencode-warp" 条目替换为显式版本：
 cli-agent-plugin-opencode-restart-update-note = 重启 OpenCode 以加载更新后的插件。
+cli-agent-plugin-omp-install-title = 安装 Omp 的 Ashide 扩展
+cli-agent-plugin-omp-install-subtitle = Ashide 内置了一个 Omp 原生扩展，可上报会话标题和提示词。点击安装即可自动部署。
+cli-agent-plugin-omp-install-step = 点击"安装"将扩展部署到 ~/.omp/agent/extensions/ashide-omp.ts。
+cli-agent-plugin-omp-restart-note = 重启 Omp 会话以加载扩展。
+cli-agent-plugin-omp-update-title = 更新 Omp 的 Ashide 扩展
+cli-agent-plugin-omp-update-subtitle = 内置扩展已更新。点击更新以重新部署。
+cli-agent-plugin-omp-update-step = 点击"更新"以重新部署扩展。
+cli-agent-plugin-omp-restart-update-note = 重启 Omp 会话以加载更新后的扩展。
 
 # Remaining visible UI strings
 ai-ask-user-questions-unavailable = 问题不可用

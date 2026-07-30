@@ -350,11 +350,6 @@ fn expanded_provider_resume_commands_use_public_native_contracts() {
         (CLIAgent::OpenCode, "oc-1", "opencode --session oc-1"),
         (CLIAgent::Copilot, "cp-1", "copilot --resume=cp-1"),
         (CLIAgent::Pi, "pi-1", "pi --session pi-1"),
-        (
-            CLIAgent::CursorCli,
-            "cursor-1",
-            "cursor-agent --resume cursor-1",
-        ),
         (CLIAgent::Antigravity, "agy-1", "agy --conversation agy-1"),
     ];
     for (agent, session_id, command) in cases {
@@ -456,6 +451,23 @@ fn omp_readonly_discovery_has_an_independent_explicit_resume_adapter() {
     assert!(!capabilities.can_edit_preview);
     assert!(!capabilities.can_write_native_history);
     assert!(!capabilities.can_launch_derived_session);
+}
+
+#[test]
+fn cursor_cli_discovery_without_resume() {
+    let capabilities = CLIAgent::CursorCli.capabilities();
+
+    assert!(capabilities.can_detect);
+    assert!(capabilities.can_index_sessions);
+    assert!(capabilities.can_list_sessions);
+    assert!(capabilities.can_cold_restore);
+    // Cursor transcript file UUIDs are not Cursor chat IDs; resume is
+    // disabled until the chat ID mapping is discoverable.
+    assert!(!capabilities.can_resume);
+    assert_eq!(
+        CLIAgent::CursorCli.explicit_resume_command(Some("3451c540-test"), None),
+        None,
+    );
 }
 
 #[test]

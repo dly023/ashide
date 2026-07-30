@@ -6066,3 +6066,24 @@ items:
     focused_tests: '2026-07-29 exact LR-204 tests passed 4/4: matching windows coalesce; explicit refresh preempts stale generation without losing passive recipients; scope and observed-provider input differences never coalesce; local worker remains off the UI thread and fans out only through recipient token commits.'
     cargo_check: '2026-07-29 MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs passed after coordinator integration and static-gate hardening.'
     gui_or_runtime: '2026-07-29 isolated current-checkout runtime verification passed: built/ad-hoc-sealed target/debug/bundle/osx/AshideLocal.app, launched it with WARP_DATA_PROFILE=lr204-runtime, and cold-restored three equal local WindowSnapshot fixtures with distinct terminal/container UUIDs. The runtime log opened windows 0/1/2, emitted exactly one "Session Navigator discovery scanned 9 providers in 243 ms", then emitted three independent "Local Session Navigator scan committed 89 sessions" events. This proves one process-scoped source transaction fans out through three EnvironmentTable recipient commits; the fixture profile is isolated from normal AshideDev data.'
+- id: LR-205
+  status: verified
+  category: omp_session_candidate_classification
+  discovered_at: '2026-07-30'
+  summary: "授权远端运行夹具的 Omp store 含一个顶层 session_exit-only JSONL；Ashide 把所有 sessions/*/*.jsonl 物理文件都当成会话，缺少 header 时令整个远程 Session Navigator Refresh 失败。"
+  root_cause: "shared Omp scanner 只复用了物理 source shape，没有复用 Omp 原生 listing 的 Session/NotSession 分类；同时 dev helper freshness 白名单漏掉 app/src/cli_agent_jsonl，parser-only 修复可能继续复用旧 helper stamp。"
+  target_invariant: "物理 source 先经 shared Omp candidate classifier：合法 header 进入可恢复集合；provider-native headerless diagnostic-only 文件归类 NotSession；合法 header 的缺 id/filename mismatch 与 I/O 错误仍使完整 generation fail closed。local/runtime helper 共用同一 classifier，dev helper freshness 覆盖 parser 源码。"
+  spec_path: docs/SESSION_NAVIGATOR_SPEC.yaml
+  spec_matrix_id: SN-OMP-DIAGNOSTIC-ONLY-CANDIDATE-01
+  capability_matrix: 'Omp Agent discovery and native resume'
+  static_check: script/check_local_remote_parity
+  reused_abstractions: [AgentSessionDiscoveryPlan, parse_omp_discovery_record, EnvironmentTable indexed scan generation, Omp native session listing semantics]
+  removed_parallel_paths: [all-top-level-jsonl-equals-session assumption, remote-only orphan filter, filename-derived fallback identity, stale dev helper after parser-only change]
+  shared_paths: [app/src/cli_agent_jsonl/discovery.rs, app/src/cli_agent_jsonl/tests.rs, app/src/remote_server/dev_remote_install.rs, app/src/remote_server/ssh_transport.rs, script/deploy_remote_server]
+  required_tests: [omp_discovery_ignores_headerless_diagnostic_only_file_but_rejects_malformed_session_header, dev_remote_build_input_scopes_include_shared_cli_agent_discovery, real_remote_helper_current_revision_initialize_pty_and_server_file_browser]
+  verification:
+    runtime_evidence: '2026-07-30 授权远端运行夹具先由 installed v0.0.6 pty-v7 helper 复现 headerless custom/session_exit 文件导致 Refresh 失败；当前源码 x86_64 musl helper 随后部署到 stable v0.0.6-pty-v7 与 dev-pty-v7 槽，两槽和本地产物 SHA-256 一致。显式 ControlMaster 实机测试完成 Initialize revision 7、根目录 listing、只启用 Omp 的 ScanCliAgentSessions 与 PTY create/close；RPC 成功返回有效 Omp row 并排除原 session_exit-only source，未修改远端 Omp store。'
+    static_check: 'LR-205 gate 锁定 typed Session/NotSession classifier、真实 malformed-header fail-closed marker、app 内和手工 deploy 两套 freshness scope、部署后 stale daemon retirement 及负向 probes。'
+    focused_tests: '2026-07-30 Omp discovery 3/3、remote_cli_agent_scan 10/10、freshness/deploy lifecycle 1/1 与 real remote helper ignored runtime test 1/1 通过。'
+    cargo_check: '2026-07-30 MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs 通过。'
+    gui_or_runtime: '真实授权远端 helper RPC 已验证；current-checkout daily desktop bundle 已替换并启动。'

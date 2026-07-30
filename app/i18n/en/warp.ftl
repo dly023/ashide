@@ -2643,6 +2643,14 @@ cli-agent-plugin-opencode-update-title = Update Ashide Plugin for OpenCode
 cli-agent-plugin-opencode-update-subtitle = Pin the plugin to the latest version in your opencode.json. OpenCode caches plugins per version spec, so changing the pin forces it to re-fetch on restart.
 cli-agent-plugin-opencode-replace-plugin-step = Replace the existing "@warp-dot-dev/opencode-warp" entry in the "plugin" array with the explicit version:
 cli-agent-plugin-opencode-restart-update-note = Restart OpenCode to load the updated plugin.
+cli-agent-plugin-omp-install-title = Install Ashide Extension for Omp
+cli-agent-plugin-omp-install-subtitle = Ashide bundles a native Omp extension that reports session titles and prompts. Click install to auto-deploy it.
+cli-agent-plugin-omp-install-step = Click "Install" to deploy the extension to ~/.omp/agent/extensions/ashide-omp.ts.
+cli-agent-plugin-omp-restart-note = Restart the Omp session to load the extension.
+cli-agent-plugin-omp-update-title = Update Ashide Extension for Omp
+cli-agent-plugin-omp-update-subtitle = The bundled extension has been updated. Click update to re-deploy it.
+cli-agent-plugin-omp-update-step = Click "Update" to re-deploy the extension.
+cli-agent-plugin-omp-restart-update-note = Restart the Omp session to load the updated extension.
 
 # Remaining visible UI strings
 ai-ask-user-questions-unavailable = Questions unavailable

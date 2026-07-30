@@ -1,8 +1,13 @@
-# Ashide Session Navigator 语义规范 v41
+# Ashide Session Navigator 语义规范 v42
 #
 # 这是 Session Navigator 排序、合并、置顶、删除、恢复、focus/active/selection
 # 行为的唯一权威定义。代码实现和所有测试必须与此 spec 一致。
 # 当 spec 与代码冲突时,以 spec 为准;修改行为先改 spec 再改代码。
+#
+# v42 变更摘要:
+#   - Omp 顶层 JSONL 只有在 metadata prefix 含合法 session header 时才是可恢复会话；
+#     provider 自身产生的 headerless diagnostic-only 文件不是 malformed session，必须从候选集合排除
+#   - 合法 header 的 id/filename 不一致及读写/解析错误仍使完整 generation 失败；local/runtime 共用分类器
 #
 # v41 变更摘要:
 #   - PassiveProjection 只允许由可能改变 provider 历史集合的语义事件触发：初始 authority
@@ -513,6 +518,15 @@ state_model:
     parity_rule: "local 与 runtime 执行同一个 descriptor plan 和 parser；差异只在 filesystem/SQLite 位于 current host 还是 helper target host，以及 completion timing。"
     protocol_rule: "ScanCliAgentSessions wire 仍只投影 typed CLIAgent 与 shared record；新增 provider 改变 request 语义，必须递增 REMOTE_SERVER_PROTOCOL_REVISION 并进入新 helper slot。"
     forbidden_parallel_paths: ["AI Vault panel", "second session collection", "renderer-owned provider scanner", "partial scan success with issues", "local-only provider parser", "runtime-only provider allow-list", "UI-built resume argv", "cwd scope fallback to lexical prefix"]
+
+  omp_session_candidate_classification:
+    id: "SN-OMP-SESSION-CANDIDATE-CLASSIFICATION-74"
+    existing_abstractions: ["AgentSessionDiscoveryPlan", "parse_omp_discovery_record", "Omp native session listing", "EnvironmentTable indexed session scan generation"]
+    candidate_rule: "sessions/<project-bucket>/*.jsonl 只是物理候选；metadata prefix 含合法 type=session header 且非空 id 后才成为可恢复 Omp 会话。只有 provider-native listing 同样排除的 headerless 文件可返回 NotSession；不得为其构造 filename-derived identity。"
+    diagnostic_rule: "只含 session_exit 等 provider 诊断 entry、从未物化 session header 的文件不是会话实体，local/runtime discovery 都静默排除；这不是 per-file issue、partial-success 或兼容 fallback。"
+    failure_rule: "一旦观察到合法 session header，header id 缺失、id 与 <timestamp>_<id>.jsonl 不一致、prefix I/O/JSON 元数据读取失败仍使本 generation typed Failed 并保留上一 committed collection；禁止把真实损坏会话伪装成 NotSession。"
+    parity_rule: "local 与 runtime helper 编译并执行同一个候选分类器；dev helper freshness 输入必须包含 shared discovery/parser 源码，parser-only 改动不得复用旧 helper stamp。"
+    forbidden_parallel_paths: ["skip every parser error", "filename-derived Omp identity", "remote-only orphan filter", "UI issue overlay", "stale dev helper after parser-only source change"]
 
   committed_render_projection:
     id: "SN-SESSION-NAVIGATOR-COMMITTED-RENDER-PROJECTION-52"
@@ -1641,6 +1655,12 @@ ux_contract_matrix:
       may_change: ["indexed_rows", "provider_metadata"]
       must_preserve: ["single_environment_collection", "RowId_order_selection", "full_scan_commit", "scope_old_session", "local_remote_parser_parity", "exact_native_resume"]
       test: "expanded_provider_discovery_is_registry_owned_complete_and_scope_preserving"
+    - id: "SN-OMP-DIAGNOSTIC-ONLY-CANDIDATE-01"
+      scope: "cross_environment"
+      event: "InitialScan/Refresh observes valid Omp sessions plus a top-level headerless session_exit-only file"
+      may_change: ["indexed_rows"]
+      must_preserve: ["valid_Omp_rows", "full_scan_commit", "local_remote_parser_parity", "malformed_session_fail_closed"]
+      test: "omp_discovery_ignores_headerless_diagnostic_only_file_but_rejects_malformed_session_header"
     - id: "SN-INTRA-REORDER-01"
       scope: "within_environment"
       event: "Reorder"

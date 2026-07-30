@@ -1,6 +1,7 @@
 pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod deepseek;
+pub(crate) mod omp;
 pub(crate) mod opencode;
 
 use std::cmp::Ordering;
@@ -18,6 +19,7 @@ use crate::terminal::CLIAgent;
 use claude::ClaudeCodePluginManager;
 use codex::CodexPluginManager;
 use deepseek::DeepSeekPluginManager;
+use omp::OmpPluginManager;
 use opencode::OpenCodePluginManager;
 
 /// Distinguishes whether the plugin instructions modal should show install or update steps.
@@ -239,9 +241,13 @@ pub(crate) fn plugin_manager_for_with_shell(
         CLIAgent::DeepSeek if FeatureFlag::HOANotifications.is_enabled() => {
             Some(Box::new(DeepSeekPluginManager))
         }
+        CLIAgent::Omp if FeatureFlag::HOANotifications.is_enabled() => {
+            Some(Box::new(OmpPluginManager))
+        }
         CLIAgent::OpenCode
         | CLIAgent::Codex
         | CLIAgent::DeepSeek
+        | CLIAgent::Omp
         | CLIAgent::Amp
         | CLIAgent::Droid
         | CLIAgent::Copilot
@@ -250,7 +256,6 @@ pub(crate) fn plugin_manager_for_with_shell(
         | CLIAgent::CursorCli
         | CLIAgent::Goose
         | CLIAgent::Antigravity
-        | CLIAgent::Omp
         | CLIAgent::Unknown => None,
     }
 }

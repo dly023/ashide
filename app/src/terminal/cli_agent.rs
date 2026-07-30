@@ -257,16 +257,14 @@ impl CLIAgent {
             CLIAgent::Pi => session_id
                 .and_then(non_empty_session_id)
                 .map(|session_id| format!("pi --session {}", shell_words::quote(&session_id))),
-            CLIAgent::CursorCli => session_id.and_then(non_empty_session_id).map(|session_id| {
-                format!("cursor-agent --resume {}", shell_words::quote(&session_id))
-            }),
             CLIAgent::Antigravity => session_id.and_then(non_empty_session_id).map(|session_id| {
                 format!("agy --conversation {}", shell_words::quote(&session_id))
             }),
             CLIAgent::Omp => session_id
                 .and_then(non_empty_session_id)
                 .map(|session_id| format!("omp --resume {}", shell_words::quote(&session_id))),
-            CLIAgent::Amp
+            CLIAgent::CursorCli
+            | CLIAgent::Amp
             | CLIAgent::Auggie
             | CLIAgent::Goose
             | CLIAgent::DeepSeek
@@ -321,19 +319,19 @@ impl CLIAgent {
             | CLIAgent::OpenCode
             | CLIAgent::Copilot
             | CLIAgent::Pi
-            | CLIAgent::CursorCli
             | CLIAgent::Antigravity => args.iter().enumerate().find_map(|(index, arg)| {
                 let flags: &[&str] = match self {
                     CLIAgent::OpenCode | CLIAgent::Pi => &["--session"],
                     CLIAgent::Copilot => &["--resume"],
                     CLIAgent::Antigravity => &["--conversation"],
-                    CLIAgent::Droid | CLIAgent::CursorCli => &["--resume"],
+                    CLIAgent::Droid => &["--resume"],
                     CLIAgent::Claude
                     | CLIAgent::Codex
                     | CLIAgent::Amp
                     | CLIAgent::Auggie
                     | CLIAgent::Goose
                     | CLIAgent::DeepSeek
+                    | CLIAgent::CursorCli
                     | CLIAgent::Omp
                     | CLIAgent::Unknown => unreachable!("provider handled by another match arm"),
                 };
@@ -349,7 +347,8 @@ impl CLIAgent {
                         })
                 })
             }),
-            CLIAgent::Amp
+            CLIAgent::CursorCli
+            | CLIAgent::Amp
             | CLIAgent::Auggie
             | CLIAgent::Goose
             | CLIAgent::DeepSeek
@@ -409,7 +408,6 @@ impl CLIAgent {
             | CLIAgent::OpenCode
             | CLIAgent::Copilot
             | CLIAgent::Pi
-            | CLIAgent::CursorCli
             | CLIAgent::Antigravity => AgentCapabilities {
                 can_detect: true,
                 can_bind_live_session: true,
@@ -417,6 +415,26 @@ impl CLIAgent {
                 can_list_sessions: true,
                 can_cold_restore: true,
                 can_resume: true,
+                can_attach: false,
+                can_target_environment_runtime: true,
+                can_read_session_ir: false,
+                can_fork: false,
+                can_edit_preview: false,
+                can_write_native_history: false,
+                can_launch_derived_session: false,
+            },
+            // Cursor CLI transcript file UUIDs are not Cursor chat IDs;
+            // `cursor-agent --resume <chatId>` expects a chat session ID
+            // from ~/.cursor/ store.db, not the agent-transcripts file stem.
+            // Discovery keeps indexing transcripts for title/cwd visibility,
+            // but resume is disabled until the chat ID mapping is available.
+            CLIAgent::CursorCli => AgentCapabilities {
+                can_detect: true,
+                can_bind_live_session: true,
+                can_index_sessions: true,
+                can_list_sessions: true,
+                can_cold_restore: true,
+                can_resume: false,
                 can_attach: false,
                 can_target_environment_runtime: true,
                 can_read_session_ir: false,

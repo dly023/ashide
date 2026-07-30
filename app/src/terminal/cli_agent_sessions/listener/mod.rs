@@ -67,6 +67,7 @@ pub fn is_agent_supported(agent: &CLIAgent) -> bool {
             | CLIAgent::Pi
             | CLIAgent::DeepSeek
             | CLIAgent::Antigravity
+            | CLIAgent::Omp
     )
 }
 
@@ -78,11 +79,14 @@ fn create_handler(agent: &CLIAgent) -> Option<Box<dyn CLIAgentSessionHandler>> {
         // https://github.com/badlogic/pi-mono), which emit the same
         // structured OSC 777 events as the first-party Claude/OpenCode
         // plugins. We don't ship install flows for them — we just listen.
+        // Omp uses an Ashide-bundled extension (OmpPluginManager) that
+        // emits the same structured OSC 777 events.
         CLIAgent::Claude
         | CLIAgent::OpenCode
         | CLIAgent::Auggie
         | CLIAgent::Pi
-        | CLIAgent::Antigravity => Some(Box::new(DefaultSessionListener)),
+        | CLIAgent::Antigravity
+        | CLIAgent::Omp => Some(Box::new(DefaultSessionListener)),
         CLIAgent::Codex => Some(Box::new(CodexSessionHandler)),
         CLIAgent::DeepSeek => Some(Box::new(DeepSeekSessionHandler)),
         CLIAgent::Amp
@@ -90,7 +94,6 @@ fn create_handler(agent: &CLIAgent) -> Option<Box<dyn CLIAgentSessionHandler>> {
         | CLIAgent::Copilot
         | CLIAgent::CursorCli
         | CLIAgent::Goose
-        | CLIAgent::Omp
         | CLIAgent::Unknown => None,
     }
 }
@@ -547,3 +550,66 @@ mod tests {
         assert!(session_supports_rich_status(&session));
     }
 }
+
+    #[test]
+    fn omp_is_supported() {
+        assert!(is_agent_supported(&CLIAgent::Omp));
+    }
+
+    #[test]
+    fn omp_uses_default_handler_with_rich_status() {
+        assert!(agent_supports_rich_status(&CLIAgent::Omp));
+    }
+
+    #[test]
+    fn omp_default_handler_skips_session_start() {
+        let mut handler = DefaultSessionListener;
+        let event = CLIAgentEvent {
+            v: 1,
+            agent: CLIAgent::Omp,
+            event: CLIAgentEventType::SessionStart,
+            session_id: Some("omp-session-1".to_owned()),
+            cwd: Some("/project".to_owned()),
+            project: None,
+            payload: CLIAgentEventPayload {
+                plugin_version: Some("1.0.0".to_owned()),
+                ..Default::default()
+            },
+        };
+        assert!(handler.handle_event(event).is_none());
+    }
+
+    #[test]
+    fn omp_default_handler_forwards_prompt_submit() {
+        let mut handler = DefaultSessionListener;
+        let event = CLIAgentEvent {
+            v: 1,
+            agent: CLIAgent::Omp,
+            event: CLIAgentEventType::PromptSubmit,
+            session_id: Some("omp-session-1".to_owned()),
+            cwd: None,
+            project: None,
+            payload: CLIAgentEventPayload {
+                query: Some("Fix the bug".to_owned()),
+                ..Default::default()
+            },
+        };
+        let forwarded = handler.handle_event(event).expect("PromptSubmit must forward");
+        assert_eq!(forwarded.event, CLIAgentEventType::PromptSubmit);
+        assert_eq!(forwarded.payload.query.as_deref(), Some("Fix the bug"));
+    }
+
+    #[test]
+    fn omp_default_handler_forwards_stop() {
+        let mut handler = DefaultSessionListener;
+        let event = CLIAgentEvent {
+            v: 1,
+            agent: CLIAgent::Omp,
+            event: CLIAgentEventType::Stop,
+            session_id: None,
+            cwd: None,
+            project: None,
+            payload: CLIAgentEventPayload::default(),
+        };
+        assert!(handler.handle_event(event).is_some());
+    }

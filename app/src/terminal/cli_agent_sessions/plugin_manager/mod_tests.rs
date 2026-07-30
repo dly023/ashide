@@ -23,6 +23,12 @@ fn returns_manager_for_codex() {
 }
 
 #[test]
+fn returns_manager_for_omp() {
+    let _hoa_guard = crate::features::FeatureFlag::HOANotifications.override_enabled(true);
+    assert!(plugin_manager_for(CLIAgent::Omp).is_some());
+}
+
+#[test]
 fn returns_none_for_unsupported_agents() {
     assert!(plugin_manager_for(CLIAgent::Amp).is_none());
     assert!(plugin_manager_for(CLIAgent::Droid).is_none());

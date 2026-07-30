@@ -208,6 +208,11 @@ scopes = [
     "Cargo.lock",
     "app/Cargo.toml",
     "app/src/bin/ashide.rs",
+    "app/src/cli_agent_jsonl/discovery.rs",
+    "app/src/cli_agent_jsonl/error.rs",
+    "app/src/cli_agent_jsonl/mod.rs",
+    "app/src/cli_agent_jsonl/parse.rs",
+    "app/src/cli_agent_jsonl/roots.rs",
     "app/src/remote_server/mod.rs",
     "app/src/remote_server/server_buffer_tracker.rs",
     "app/src/remote_server/server_model.rs",
@@ -587,10 +592,36 @@ else
     else
       echo "Warning: local freshness stamp missing; future deploys cannot skip upload." >&2
     fi
+
   else
     echo ""
   fi
 fi
+
+# Any helper replacement or stamp refresh must retire daemon processes that
+# still execute the previous inode. The next proxy connection starts the
+# freshly deployed binary; session data is untouched.
+REMOTE_RUNTIME_DIR="$REMOTE_ABS_DIR"
+"${SSH_COMMAND[@]}" "$HOST" "dir='$REMOTE_RUNTIME_DIR'
+if [ -d \"\$dir\" ]; then
+  for pid_file in \"\$dir\"/*/server.pid; do
+    [ -f \"\$pid_file\" ] || continue
+    pid=\$(cat \"\$pid_file\" 2>/dev/null || true)
+    case \"\$pid\" in
+      ''|*[!0-9]*) rm -f \"\$(dirname \"\$pid_file\")/server.sock\" \"\$pid_file\"; continue ;;
+    esac
+    if kill -0 \"\$pid\" 2>/dev/null; then
+      kill \"\$pid\" 2>/dev/null || true
+      i=0
+      while kill -0 \"\$pid\" 2>/dev/null && [ \"\$i\" -lt 10 ]; do
+        i=\$((i + 1))
+        sleep 0.2
+      done
+      kill -0 \"\$pid\" 2>/dev/null && kill -KILL \"\$pid\" 2>/dev/null || true
+    fi
+    rm -f \"\$(dirname \"\$pid_file\")/server.sock\" \"\$pid_file\"
+  done
+fi"
 
 echo ""
 echo "==> Done! Binary available at $HOST:$REMOTE_BINARY"

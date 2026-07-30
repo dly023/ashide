@@ -175,6 +175,11 @@ const DEV_REMOTE_BUILD_INPUT_SCOPES: &[&str] = &[
     "Cargo.lock",
     "app/Cargo.toml",
     "app/src/bin/ashide.rs",
+    "app/src/cli_agent_jsonl/discovery.rs",
+    "app/src/cli_agent_jsonl/error.rs",
+    "app/src/cli_agent_jsonl/mod.rs",
+    "app/src/cli_agent_jsonl/parse.rs",
+    "app/src/cli_agent_jsonl/roots.rs",
     "app/src/remote_server/mod.rs",
     "app/src/remote_server/server_buffer_tracker.rs",
     "app/src/remote_server/server_model.rs",
@@ -1706,6 +1711,8 @@ mod tests {
         ] {
             assert!(!DEV_REMOTE_BUILD_INPUT_SCOPES.contains(&forbidden));
         }
+        assert!(DEV_REMOTE_BUILD_INPUT_SCOPES.contains(&"app/src/cli_agent_jsonl/discovery.rs"));
+        assert!(DEV_REMOTE_BUILD_INPUT_SCOPES.contains(&"app/src/cli_agent_jsonl/roots.rs"));
         assert!(DEV_REMOTE_BUILD_INPUT_SCOPES.contains(&"app/src/remote_server/server_model.rs"));
         assert!(DEV_REMOTE_BUILD_INPUT_SCOPES.contains(&"app/src/remote_server/unix/proxy.rs"));
         assert!(DEV_REMOTE_BUILD_INPUT_SCOPES.contains(
@@ -1718,6 +1725,28 @@ mod tests {
         );
         assert!(DEV_REMOTE_BUILD_INPUT_SCOPES.contains(&"crates/warp_cli/src/lib.rs"));
         assert!(DEV_REMOTE_BUILD_INPUT_SCOPES.contains(&"crates/warp_terminal/src/shell/mod.rs"));
+    }
+
+    #[test]
+    fn dev_remote_build_input_scopes_include_shared_cli_agent_discovery() {
+        let deploy_script = include_str!("../../../script/deploy_remote_server");
+        for path in [
+            "app/src/cli_agent_jsonl/discovery.rs",
+            "app/src/cli_agent_jsonl/error.rs",
+            "app/src/cli_agent_jsonl/mod.rs",
+            "app/src/cli_agent_jsonl/parse.rs",
+            "app/src/cli_agent_jsonl/roots.rs",
+        ] {
+            assert!(DEV_REMOTE_BUILD_INPUT_SCOPES.contains(&path));
+            assert!(deploy_script.contains(&format!("\"{path}\"")));
+        }
+        for marker in [
+            "for pid_file in",
+            "kill -KILL",
+            "server.sock",
+        ] {
+            assert!(deploy_script.contains(marker));
+        }
     }
 
     #[test]

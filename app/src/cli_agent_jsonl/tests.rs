@@ -634,6 +634,50 @@ fn omp_discovery_reads_one_project_level_and_prefers_title_slot() {
 
 #[cfg(feature = "local_fs")]
 #[test]
+fn omp_discovery_ignores_headerless_diagnostic_only_file_but_rejects_malformed_session_header() {
+    let home = tempfile::tempdir().expect("create Omp home");
+    let bucket = home.path().join(".omp/agent/sessions/-tmp");
+    fs::create_dir_all(&bucket).expect("create Omp bucket");
+
+    let valid_id = "019fa6d8-49ed-7000-b67f-09845d463582";
+    fs::write(
+        bucket.join(format!("2026-07-28T03-50-20-397Z_{valid_id}.jsonl")),
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"type": "title", "title": "valid remote Omp session"}),
+            serde_json::json!({"type": "session", "id": valid_id, "cwd": "/tmp"}),
+        ),
+    )
+    .expect("write valid Omp session");
+    fs::write(
+        bucket.join(
+            "2026-07-28T04-13-20-905Z_019fa6ed-5a89-7000-a812-947e32ee7656.jsonl",
+        ),
+        serde_json::json!({
+            "type": "custom",
+            "customType": "session_exit",
+            "data": {"reason": "sighup", "kind": "signal"},
+        })
+        .to_string(),
+    )
+    .expect("write diagnostic-only Omp candidate");
+
+    let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+    let records = scan_agent_session_provider(AgentSessionDiscoveryProvider::Omp, &roots, 10)
+        .expect("diagnostic-only Omp candidate must not fail discovery");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].provider_session_id, valid_id);
+
+    fs::write(
+        bucket.join("2026-07-28T05-00-00-000Z_missing-id.jsonl"),
+        serde_json::json!({"type": "session", "cwd": "/tmp"}).to_string(),
+    )
+    .expect("write malformed Omp session header");
+    assert!(scan_agent_session_provider(AgentSessionDiscoveryProvider::Omp, &roots, 10).is_err());
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
 fn omp_discovery_orders_by_mtime_and_rejects_filename_id_mismatch() {
     let home = tempfile::tempdir().expect("create Omp home");
     let bucket = home.path().join(".omp/agent/sessions/-ashide");
@@ -730,13 +774,17 @@ fn expanded_provider_discovery_is_registry_owned_complete_and_scope_preserving()
         CLIAgent::OpenCode,
         CLIAgent::Copilot,
         CLIAgent::Pi,
-        CLIAgent::CursorCli,
         CLIAgent::Antigravity,
     ] {
         assert!(agent.session_discovery_provider().is_some());
         assert!(agent.capabilities().can_index_sessions);
         assert!(agent.capabilities().can_resume);
     }
+    // Cursor CLI transcripts are indexed for title/cwd visibility but resume
+    // is disabled because transcript file UUIDs are not Cursor chat IDs.
+    assert!(CLIAgent::CursorCli.session_discovery_provider().is_some());
+    assert!(CLIAgent::CursorCli.capabilities().can_index_sessions);
+    assert!(!CLIAgent::CursorCli.capabilities().can_resume);
 }
 
 #[cfg(feature = "local_fs")]

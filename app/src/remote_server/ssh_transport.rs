@@ -383,7 +383,10 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use remote_server::proto::{create_pty_response, list_directory_response};
+    use remote_server::proto::{
+        create_pty_response, list_directory_response, scan_cli_agent_sessions_response,
+        CliAgentSessionStoreRoots,
+    };
     use warp_core::{
         channel::{Channel, ChannelConfig, ChannelState},
         AppId,
@@ -473,6 +476,43 @@ mod tests {
                 !listing.entries.is_empty(),
                 "remote root directory listing unexpectedly had no entries"
             );
+
+            let scanned = connection
+                .client
+                .scan_cli_agent_sessions(
+                    40,
+                    CliAgentSessionStoreRoots {
+                        home_dir: "/root".to_owned(),
+                        claude_config_dir: "/root/.claude".to_owned(),
+                        codex_home: "/root/.codex".to_owned(),
+                        opencode_data_dir: "/root/.local/share/opencode".to_owned(),
+                        copilot_home: "/root/.copilot".to_owned(),
+                        pi_agent_home: "/root/.pi/agent".to_owned(),
+                        omp_agent_home: "/root/.omp/agent".to_owned(),
+                    },
+                    vec![crate::terminal::CLIAgent::Omp.to_serialized_name()],
+                    Vec::new(),
+                    vec!["/tmp".to_owned()],
+                )
+                .await
+                .expect("remote Omp Session Navigator scan RPC must succeed");
+            let Some(scan_cli_agent_sessions_response::Result::Success(scanned)) = scanned.result
+            else {
+                panic!("expected successful remote Omp session scan: {scanned:?}");
+            };
+            assert_eq!(
+                scanned.observed_agents,
+                [crate::terminal::CLIAgent::Omp.to_serialized_name()]
+            );
+            assert!(scanned.source_missing_agent.is_none());
+            assert!(scanned.records.iter().any(|record| {
+                record.id == "019fa6d8-49ed-7000-b67f-09845d463582"
+            }));
+            assert!(scanned.records.iter().all(|record| {
+                !record
+                    .source
+                    .ends_with("2026-07-28T04-13-20-905Z_019fa6ed-5a89-7000-a812-947e32ee7656.jsonl")
+            }));
 
             let created = connection
                 .client

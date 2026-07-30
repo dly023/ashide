@@ -467,7 +467,7 @@ pub(crate) fn scan_agent_session_provider(
             crate::app_state::WORKSPACE_SESSION_NAVIGATOR_PHYSICAL_SOURCE_LIMIT_PER_PROVIDER,
         )?
         .into_iter()
-        .map(|file| parse_omp_discovery_record(file, roots))
+        .filter_map(|file| parse_omp_discovery_record(file, roots).transpose())
         .collect(),
     }
 }
@@ -1052,7 +1052,7 @@ fn parse_codex_discovery_record(
 fn parse_omp_discovery_record(
     file: RecentJsonlFile,
     roots: &CliAgentStoreRoots,
-) -> Result<AgentSessionDiscoveryRecord, CliAgentSessionScanError> {
+) -> Result<Option<AgentSessionDiscoveryRecord>, CliAgentSessionScanError> {
     let values = read_jsonl_prefix_values(&file.path, 8 * 1024)?;
     let mut title_slot = None;
     let mut header = None;
@@ -1065,8 +1065,9 @@ fn parse_omp_discovery_record(
             Some(_) | None => {}
         }
     }
-    let header = header
-        .ok_or_else(|| invalid_session_record(&file.path, "Omp session 缺少 session header"))?;
+    let Some(header) = header else {
+        return Ok(None);
+    };
     let provider_session_id = string_field(&header, "id")
         .map(str::to_owned)
         .ok_or_else(|| invalid_session_record(&file.path, "Omp session header 缺少非空 id"))?;
@@ -1082,14 +1083,14 @@ fn parse_omp_discovery_record(
         ));
     }
 
-    Ok(AgentSessionDiscoveryRecord {
+    Ok(Some(AgentSessionDiscoveryRecord {
         agent: CLIAgent::Omp,
         provider_session_id,
         source: AgentSessionDiscoverySource::Transcript(file.path),
         label: title_slot.or_else(|| string_field(&header, "title").map(str::to_owned)),
         cwd: normalize_cli_agent_session_cwd(string_field(&header, "cwd"), roots),
         modified_epoch_millis: system_time_to_epoch_millis(file.modified),
-    })
+    }))
 }
 
 #[cfg(feature = "local_fs")]

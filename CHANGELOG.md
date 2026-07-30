@@ -3,6 +3,7 @@
 本文档记录 Ashide 各个发布版本的关键变更。仅收录功能性 commit，省略 dev / stable 等内部滚动 tag。
 
 ## [Unreleased]
+- **Session Navigator / 远程环境**：Omp 原生会话发现按 provider 语义排除无 `session` header 的 diagnostic-only JSONL，真实 malformed session 仍整轮失败保留旧结果；remote helper freshness 与手工部署同步覆盖 shared parser 并退休旧 daemon，避免 parser 更新后继续运行旧 helper 映像。
 
 ## [v0.1.0-oss.20260623] — 2026-06-23
 
