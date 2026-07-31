@@ -326,7 +326,7 @@ state_model:
   environment_runtime_reconnect_reentry:
     id: "SN-ENV-RUNTIME-RECONNECT-REENTRY-57"
     existing_abstractions: ["EnvironmentRuntimeTransportManager", "EnvironmentTable", "RemoteSessionState", "SessionExecutionRegistry"]
-    event_rule: "SessionDisconnected 必须携带 typed disconnect cause；ExplicitTransportRestart 只表示旧 transport binding 已失效，禁止 Workspace 再次调用 reconnect。TransportFailure 才允许 retained recovery，ExplicitSessionDeregister 禁止恢复。"
+    event_rule: "SessionDisconnected 必须携带 typed disconnect cause；ExplicitTransportRestart 只表示旧 transport binding 已失效，禁止 Workspace 再次调用 reconnect。TransportFailure 才允许 retained recovery，ExplicitSessionDeregister 禁止恢复。RemoteProcessExited 表示远端 child 进程已退出且 manager 跳过自动重连，禁止 retained recovery，必须立即 exit 受影响 durable terminal owner 的 TerminalModel 以释放 retiring lease；它不触发 workspace 层 force restart，用户显式 retry/reselect 后走新 session materialize。"
     active_generation_rule: "Connecting、Initializing、Connected 与 Reconnecting 都属于 manager-owned active generation；client 暂不可用是 lifecycle transition，不是高层调用方启动第二 generation 的许可。"
     call_site_rule: "Project Explorer、browser unavailable、Session scan/refresh、Fork、Pin、terminal delivery 与 heartbeat 等自动调用方统一走 if-inactive request；force restart primitive 只允许用户显式 retry/reselect owner。"
     projection_rule: "transport generation 切换只能让 lifecycle/host/client readiness 改变；Navigator row count、RowId、order、selection、pin、alias、pending carrier 与 owner SessionId 必须保持不变，不得投影瞬时 Error 帧。"
@@ -725,6 +725,7 @@ state_model:
     teardown_rule: "window、普通 tab、单 pane、hidden/undoable close 都必须对 durable CLI-agent terminal 调用统一 shutdown_pty 并建立 lease；ContentTransferred 不得建立 retiring lease 或杀死被转移 pane"
     no_timeout_rule: "禁止用固定延时猜测进程已退出；try_lock 暂时不可得时仍视为 Retiring"
     failure_rule: "shutdown 未完成时 lease 保持，宁可阻止恢复也不得让同一 provider session 出现两个可写进程"
+    remote_exit_truth_rule: "远程 durable terminal owner 的 exit truth 来源有两类：PTY 进程自然退出（PtyExited 事件 → model.exit）和远端 transport 永久失效（RemoteProcessExited cause → model.exit(PtyDisconnected)）。RemoteProcessExited 只在 remote server manager 判定 child 已退出且跳过自动重连时 emit；它等价于本地 PTY 已死，必须立即 exit 受影响 durable terminal owner 的 TerminalModel 以释放 lease。TransportFailure（child 未退出、可重连）与 ExplicitTransportRestart（workspace 主动重启、复用旧 model）禁止 exit model。"
 
   provider_session_identity:
     id: "SN-CODEX-CANONICAL-SESSION-ID-01"

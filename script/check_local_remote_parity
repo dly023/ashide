@@ -5064,6 +5064,66 @@ then
     fail=1
 fi
 
+# LR-206: remote durable terminal owner retiring lease must release when the
+# remote child process has provably exited (daemon killed), not hang forever
+# waiting for a PtyExited that the dead transport can never deliver.
+require_contract_marker "LR-206" "SN-CROSS-WINDOW-RETIRING-OWNER-02" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-206" "id: LR-206" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-206" "session navigator: retiring process ownership" docs/design/local-remote-capability-matrix.csv
+require_rust_test_name "LR-206" "remote_process_exited_releases_retiring_lease_without_reconnect" app/src/workspace/view_test.rs
+require_rust_test_name "LR-206" "explicit_transport_restart_does_not_exit_durable_terminal_model" app/src/workspace/view_test.rs
+require_rust_test_name "LR-206" "transport_failure_reconnect_preserves_durable_terminal_model" app/src/workspace/view_test.rs
+if ! python3 - <<'PYCONTRACT'
+from pathlib import Path
+
+cause_enum = Path("crates/remote_server/src/manager.rs").read_text()
+disconnect_handler = Path("app/src/workspace/view.rs").read_text()
+registry = Path("app/src/workspace/registry.rs").read_text()
+
+# The typed cause must exist and the child-already-exited path must emit it.
+if "RemoteProcessExited" not in cause_enum:
+    raise SystemExit("RemoteSessionDisconnectCause missing RemoteProcessExited variant")
+skipping = cause_enum.split("let child_already_exited = exit_status.is_some();", 1)[1].split(
+    "log::info!(", 1
+)[0]
+if "RemoteProcessExited" not in skipping:
+    raise SystemExit("child-already-exited skipping-reconnect path must emit RemoteProcessExited, not TransportFailure")
+
+# Workspace must branch on RemoteProcessExited and release the retiring lease.
+handler = disconnect_handler.split("fn handle_environment_runtime_disconnected(", 1)[1].split(
+    "fn handle_environment_runtime_deregistered(", 1
+)[0]
+if "EnvironmentRuntimeDisconnectCause::RemoteProcessExited" not in handler:
+    raise SystemExit("handle_environment_runtime_disconnected must handle RemoteProcessExited")
+if "exit_retiring_session_owners_for_authority" not in handler:
+    raise SystemExit("RemoteProcessExited branch must release retiring lease via exit_retiring_session_owners_for_authority")
+# RemoteProcessExited must NOT trigger workspace-level force reconnect.
+remote_branch = handler.split("EnvironmentRuntimeDisconnectCause::RemoteProcessExited", 1)[1].split(
+    "EnvironmentRuntimeDisconnectCause::", 1
+)[0] if "EnvironmentRuntimeDisconnectCause::" in handler.split(
+    "EnvironmentRuntimeDisconnectCause::RemoteProcessExited", 1
+)[1] else handler.split("EnvironmentRuntimeDisconnectCause::RemoteProcessExited", 1)[1].split("}", 1)[0]
+if "reconnect_retained_environment_runtime_authority" in remote_branch or "reconnect_environment_runtime_authority" in remote_branch:
+    raise SystemExit("RemoteProcessExited must not trigger workspace-level force restart; user retry starts a fresh session")
+
+# TransportFailure branch must still reconnect (not exit model).
+transport_branch = handler.split("EnvironmentRuntimeDisconnectCause::TransportFailure =>", 1)[1].split(
+    "EnvironmentRuntimeDisconnectCause::RemoteProcessExited", 1
+)[0]
+if "reconnect_retained_environment_runtime_authority" not in transport_branch:
+    raise SystemExit("TransportFailure branch must retain reconnect recovery")
+
+# Registry must expose the authority-scoped exit primitive.
+if "fn exit_retiring_session_owners_for_authority" not in registry:
+    raise SystemExit("WorkspaceRegistry must expose exit_retiring_session_owners_for_authority")
+if "ExitReason::PtyDisconnected" not in registry:
+    raise SystemExit("registry exit primitive must use ExitReason::PtyDisconnected")
+PYCONTRACT
+then
+    echo "[LR-206] remote retiring lease release contract failed" >&2
+    fail=1
+fi
+
 # LR-197: generic local terminals must not enter the canonical Navigator projection
 # or persist as recoverable history. The local-only membership branch belongs at
 # the live projection/read-write boundaries; runtime terminal rows remain valid.

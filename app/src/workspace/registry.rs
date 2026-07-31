@@ -8,7 +8,11 @@ use warpui::{
 };
 
 use crate::session_management::SessionNavigationData;
-use crate::terminal::{model::terminal_model::TerminalModel, CLIAgent, TerminalManager};
+use crate::terminal::{
+    model::terminal_model::{ExitReason, TerminalModel},
+    CLIAgent,
+    TerminalManager,
+};
 use crate::workspace::environment_backend::EnvironmentSessionRefreshIntent;
 use crate::workspace::environment_table::IndexedCliAgentSessionScanToken;
 
@@ -320,6 +324,67 @@ impl WorkspaceRegistry {
                 terminal_manager.shutdown_pty(ctx);
             });
         }
+    }
+    /// 在指定 Environment authority 的远端进程已确定退出后，标记其全部
+    /// durable terminal owner 已退出。
+    ///
+    /// 远端 transport 已永久消失，不会再发送 `PtyExited`。因此这里补齐
+    /// `TerminalModel` 的退出事实，让 retiring lease 可以释放。界面线程
+    /// 禁止阻塞等待 `TerminalModel` 锁；锁暂不可用时交给短生命周期后台线程，
+    /// lease 在下一次查询时按既有惰性清理路径收敛。
+    pub(crate) fn exit_retiring_session_owners_for_authority(&mut self, authority: &str) {
+        let agent_prefix = format!("{authority}::agent:");
+        let matching_keys = self
+            .retiring_session_owners
+            .keys()
+            .filter(|key| key.starts_with(&agent_prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for key in matching_keys {
+            let Some(owners) = self.retiring_session_owners.get_mut(&key) else {
+                continue;
+            };
+            for owner in owners.iter() {
+                let terminal_model = owner.terminal_model.clone();
+                if let Some(mut model) = terminal_model.try_lock() {
+                    model.exit(ExitReason::PtyDisconnected);
+                    continue;
+                }
+
+                let terminal_model = owner.terminal_model.clone();
+                let durable_identity_key = key.clone();
+                let worker_identity_key = durable_identity_key.clone();
+                if let Err(error) = std::thread::Builder::new()
+                    .name("remote-terminal-exit".to_owned())
+                    .spawn(move || {
+                        terminal_model.lock().exit(ExitReason::PtyDisconnected);
+                        log::info!(
+                            "Remote process exited; completed deferred retiring lease release for durable session {worker_identity_key}"
+                        );
+                    })
+                {
+                    log::error!(
+                        "Remote process exited but the retiring lease release worker for {durable_identity_key} could not start: {error}"
+                    );
+                }
+            }
+        }
+
+        // 已拿到锁的 model 会在此立即移除；交给后台线程的 model 继续留在
+        // registry，并由 `is_session_owner_retiring` 在观察到 exit 后惰性清理。
+        self.retiring_session_owners.retain(|key, owners| {
+            if !key.starts_with(&agent_prefix) {
+                return true;
+            }
+            owners.retain(|owner| {
+                owner
+                    .terminal_model
+                    .try_lock()
+                    .is_none_or(|model| !model.has_exited())
+            });
+            !owners.is_empty()
+        });
     }
 
     /// Returns whether process-level ownership is still retiring.

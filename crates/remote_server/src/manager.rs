@@ -234,6 +234,14 @@ pub enum RemoteSessionDisconnectCause {
     ExplicitSessionDeregister,
     /// The transport terminated and no manager-owned reconnect remains active.
     TransportFailure,
+    /// The remote child process has exited (e.g. the daemon was killed or the
+    /// remote shell exited), so the manager skips automatic reconnect. Unlike
+    /// `TransportFailure`, the remote process is provably gone: callers that
+    /// retain durable terminal ownership for this session MUST treat the
+    /// underlying PTY as dead and release any retiring lease bound to the
+    /// session's durable terminal owner. No workspace-level force restart is
+    /// permitted; a later explicit user retry/reselect starts a fresh session.
+    RemoteProcessExited,
 }
 
 /// Events emitted by [`RemoteServerManager`].
@@ -1892,6 +1900,11 @@ impl RemoteServerManager {
             let child_already_exited = exit_status.is_some();
             let Some(auth_context) = self.auth_context.clone().filter(|_| !child_already_exited)
             else {
+                let cause = if child_already_exited {
+                    RemoteSessionDisconnectCause::RemoteProcessExited
+                } else {
+                    RemoteSessionDisconnectCause::TransportFailure
+                };
                 if child_already_exited {
                     log::info!(
                         "Spontaneous disconnect for session {session_id:?}: \
@@ -1910,7 +1923,7 @@ impl RemoteServerManager {
                 ctx.emit(RemoteServerManagerEvent::SessionDisconnected {
                     session_id,
                     host_id: host_id.clone(),
-                    cause: RemoteSessionDisconnectCause::TransportFailure,
+                    cause,
                     exit_status,
                 });
                 if !self.host_to_sessions.contains_key(&host_id) {

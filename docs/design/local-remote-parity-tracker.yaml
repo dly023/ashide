@@ -6087,3 +6087,25 @@ items:
     focused_tests: '2026-07-30 Omp discovery 3/3、remote_cli_agent_scan 10/10、freshness/deploy lifecycle 1/1 与 real remote helper ignored runtime test 1/1 通过。'
     cargo_check: '2026-07-30 MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs 通过。'
     gui_or_runtime: '真实授权远端 helper RPC 已验证；current-checkout daily desktop bundle 已替换并启动。'
+
+- id: LR-206
+  status: verified
+  category: session_navigator_remote_retiring_lease_release
+  discovered_at: '2026-07-31'
+  summary: "远程 durable terminal owner 关闭后进入 retiring lease，但远端 transport 永久失效（daemon 被 kill）时 TerminalModel 永不 exit，lease 永久挂着，resume 被「会话正在关闭」永久拒绝；只有 Ashide 重启（清空内存态）才能解开。"
+  root_cause: "RemoteServerManager 在 child 已退出时跳过自动重连（manager.rs:1892 skipping reconnect）但把信号压成 TransportFailure；Workspace handle_environment_runtime_disconnected 的 TransportFailure 分支只调 reconnect 不 exit model；ExplicitTransportRestart/TransportFailure 重连会复用旧 TerminalModel（EventLoop 按 session_id 订阅 transport manager），因此不能无脑 exit。缺少一个「远端进程已死、不会重连、可释放 lease」的 typed cause。"
+  target_invariant: "RemoteSessionDisconnectCause 新增 RemoteProcessExited，仅在 remote server manager 判定 child 已退出且跳过自动重连时 emit（manager.rs:1892-1919 路径）。Workspace handle_environment_runtime_disconnected 的 RemoteProcessExited 分支：立即 exit 受影响 durable terminal owner 的 TerminalModel（ExitReason::PtyDisconnected）以释放 retiring lease；不触发 workspace 层 force restart，用户显式 retry/reselect 后走新 session materialize。TransportFailure（child 未退出、可重连）与 ExplicitTransportRestart（workspace 主动重启、复用旧 model）禁止 exit model。retiring lease 仍只由 TerminalModel handled_exit=true 释放，不引入 timeout。"
+  spec_path: docs/SESSION_NAVIGATOR_SPEC.yaml
+  spec_matrix_id: SN-CROSS-WINDOW-RETIRING-OWNER-02
+  capability_matrix: 'session navigator: retiring process ownership'
+  static_check: script/check_local_remote_parity
+  reused_abstractions: ["WorkspaceRegistry retiring_session_owners", "TerminalModel::exit", "RemoteSessionDisconnectCause", "EnvironmentRuntimeTransportEvent::SessionDisconnected", "handle_environment_runtime_disconnected"]
+  removed_parallel_paths: ["TransportFailure 压制 child-already-exited 语义", "restart-on-disconnect force restart for RemoteProcessExited", "timeout-based lease release"]
+  shared_paths: ["crates/remote_server/src/manager.rs", "app/src/workspace/environment_runtime.rs", "app/src/workspace/view.rs", "app/src/workspace/registry.rs", "app/src/terminal/model/terminal_model.rs", "app/src/workspace/view_test.rs", "script/check_local_remote_parity"]
+  required_tests: ["remote_process_exited_releases_retiring_lease_without_reconnect", "explicit_transport_restart_does_not_exit_durable_terminal_model", "transport_failure_reconnect_preserves_durable_terminal_model"]
+  verification:
+    runtime_evidence: '2026-07-31 本机 Ashide 运行日志已复现：授权 remote-fixture 的 daemon 退出 code=255 后，多个 durable session resume 持续报「waiting for its previous terminal process to exit」；Ashide 重启清空 retiring_session_owners 内存态后 resume 成功。该证据证明 child-already-exited 语义被压成可恢复 TransportFailure，导致旧 lease 无退出事实。'
+    static_check: '2026-07-31 script/check_local_remote_parity 的 LR-206 gate 已通过，锁定 typed cause、唯一 Workspace release 分支、TransportFailure reconnect 保留语义、三个状态机测试名与禁止 force restart。'
+    focused_tests: '2026-07-31 三个 App::test 状态机测试通过：RemoteProcessExited 释放 retiring lease 并进入 Error；ExplicitTransportRestart 不 exit model；TransportFailure 保留 model 并进入 Connecting。remote_server crate 94 tests 全通过。'
+    cargo_check: '2026-07-31 MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs 通过。'
+    gui_or_runtime: '2026-07-31 真实授权远端日志已复现 daemon exit 后 retiring lease 永久阻塞及重启后恢复；当前实现的 App runtime tests 逐分支验证永久退出、显式 transport restart 与可恢复 transport failure 的可见 lifecycle/lease 结果。'

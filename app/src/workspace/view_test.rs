@@ -8044,6 +8044,203 @@ fn test_retained_runtime_environment_reconnects_after_transport_disconnect() {
 }
 
 #[test]
+fn remote_process_exited_releases_retiring_lease_without_reconnect() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let server = test_ssh_server_for_environment_tests();
+            let environment = crate::workspace::environment_provider::source_saved_ssh::runtime_transport_snapshot(
+                server.node_id.clone(),
+                &server,
+                Some("/root/project".to_owned()),
+                EnvironmentLifecycleState::Connected,
+            );
+            let authority = environment.authority_key.clone();
+            let session_id = CoreSessionId::from(9036);
+            workspace.mark_environment_runtime_connecting(
+                environment,
+                session_id,
+                PathBuf::from("/tmp/ashide-test-remote-process-exited.sock"),
+            );
+            workspace.environments_mut().mark_connected_session(
+                session_id,
+                HostId::new("remote-process-exited-host".to_owned()),
+            );
+
+            let pane_group = workspace.active_tab_pane_group().clone();
+            let terminal_view = pane_group
+                .as_ref(ctx)
+                .active_session_view(ctx)
+                .expect("remote exit fixture must expose a terminal");
+            let terminal_manager = pane_group
+                .as_ref(ctx)
+                .terminal_manager(0, ctx)
+                .expect("remote exit fixture must expose a terminal manager");
+            let terminal_model = terminal_view.as_ref(ctx).model.clone();
+            let durable_identity_key = format!("{authority}::agent:Omp:remote-process-exited");
+            let window_id = ctx.window_id();
+            WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
+                registry.begin_retiring_session_owner(
+                    durable_identity_key.clone(),
+                    window_id,
+                    terminal_view.id(),
+                    terminal_model.clone(),
+                    terminal_manager,
+                );
+            });
+
+            workspace.handle_environment_runtime_disconnected(
+                session_id,
+                crate::workspace::environment_runtime::EnvironmentRuntimeDisconnectCause::RemoteProcessExited,
+                ctx,
+            );
+
+            assert!(terminal_model.lock().has_exited());
+            assert!(!WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
+                registry.is_session_owner_retiring(&durable_identity_key)
+            }));
+            assert_eq!(
+                workspace.environment_runtime_lifecycle_for_authority(&authority),
+                Some(EnvironmentLifecycleState::Error),
+                "a permanently exited remote process must stop at Error until explicit user retry"
+            );
+        });
+    });
+}
+
+#[test]
+fn explicit_transport_restart_does_not_exit_durable_terminal_model() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let server = test_ssh_server_for_environment_tests();
+            let environment = crate::workspace::environment_provider::source_saved_ssh::runtime_transport_snapshot(
+                server.node_id.clone(),
+                &server,
+                Some("/root/project".to_owned()),
+                EnvironmentLifecycleState::Connected,
+            );
+            let authority = environment.authority_key.clone();
+            let session_id = CoreSessionId::from(9037);
+            workspace.mark_environment_runtime_connecting(
+                environment,
+                session_id,
+                PathBuf::from("/tmp/ashide-test-explicit-transport-restart.sock"),
+            );
+            workspace.environments_mut().mark_connected_session(
+                session_id,
+                HostId::new("explicit-transport-restart-host".to_owned()),
+            );
+
+            let pane_group = workspace.active_tab_pane_group().clone();
+            let terminal_view = pane_group
+                .as_ref(ctx)
+                .active_session_view(ctx)
+                .expect("restart fixture must expose a terminal");
+            let terminal_manager = pane_group
+                .as_ref(ctx)
+                .terminal_manager(0, ctx)
+                .expect("restart fixture must expose a terminal manager");
+            let terminal_model = terminal_view.as_ref(ctx).model.clone();
+            let durable_identity_key = format!("{authority}::agent:Omp:explicit-restart");
+            let window_id = ctx.window_id();
+            WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
+                registry.begin_retiring_session_owner(
+                    durable_identity_key.clone(),
+                    window_id,
+                    terminal_view.id(),
+                    terminal_model.clone(),
+                    terminal_manager,
+                );
+            });
+
+            workspace.handle_environment_runtime_disconnected(
+                session_id,
+                crate::workspace::environment_runtime::EnvironmentRuntimeDisconnectCause::ExplicitTransportRestart,
+                ctx,
+            );
+
+            assert!(!terminal_model.lock().has_exited());
+            assert!(WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
+                registry.is_session_owner_retiring(&durable_identity_key)
+            }));
+        });
+    });
+}
+
+#[test]
+fn transport_failure_reconnect_preserves_durable_terminal_model() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let server = test_ssh_server_for_environment_tests();
+            install_test_saved_ssh_target_catalog(&server, ctx);
+            let environment = crate::workspace::environment_provider::source_saved_ssh::runtime_transport_snapshot(
+                server.node_id.clone(),
+                &server,
+                Some("/root/project".to_owned()),
+                EnvironmentLifecycleState::Connected,
+            );
+            let authority = environment.authority_key.clone();
+            let session_id = CoreSessionId::from(9038);
+            workspace.mark_environment_runtime_connecting(
+                environment,
+                session_id,
+                PathBuf::from("/tmp/ashide-test-transport-failure-model.sock"),
+            );
+            workspace.environments_mut().mark_connected_session(
+                session_id,
+                HostId::new("transport-failure-model-host".to_owned()),
+            );
+
+            let pane_group = workspace.active_tab_pane_group().clone();
+            let terminal_view = pane_group
+                .as_ref(ctx)
+                .active_session_view(ctx)
+                .expect("transport failure fixture must expose a terminal");
+            let terminal_manager = pane_group
+                .as_ref(ctx)
+                .terminal_manager(0, ctx)
+                .expect("transport failure fixture must expose a terminal manager");
+            let terminal_model = terminal_view.as_ref(ctx).model.clone();
+            let durable_identity_key = format!("{authority}::agent:Omp:transport-failure");
+            let window_id = ctx.window_id();
+            WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
+                registry.begin_retiring_session_owner(
+                    durable_identity_key.clone(),
+                    window_id,
+                    terminal_view.id(),
+                    terminal_model.clone(),
+                    terminal_manager,
+                );
+            });
+
+            workspace.handle_environment_runtime_disconnected(
+                session_id,
+                crate::workspace::environment_runtime::EnvironmentRuntimeDisconnectCause::TransportFailure,
+                ctx,
+            );
+
+            assert!(!terminal_model.lock().has_exited());
+            assert!(WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
+                registry.is_session_owner_retiring(&durable_identity_key)
+            }));
+            assert_eq!(
+                workspace.environment_runtime_lifecycle_for_authority(&authority),
+                Some(EnvironmentLifecycleState::Connecting),
+                "recoverable transport failure must keep the existing model while reconnecting"
+            );
+        });
+    });
+}
+
+#[test]
 fn test_add_terminal_tab_method_routes_ssh_environment_through_runtime_facade() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);

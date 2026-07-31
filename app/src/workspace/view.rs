@@ -10125,6 +10125,36 @@ impl Workspace {
                     self.reconnect_retained_environment_runtime_authority(&authority, ctx);
                 }
             }
+            crate::workspace::environment_runtime::EnvironmentRuntimeDisconnectCause::RemoteProcessExited => {
+                // The remote child process backing this session has exited
+                // (e.g. the daemon was killed). The remote server manager
+                // already skipped automatic reconnect, so any durable terminal
+                // owner retained in a retiring lease for this authority will
+                // never observe a `PtyExited` event — its PTY is gone. Exit
+                // those models now to release the retiring lease; without this
+                // the lease would hang forever and resume would be blocked by
+                // "会话正在关闭" until the app restarts.
+                let Some(authority) = self
+                    .current_environment_runtime_authority_for_session(session_id)
+                    .map(str::to_owned)
+                else {
+                    log::warn!(
+                        "RemoteProcessExited for session {session_id:?} but no environment runtime authority is tracked; cannot release retiring lease"
+                    );
+                    return;
+                };
+                log::info!(
+                    "Remote process exited for authority {authority}; releasing retiring durable terminal owners before marking the runtime failed"
+                );
+                WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
+                    registry.exit_retiring_session_owners_for_authority(&authority);
+                });
+                self.handle_environment_runtime_failed(
+                    session_id,
+                    crate::t!("workspace-environment-state-error"),
+                    ctx,
+                );
+            }
         }
     }
 
