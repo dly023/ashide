@@ -10,6 +10,9 @@
 
 </div>
 
+> **⚠ 本项目已归档。** 作者已弃坑，基于 Ashide 的经验在上游开发更精简的版本。
+> 此仓库不再更新，欢迎 fork。
+
 Ashide 面向那些 AI 编码已经跑在真实 shell 里的开发者——Codex、Claude Code、
 OpenCode、Google Antigravity (`agy`)，以及自定义的 shell agent。
 

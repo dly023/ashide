@@ -10,6 +10,10 @@
 
 </div>
 
+> **⚠ This project is archived.** The maintainer has moved on to a new, leaner
+> upstream based on the lessons from Ashide. No further updates will land here.
+> Forks are explicitly welcome.
+
 Ashide is for developers whose AI coding already runs in real shells — Codex,
 Claude Code, OpenCode, Google Antigravity (`agy`), and custom
 shell-based agents.
