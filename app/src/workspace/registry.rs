@@ -10,8 +10,7 @@ use warpui::{
 use crate::session_management::SessionNavigationData;
 use crate::terminal::{
     model::terminal_model::{ExitReason, TerminalModel},
-    CLIAgent,
-    TerminalManager,
+    CLIAgent, TerminalManager,
 };
 use crate::workspace::environment_backend::EnvironmentSessionRefreshIntent;
 use crate::workspace::environment_table::IndexedCliAgentSessionScanToken;
