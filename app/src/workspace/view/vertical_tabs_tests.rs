@@ -153,6 +153,22 @@ fn test_session_navigator_inline_edit_identity_survives_carrier_replacement() {
 }
 
 #[test]
+fn session_navigator_viewport_cache_invalidates_for_inline_rename_lifecycle() {
+    let identity = SessionNavigatorRowIdentity {
+        row_id: "row:rename".to_owned(),
+        environment_navigation_key: "ssh:ssh-config:remote-fixture-primary".to_owned(),
+    };
+    let mut projection = super::SessionNavigatorViewportProjection::default();
+
+    assert!(!projection.inline_rename_input_changed(None));
+    assert!(projection.inline_rename_input_changed(Some(&identity)));
+
+    projection.renaming_identity = Some(identity.clone());
+    assert!(!projection.inline_rename_input_changed(Some(&identity)));
+    assert!(projection.inline_rename_input_changed(None));
+}
+
+#[test]
 fn summary_pane_kind_icons_render_single_icon_for_homogeneous_tabs() {
     assert_eq!(
         select_summary_pane_kind_icons([

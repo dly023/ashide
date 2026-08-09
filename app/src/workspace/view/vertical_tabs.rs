@@ -632,10 +632,18 @@ impl SessionNavigatorViewportItem {
 struct SessionNavigatorViewportProjection {
     query: String,
     keyboard_cursor: Option<SessionNavigatorRowIdentity>,
+    renaming_identity: Option<SessionNavigatorRowIdentity>,
     items: Vec<SessionNavigatorViewportItem>,
 }
 
 impl SessionNavigatorViewportProjection {
+    fn inline_rename_input_changed(
+        &self,
+        renaming_identity: Option<&SessionNavigatorRowIdentity>,
+    ) -> bool {
+        self.renaming_identity.as_ref() != renaming_identity
+    }
+
     fn keyboard_row_identities(&self) -> Vec<SessionNavigatorRowIdentity> {
         self.items
             .iter()
@@ -816,6 +824,7 @@ fn build_session_navigator_viewport_projection(
     use super::session_navigator_reducer::build_reorder_units;
 
     let query_lower = state.search_query.to_lowercase();
+    let renaming_identity = workspace.renaming_workspace_session_identity.clone();
     let kind_sessions: Vec<&WorkspaceSessionSnapshot> = sessions
         .iter()
         .filter(|session| {
@@ -831,6 +840,7 @@ fn build_session_navigator_viewport_projection(
         return SessionNavigatorViewportProjection {
             query: state.search_query.clone(),
             keyboard_cursor: None,
+            renaming_identity,
             items: vec![SessionNavigatorViewportItem::Empty {
                 query_is_empty: state.search_query.is_empty(),
             }],
@@ -885,8 +895,7 @@ fn build_session_navigator_viewport_projection(
                     activity_indicator: live_cli_agent_activity_indicator(workspace, session, app),
                     is_resuming: workspace.is_restoring_workspace_session(session),
                     is_keyboard_cursor: false,
-                    is_renaming: workspace
-                        .renaming_workspace_session_identity
+                    is_renaming: renaming_identity
                         .as_ref()
                         .is_some_and(|identity| identity == &render_identity),
                     same_window_split_group_number: workspace
@@ -920,6 +929,7 @@ fn build_session_navigator_viewport_projection(
         return SessionNavigatorViewportProjection {
             query: state.search_query.clone(),
             keyboard_cursor: None,
+            renaming_identity,
             items: vec![SessionNavigatorViewportItem::Empty {
                 query_is_empty: state.search_query.is_empty(),
             }],
@@ -977,6 +987,7 @@ fn build_session_navigator_viewport_projection(
     SessionNavigatorViewportProjection {
         query: state.search_query.clone(),
         keyboard_cursor,
+        renaming_identity,
         items,
     }
 }
@@ -1540,6 +1551,8 @@ impl VerticalTabsPanelState {
         let query_changed = current_viewport.query != self.search_query;
         let keyboard_cursor_changed =
             current_viewport.keyboard_cursor != *self.session_navigator_keyboard_cursor.borrow();
+        let inline_rename_changed = current_viewport
+            .inline_rename_input_changed(workspace.renaming_workspace_session_identity.as_ref());
         drop(current_viewport);
         if self
             .session_navigator_model_revision
@@ -1547,6 +1560,7 @@ impl VerticalTabsPanelState {
             .is_some_and(|revision| revision == model_revision)
             && !query_changed
             && !keyboard_cursor_changed
+            && !inline_rename_changed
         {
             return;
         }

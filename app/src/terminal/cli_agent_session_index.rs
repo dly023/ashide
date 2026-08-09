@@ -1134,7 +1134,7 @@ mod tests {
                 concat!(
                     "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":\"/tmp/project\"}}}}\n",
                     "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"# AGENTS.md instructions\"}}]}}}}\n",
-                    "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"修复本地 Codex 标题\\n第二行不进入标题\"}}}}\n"
+                    "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"修复本地 Codex 标题\\n第二行不进入标题\"}}]}}}}\n"
                 ),
                 codex_session_id
             ),

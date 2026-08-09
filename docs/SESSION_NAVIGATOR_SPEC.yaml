@@ -1,8 +1,14 @@
-# Ashide Session Navigator 语义规范 v42
+# Ashide Session Navigator 语义规范 v43
 #
 # 这是 Session Navigator 排序、合并、置顶、删除、恢复、focus/active/selection
 # 行为的唯一权威定义。代码实现和所有测试必须与此 spec 一致。
 # 当 spec 与代码冲突时,以 spec 为准;修改行为先改 spec 再改代码。
+#
+# v43 变更摘要:
+#   - 当前 Codex rollout 的真实用户发言可只存在于 response_item/message(role=user)；共享
+#     metadata parser 必须过滤 Codex 注入 envelope 后读取首条真实发言，local/runtime 不得退化为 agent 名
+#   - Vertical Tabs committed viewport cache 必须把 inline rename identity 作为瞬态 render input；
+#     canonical model revision 未变化时，request/cancel/finish rename 仍必须重建对应行并显示/卸载 editor
 #
 # v42 变更摘要:
 #   - Omp 顶层 JSONL 只有在 metadata prefix 含合法 session header 时才是可恢复会话；
@@ -559,7 +565,7 @@ state_model:
     id: "SN-SESSION-NAVIGATOR-STABLE-INLINE-EDIT-IDENTITY-47"
     existing_abstractions: ["SessionNavigatorRowIdentity", "SessionNavigatorState.row_id_by_identity", "Workspace::workspace_session_row_id", "ParsedEnvironmentAuthority.navigation_key", "workspace_session_for_row_identity"]
     identity_rule: "inline alias edit 的跨帧 owner 必须保存 SessionNavigatorRowIdentity；WorkspaceSessionActionTarget 只允许用于打开编辑器当帧定位当前 snapshot"
-    lifecycle_rule: "request rename 将当前 action locator 解析为 Environment navigation key + canonical RowId；source/placeholder/live carrier 更换后，render 与 finish/cancel/clear alias 继续解析同一 RowId"
+    lifecycle_rule: "request rename 将当前 action locator 解析为 Environment navigation key + canonical RowId；source/placeholder/live carrier 更换后，render 与 finish/cancel/clear alias 继续解析同一 RowId。Vertical Tabs viewport cache 必须把当前 inline-edit identity 作为瞬态 render input；即使 committed model revision 未变化，request/cancel/finish 也必须重建对应行并显示或卸载 editor。"
     parity_rule: "local 同步 materialize 与 runtime 异步 materialize 共用同一 inline-edit identity；backend 不得拥有 rename overlay 或 fallback"
     failure_rule: "当前 RowId 已被确认删除时才允许结束编辑态；禁止 physical session.id mismatch 静默卸载 editor、丢弃输入或把 alias 写到另一行"
     forbidden_parallel_paths: ["renaming WorkspaceSessionActionTarget", "physical session id rename comparison", "remote-only rename adapter", "rename state cache overlay", "materialization-time editor reset"]
@@ -1464,6 +1470,12 @@ ux_contract_matrix:
       may_change: ["physical_binding", "lifecycle", "status_projection"]
       must_preserve: ["canonical_row_id", "renaming_target", "editor_buffer", "focus", "other_rows"]
       test: "test_session_navigator_inline_edit_identity_survives_carrier_replacement"
+    - id: "SN-INTRA-INLINE-RENAME-VIEWPORT-INVALIDATION-75"
+      scope: "within_environment"
+      event: "Request/cancel/finish inline Rename while committed SessionNavigatorModel revision is unchanged"
+      may_change: ["inline_editor_visibility", "row_height", "focus"]
+      must_preserve: ["canonical_row_id", "committed_membership", "display_order", "other_rows", "no_model_revision_fabrication"]
+      test: "session_navigator_viewport_cache_invalidates_for_inline_rename_lifecycle"
     - id: "SN-INTRA-TARGET-HOME-MATERIALIZATION-48"
       scope: "cross_environment"
       event: "Environment runtime connects before exact target HOME/root resolution completes"
@@ -1572,6 +1584,12 @@ ux_contract_matrix:
       may_change: ["label_projection"]
       must_preserve: ["shared_parser_semantics", "first_real_user_message_fallback", "provider_session_identity", "resume_independence"]
       test: "test_local_cli_agent_scan_uses_shared_first_user_message_title_fallback"
+    - id: "SN-INTRA-CODEX-RESPONSE-ITEM-USER-TITLE-76"
+      scope: "cross_environment"
+      event: "LocalInitialScan/RemoteInitialScan reads an untitled current Codex rollout whose real prompts exist only as response_item/message(role=user)"
+      may_change: ["label_projection"]
+      must_preserve: ["shared_parser_semantics", "injected_envelope_filtering", "first_real_user_message_fallback", "provider_session_identity", "agent_name_only_as_final_fallback"]
+      test: "shared_codex_metadata_uses_current_response_item_user_message_after_injected_context"
     - id: "SN-INTRA-SESSION-BRIDGE-TITLE-01"
       scope: "within_logical_session"
       event: "SessionBridge reads a Codex rollout containing injected response_item user content and a real event_msg user prompt"

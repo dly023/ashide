@@ -153,12 +153,45 @@ pub fn first_message_excerpt(text: &str) -> Option<String> {
 }
 
 pub fn codex_user_message_from_item(value: &Value) -> Option<String> {
-    if string_field(value, "type") != Some("event_msg")
-        || nested_string(value, &["payload", "type"]) != Some("user_message")
-    {
-        return None;
+    let text = match string_field(value, "type") {
+        Some("event_msg") if nested_string(value, &["payload", "type"]) == Some("user_message") => {
+            nested_string(value, &["payload", "message"])
+        }
+        Some("response_item")
+            if nested_string(value, &["payload", "type"]) == Some("message")
+                && nested_string(value, &["payload", "role"]) == Some("user") =>
+        {
+            value
+                .get("payload")
+                .and_then(|payload| payload.get("content"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|content| string_field(content, "type") == Some("input_text"))
+                .filter_map(|content| string_field(content, "text"))
+                .find(|text| !is_codex_injected_user_content(text))
+        }
+        Some(_) | None => None,
+    }?;
+
+    if is_codex_injected_user_content(text) {
+        None
+    } else {
+        first_message_excerpt(text)
     }
-    nested_string(value, &["payload", "message"]).and_then(first_message_excerpt)
+}
+
+fn is_codex_injected_user_content(text: &str) -> bool {
+    let text = text.trim_start();
+    [
+        "# AGENTS.md instructions",
+        "<environment_context>",
+        "<codex_internal_context",
+        "<permissions instructions>",
+        "<collaboration_mode>",
+    ]
+    .iter()
+    .any(|prefix| text.starts_with(prefix))
 }
 
 pub fn claude_user_message_from_item(value: &Value) -> Option<String> {

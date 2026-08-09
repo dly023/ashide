@@ -305,6 +305,37 @@ fn shared_codex_metadata_ignores_injected_user_content() {
 }
 
 #[test]
+fn shared_codex_metadata_uses_current_response_item_user_message_after_injected_context() {
+    let provider_session_id = "019fdcef-a254-72e3-8b8f-32c0a443e689";
+    let values = vec![
+        serde_json::json!({
+            "type": "session_meta",
+            "payload": {"id": provider_session_id, "cwd": "/repo"}
+        }),
+        serde_json::json!({
+            "type": "response_item",
+            "payload": {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "# AGENTS.md instructions\n\n<INSTRUCTIONS>...</INSTRUCTIONS>"},
+                {"type": "input_text", "text": "<environment_context>\n  <cwd>/repo</cwd>\n</environment_context>"}
+            ]}
+        }),
+        serde_json::json!({
+            "type": "response_item",
+            "payload": {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "吧 coharu 自带的工作流搬到 ssh gpu 机器上去。\n后续说明"}
+            ]}
+        }),
+    ];
+
+    let metadata = codex_session_metadata(&values);
+    assert_eq!(metadata.session_id.as_deref(), Some(provider_session_id));
+    assert_eq!(
+        metadata.display_title().as_deref(),
+        Some("吧 coharu 自带的工作流搬到 ssh gpu 机器上去。")
+    );
+}
+
+#[test]
 fn shared_codex_metadata_never_promotes_response_item_message_id() {
     let values = vec![
         serde_json::json!({
