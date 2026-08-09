@@ -5916,6 +5916,33 @@ then
     fail=1
 fi
 
+# LR-207: current Codex stores real prompts as response_item/message(role=user).
+# The shared parser must filter injected envelopes rather than ignoring the entire shape.
+require_contract_marker "LR-207" "SN-INTRA-CODEX-RESPONSE-ITEM-USER-TITLE-76" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-207" "id: LR-207" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-207" "session metadata: current Codex response_item user title" docs/design/local-remote-capability-matrix.csv
+require_rust_test_name "LR-207" "shared_codex_metadata_uses_current_response_item_user_message_after_injected_context" app/src/cli_agent_jsonl/tests.rs
+require_rust_test_name "LR-207" "test_local_cli_agent_scan_uses_shared_first_user_message_title_fallback" app/src/terminal/cli_agent_session_index.rs
+require_rust_test_name "LR-207" "test_remote_cli_agent_scan_uses_shared_first_user_message_title_fallback" app/src/remote_server/cli_agent_sessions.rs
+if ! sed -n '/pub fn codex_user_message_from_item/,/^}/p' app/src/cli_agent_jsonl/parse.rs \
+    | rg -q '"response_item"'; then
+    echo "[LR-207] shared Codex parser does not accept current response_item user prompts" >&2
+    fail=1
+fi
+
+# LR-208: committed membership revision and transient inline-edit visibility are
+# independent viewport inputs. Rename must invalidate the cached row without
+# fabricating a canonical model revision.
+require_contract_marker "LR-208" "SN-INTRA-INLINE-RENAME-VIEWPORT-INVALIDATION-75" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-208" "id: LR-208" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-208" "session navigator: inline rename viewport invalidation" docs/design/local-remote-capability-matrix.csv
+require_rust_test_name "LR-208" "session_navigator_viewport_cache_invalidates_for_inline_rename_lifecycle" app/src/workspace/view/vertical_tabs_tests.rs
+if ! sed -n '/fn sync_session_navigator_viewport/,/^    }/p' app/src/workspace/view/vertical_tabs.rs \
+    | rg -q 'renaming_workspace_session_identity'; then
+    echo "[LR-208] viewport cache does not include Workspace-owned inline rename identity" >&2
+    fail=1
+fi
+
 if ! check_completion_gate \
     docs/design/local-remote-parity-tracker.yaml \
     docs/design/local-remote-capability-matrix.csv

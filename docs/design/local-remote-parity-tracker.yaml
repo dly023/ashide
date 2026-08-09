@@ -6109,3 +6109,43 @@ items:
     focused_tests: '2026-07-31 三个 App::test 状态机测试通过：RemoteProcessExited 释放 retiring lease 并进入 Error；ExplicitTransportRestart 不 exit model；TransportFailure 保留 model 并进入 Connecting。remote_server crate 94 tests 全通过。'
     cargo_check: '2026-07-31 MACOSX_DEPLOYMENT_TARGET=10.14 CARGO_INCREMENTAL=0 cargo check -p warp --features gui,local_fs 通过。'
     gui_or_runtime: '2026-07-31 真实授权远端日志已复现 daemon exit 后 retiring lease 永久阻塞及重启后恢复；当前实现的 App runtime tests 逐分支验证永久退出、显式 transport restart 与可恢复 transport failure 的可见 lifecycle/lease 结果。'
+
+- id: LR-207
+  status: verified
+  category: session_metadata_codex_response_item_title
+  discovered_at: '2026-08-09'
+  summary: "Codex 0.0.8 当前 rollout 可只用 response_item/message(role=user) 保存真实用户发言；共享 metadata parser 仍只认旧 event_msg/user_message，指定会话 019fdcef-a254-72e3-8b8f-32c0a443e689 因而退化显示 Codex。"
+  root_cause: "LR-035 的共享 home 已收口，但 parser 的真实用户消息 shape 固定在旧 event_msg；既有 injected-content 测试通过完全忽略 response_item 避开 AGENTS envelope，也同时忽略了当前格式的真实 prompt。"
+  target_invariant: "local/runtime/SessionBridge 继续只消费 cli_agent_jsonl 共享 parser；Codex event_msg 与 response_item user message 都进入同一 first-real-user-message 语义，已知注入 envelope 必须过滤，provider title 仍优先，agent display name 只作最终 fallback。"
+  spec_path: docs/SESSION_NAVIGATOR_SPEC.yaml
+  spec_matrix_id: SN-INTRA-CODEX-RESPONSE-ITEM-USER-TITLE-76
+  capability_matrix: 'session metadata: current Codex response_item user title'
+  static_check: script/check_local_remote_parity
+  reused_abstractions: [codex_user_message_from_item, CliAgentSessionMetadata.display_title, AgentSessionDiscoveryPlan]
+  removed_parallel_paths: ["response_item means injected-only assumption", "agent-name fallback despite persisted real user prompt"]
+  shared_paths: [app/src/cli_agent_jsonl/parse.rs, app/src/cli_agent_jsonl/tests.rs, app/src/terminal/cli_agent_session_index.rs, app/src/remote_server/cli_agent_sessions.rs]
+  required_tests: [shared_codex_metadata_uses_current_response_item_user_message_after_injected_context, test_local_cli_agent_scan_uses_shared_first_user_message_title_fallback, test_remote_cli_agent_scan_uses_shared_first_user_message_title_fallback]
+  verification:
+    runtime_evidence: '2026-08-09 指定 rollout `~/.codex/sessions/2026/08/07/rollout-2026-08-07T23-55-20-019fdcef-a254-72e3-8b8f-32c0a443e689.jsonl` 无 provider title、无 event_msg/user_message；首个 response_item user record 是注入的 AGENTS/environment envelope，下一条是用户真实发言。旧 parser 因完全忽略 response_item 返回 Missing，最终显示 Codex。'
+    source_checks: '2026-08-09 rustfmt parse、YAML/CSV/shell syntax、git diff --check 通过；共享 parser test 与 local/runtime scan fixture 已锁定当前 response_item shape。Cargo 编译按用户要求委托 GitHub CI。'
+    github_ci: '2026-08-09 GitHub Actions CI run 31313703591 passed on commit 141a3698b538c4388189f2627708de0dc69425f1, including formatting, release privacy, agent harness, local/remote parity contracts, and cargo check --locked.'
+
+- id: LR-208
+  status: verified
+  category: session_navigator_inline_rename_viewport_invalidation
+  discovered_at: '2026-08-09'
+  summary: "Session Navigator Rename action 已保存稳定 RowId 并 notify，但 Vertical Tabs viewport cache 只比较 committed model revision/query/keyboard cursor；revision 不变时直接复用旧行，inline editor 因而点击后不可见。"
+  root_cause: "LR-138 只收口跨 carrier 的 rename identity，没有把该 Workspace-owned瞬态 lifecycle 纳入 LR-203 后新增的 committed viewport cache 输入。"
+  target_invariant: "committed membership 仍只由 EnvironmentTable model revision 驱动；inline rename identity 作为独立瞬态 render input参与 cache invalidation，request/cancel/finish 均重建同一 canonical row，不伪造 model revision、不创建第二套 membership。"
+  spec_path: docs/SESSION_NAVIGATOR_SPEC.yaml
+  spec_matrix_id: SN-INTRA-INLINE-RENAME-VIEWPORT-INVALIDATION-75
+  capability_matrix: 'session navigator: inline rename viewport invalidation'
+  static_check: script/check_local_remote_parity
+  reused_abstractions: [SessionNavigatorRowIdentity, SessionNavigatorViewportProjection, VerticalTabsPanelState.sync_session_navigator_viewport]
+  removed_parallel_paths: ["model-revision-only viewport cache for rename state", "notify without projection invalidation"]
+  shared_paths: [app/src/workspace/view/session_navigator.rs, app/src/workspace/view/vertical_tabs.rs, app/src/workspace/view/vertical_tabs_tests.rs]
+  required_tests: [session_navigator_viewport_cache_invalidates_for_inline_rename_lifecycle, test_session_navigator_inline_edit_identity_survives_carrier_replacement]
+  verification:
+    runtime_evidence: '2026-08-09 源码执行链确认 RequestRenameWorkspaceSession 已写入 SessionNavigatorRowIdentity 并 notify；VerticalTabsPanelState::sync_session_navigator_viewport 在 committed revision/query/cursor 均未变化时提前返回，导致 cached row 的 is_renaming 永远保持 false。'
+    source_checks: '2026-08-09 viewport projection 已把 stable inline-edit identity 纳入 cache input；request/cancel/finish 不修改 canonical membership revision。rustfmt parse、YAML/CSV/shell syntax、git diff --check 通过；Cargo 编译按用户要求委托 GitHub CI。'
+    github_ci: '2026-08-09 GitHub Actions CI run 31313703591 passed on commit 141a3698b538c4388189f2627708de0dc69425f1, including formatting, release privacy, agent harness, local/remote parity contracts, and cargo check --locked.'
