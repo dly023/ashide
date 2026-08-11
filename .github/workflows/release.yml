@@ -21,8 +21,11 @@ on:
       upload_to_release:
         description: "Upload artifacts to the GitHub Release"
         required: true
-        default: true
-        type: boolean
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
   push:
     tags:
       - "v*"
@@ -40,8 +43,8 @@ env:
   RUST_BACKTRACE: "1"
   SOURCE_REF: ${{ github.ref }}
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
-  RELEASE_CHANNEL: ${{ github.event.inputs.channel || 'oss' }}
-  PUBLISH_RELEASE_ASSETS: ${{ github.event_name == 'push' || github.event.inputs.upload_to_release == 'true' }}
+  RELEASE_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.channel || 'oss' }}
+  PUBLISH_RELEASE_ASSETS: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.upload_to_release == 'true') }}
 
 jobs:
   validate-release-identity:
@@ -456,11 +459,20 @@ jobs:
       - build-linux-cli
       - build-windows
     if: >-
-      ${{ always() && (github.event_name == 'push' || inputs.upload_to_release) &&
-      needs.build-macos-app.result == 'success' &&
-      needs.build-macos-helpers.result == 'success' &&
-      needs.build-linux-cli.result == 'success' &&
-      needs.build-windows.result == 'success' }}
+      ${{
+        always() &&
+        needs.build-macos-app.result == 'success' &&
+        needs.build-macos-helpers.result == 'success' &&
+        needs.build-linux-cli.result == 'success' &&
+        needs.build-windows.result == 'success' &&
+        (
+          github.event_name == 'push' ||
+          (
+            github.event_name == 'workflow_dispatch' &&
+            github.event.inputs.upload_to_release == 'true'
+          )
+        )
+      }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
