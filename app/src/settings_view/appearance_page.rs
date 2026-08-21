@@ -1422,13 +1422,11 @@ impl AppearanceSettingsPageView {
         }
 
         categories.push(Category::new(
-            Box::leak(
-                if FeatureFlag::VerticalTabs.is_enabled() {
-                    crate::t!("settings-appearance-category-session-navigator").into_boxed_str()
-                } else {
-                    crate::t!("settings-appearance-category-tabs").into_boxed_str()
-                },
-            ),
+            Box::leak(if FeatureFlag::VerticalTabs.is_enabled() {
+                crate::t!("settings-appearance-category-session-navigator").into_boxed_str()
+            } else {
+                crate::t!("settings-appearance-category-tabs").into_boxed_str()
+            }),
             tab_settings_widgets,
         ));
 
@@ -4688,7 +4686,12 @@ impl SettingsWidget for EditToolbarWidget {
             appearance.ui_font_family(),
             12.,
         )
-        .with_color(appearance.theme().sub_text_color(appearance.theme().background()).into())
+        .with_color(
+            appearance
+                .theme()
+                .sub_text_color(appearance.theme().background())
+                .into(),
+        )
         .finish();
         let editor = Container::new(ChildView::new(&view.header_toolbar_inline_editor).finish())
             .with_padding_bottom(HEADER_PADDING)

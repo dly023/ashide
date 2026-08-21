@@ -33,7 +33,9 @@ pub(crate) struct IconWithStatusSizing {
 }
 
 fn plate_corner_radius(sizing: &IconWithStatusSizing) -> f32 {
-    sizing.plate_corner_radius.unwrap_or((sizing.icon_size + sizing.padding * 2.) / 2.)
+    sizing
+        .plate_corner_radius
+        .unwrap_or((sizing.icon_size + sizing.padding * 2.) / 2.)
 }
 
 fn rgb_u32_to_color_u(rgb: u32) -> ColorU {
@@ -111,9 +113,9 @@ pub(crate) fn render_icon_with_status(
             Container::new(inner)
                 .with_uniform_padding(sizing.padding)
                 .with_background(internal_colors::fg_overlay_2(theme))
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
-                    plate_corner_radius(sizing),
-                )))
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(plate_corner_radius(
+                    sizing,
+                ))))
                 .finish()
         }
         IconWithStatusVariant::NeutralElement { icon_element } => {
@@ -124,9 +126,9 @@ pub(crate) fn render_icon_with_status(
             Container::new(inner)
                 .with_uniform_padding(sizing.padding)
                 .with_background(internal_colors::fg_overlay_2(theme))
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
-                    plate_corner_radius(sizing),
-                )))
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(plate_corner_radius(
+                    sizing,
+                ))))
                 .finish()
         }
         IconWithStatusVariant::OzAgent { status, is_ambient } => {
@@ -145,9 +147,9 @@ pub(crate) fn render_icon_with_status(
             let plate = Container::new(inner)
                 .with_uniform_padding(sizing.padding)
                 .with_background(theme.background())
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
-                    plate_corner_radius(sizing),
-                )))
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(plate_corner_radius(
+                    sizing,
+                ))))
                 .finish();
             render_with_optional_status_badge(
                 plate,
@@ -190,9 +192,9 @@ pub(crate) fn render_icon_with_status(
             let plate = Container::new(inner)
                 .with_uniform_padding(sizing.padding)
                 .with_background(background)
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
-                    plate_corner_radius(sizing),
-                )))
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(plate_corner_radius(
+                    sizing,
+                ))))
                 .finish();
             render_with_optional_status_badge(
                 plate,

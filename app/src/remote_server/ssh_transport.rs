@@ -394,7 +394,9 @@ mod tests {
     use warpui::App;
 
     fn static_auth_context() -> Arc<RemoteServerAuthContext> {
-        Arc::new(RemoteServerAuthContext::new(|| "user id/with spaces".to_string()))
+        Arc::new(RemoteServerAuthContext::new(|| {
+            "user id/with spaces".to_string()
+        }))
     }
 
     #[test]
