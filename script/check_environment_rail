@@ -1,0 +1,483 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+fail=0
+
+require_file() {
+    if [[ ! -f "$1" ]]; then
+        echo "[environment-rail] missing required file: $1" >&2
+        fail=1
+    fi
+}
+
+require_pattern() {
+    local label="$1"
+    local pattern="$2"
+    local path="$3"
+    if ! rg -q "$pattern" "$path"; then
+        echo "[environment-rail] $label missing in $path (expected /$pattern/)" >&2
+        fail=1
+    fi
+}
+
+forbidden_pattern() {
+    local label="$1"
+    local pattern="$2"
+    local path="$3"
+    if rg -q "$pattern" "$path"; then
+        echo "[environment-rail] forbidden: $label in $path" >&2
+        rg -n "$pattern" "$path" >&2 || true
+        fail=1
+    fi
+}
+
+require_file docs/ENVIRONMENT_RAIL_SPEC.yaml
+require_file app/src/workspace/view/environment_rail.rs
+require_file app/src/workspace/view/session_sidebar_metrics.rs
+require_file app/src/workspace/view/agent_icon.rs
+
+for sym in \
+    rail_session_layout_plan \
+    rail_session_viewport_slots \
+    build_environment_rail_sections \
+    section_viewport_layout \
+    split_rail_sections
+do
+    require_pattern "symbol $sym" "fn $sym" app/src/workspace/view/environment_rail.rs
+done
+
+require_pattern "presubmit contract marker" "script/check_environment_rail" script/presubmit
+require_pattern "ToggleEnvironmentRailSection action" "ToggleEnvironmentRailSection" app/src/workspace/action.rs
+require_pattern "environment indicator" "fn render_environment_indicator" app/src/workspace/view.rs
+require_pattern "vertical tabs indicator wiring" "vertical_tabs_active" app/src/workspace/view.rs
+require_pattern "agent accent plate" "fn agent_icon_badge" app/src/workspace/view/agent_icon.rs
+require_pattern "CLIAgent icon_path" "fn icon_path" app/src/terminal/cli_agent.rs
+
+agent_svg_count=$(find app/assets/bundled/svg/agents -name '*.svg' 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$agent_svg_count" -lt 10 ]]; then
+    echo "[environment-rail] expected >= 10 bundled agent SVGs, found $agent_svg_count" >&2
+    fail=1
+fi
+
+forbidden_pattern "legacy navigator header row" "SessionNavigatorViewportItem::Header" app/src/workspace/view/vertical_tabs.rs
+
+session_row_block=$(
+    rg -n 'fn render_restored_session_row' app/src/workspace/view/vertical_tabs.rs \
+        | head -1 \
+        | cut -d: -f1
+)
+if [[ -n "$session_row_block" ]]; then
+    if sed -n "${session_row_block},$((session_row_block + 120))p" app/src/workspace/view/vertical_tabs.rs \
+        | rg -q 'ClipConfig::ellipsis\(\)'; then
+        echo "[environment-rail] session navigator row title must use ClipConfig::end() fade, not ellipsis" >&2
+        fail=1
+    fi
+    if ! sed -n "${session_row_block},$((session_row_block + 120))p" app/src/workspace/view/vertical_tabs.rs \
+        | rg -q 'ClipConfig::end\(\)|ClipConfig::default\(\)'; then
+        echo "[environment-rail] session navigator row title must clip with fade" >&2
+        fail=1
+    fi
+fi
+
+preview_block=$(
+    rg -n 'fn render_environment_rail_preview_viewport' app/src/workspace/view/vertical_tabs.rs \
+        | head -1 \
+        | cut -d: -f1
+)
+if [[ -n "$preview_block" ]]; then
+    if ! sed -n "${preview_block},$((preview_block + 80))p" app/src/workspace/view/vertical_tabs.rs \
+        | rg -q 'RestoredSessionRowActivation::SwitchEnvironment'; then
+        echo "[environment-rail] preview rows must SwitchEnvironment, not Resume" >&2
+        fail=1
+    fi
+    if sed -n "${preview_block},$((preview_block + 80))p" app/src/workspace/view/vertical_tabs.rs \
+        | rg -q 'RestoredSessionRowActivation::Resume'; then
+        echo "[environment-rail] preview rows must not Resume" >&2
+        fail=1
+    fi
+fi
+
+require_pattern "environment indicator toolbar item" "EnvironmentIndicator" app/src/workspace/header_toolbar_item.rs
+require_pattern "environment indicator default placement" "Self::EnvironmentIndicator" app/src/workspace/header_toolbar_item.rs
+require_pattern "environment indicator render" "fn render_environment_indicator" app/src/workspace/view.rs
+require_pattern "environment indicator wired via toolbar" "HeaderToolbarItemKind::EnvironmentIndicator" app/src/workspace/view.rs
+
+require_pattern "natural session height projection" "fn rail_session_natural_height_px" app/src/workspace/view/environment_rail.rs
+require_pattern "competing section half-rail cap" "expanded_nonempty_sections" app/src/workspace/view/environment_rail.rs
+require_pattern "outer environment rail scroll" "environment_rail_scroll_state" app/src/workspace/view/vertical_tabs.rs
+require_pattern "preview viewport inner scroll" "environment_rail_preview_scroll_states" app/src/workspace/view/vertical_tabs.rs
+
+multi_rail_block=$(sed -n \
+    '/let (before, current, after) = split_rail_sections(sections);/,/fn render_vertical_tabs_panel(/p' \
+    app/src/workspace/view/vertical_tabs.rs)
+if echo "$multi_rail_block" | rg -q 'Shrinkable::new\('; then
+    echo "[environment-rail] outer vertical scroll must not contain flexible children" >&2
+    fail=1
+fi
+if echo "$multi_rail_block" | rg -q 'rail\.add_child\(current_sessions\);'; then
+    echo "[environment-rail] current viewport in outer scroll must have explicit height" >&2
+    fail=1
+fi
+if ! echo "$multi_rail_block" | rg -q 'ConstrainedBox::new\(current_sessions\)'; then
+    echo "[environment-rail] current viewport explicit height constraint missing" >&2
+    fail=1
+fi
+
+indicator_fn_line=$(
+    rg -n 'fn render_environment_indicator' app/src/workspace/view.rs \
+        | head -1 \
+        | cut -d: -f1
+)
+if [[ -n "$indicator_fn_line" ]]; then
+    indicator_block=$(sed -n "${indicator_fn_line},$((indicator_fn_line + 60))p" app/src/workspace/view.rs \
+        | sed '/^[[:space:]]*fn render_environment_strip_chip/,$d')
+    if ! echo "$indicator_block" | rg -q 'render_tab_bar_icon_button'; then
+        echo "[environment-rail] environment indicator must use icon-only toolbar button" >&2
+        fail=1
+    fi
+    if echo "$indicator_block" | rg -q 'chip_label|ChevronDown'; then
+        echo "[environment-rail] environment indicator must not show label/chevron text chip" >&2
+        fail=1
+    fi
+    if ! echo "$indicator_block" | rg -q 'ENVIRONMENT_PROVIDER_PICKER_POSITION_ID'; then
+        echo "[environment-rail] environment indicator must SavePosition as provider picker anchor" >&2
+        fail=1
+    fi
+    if ! echo "$indicator_block" | rg -q 'SetEnvironmentProviderPickerOpen'; then
+        echo "[environment-rail] environment indicator must open provider picker" >&2
+        fail=1
+    fi
+fi
+
+preview_density_block=$(
+    rg -n 'fn render_environment_rail_preview_viewport' app/src/workspace/view/vertical_tabs.rs \
+        | head -1 \
+        | cut -d: -f1
+)
+if [[ -n "$preview_density_block" ]]; then
+    if ! sed -n "${preview_density_block},$((preview_density_block + 50))p" app/src/workspace/view/vertical_tabs.rs \
+        | rg -q 'GROUP_ITEM_SPACING'; then
+        echo "[environment-rail] preview viewport must use GROUP_ITEM_SPACING like live rows" >&2
+        fail=1
+    fi
+    if ! sed -n "${preview_density_block},$((preview_density_block + 80))p" app/src/workspace/view/vertical_tabs.rs \
+        | rg -q 'session_sidebar_unit_padding\(true, true\)'; then
+        echo "[environment-rail] preview viewport must use canonical session unit padding" >&2
+        fail=1
+    fi
+fi
+
+require_pattern "environment header collapse action" "ToggleEnvironmentRailSection" app/src/workspace/view/vertical_tabs.rs
+
+header_fn_line=$(
+    rg -n 'fn render_environment_rail_section_header' app/src/workspace/view/vertical_tabs.rs \
+        | head -1 \
+        | cut -d: -f1
+)
+if [[ -n "$header_fn_line" ]]; then
+    header_block=$(sed -n \
+        '/fn render_environment_rail_section_header(/,/fn count_current_navigator_rows(/p' \
+        app/src/workspace/view/vertical_tabs.rs)
+    if echo "$header_block" | rg -q 'ChevronDown|ChevronRight|environment_rail_chevron_mouse_states'; then
+        echo "[environment-rail] environment header must not reserve a leading chevron column" >&2
+        fail=1
+    fi
+    if ! echo "$header_block" | rg -q 'ToggleEnvironmentRailSection'; then
+        echo "[environment-rail] environment header identity must own collapse/expand" >&2
+        fail=1
+    fi
+    if echo "$header_block" | rg -q 'SwitchEnvironment'; then
+        echo "[environment-rail] environment header must not mix collapse with environment switching" >&2
+        fail=1
+    fi
+    if ! echo "$header_block" | rg -q 'RefreshEnvironmentSessions'; then
+        echo "[environment-rail] every Environment action rail must expose targeted refresh" >&2
+        fail=1
+    fi
+    if ! echo "$header_block" | rg -q 'DisconnectEnvironment'; then
+        echo "[environment-rail] runtime environment action rail must expose explicit disconnect" >&2
+        fail=1
+    fi
+    if ! echo "$header_block" | rg -q 'ConnectEnvironment'; then
+        echo "[environment-rail] disconnected Environment action rail must expose targeted connect" >&2
+        fail=1
+    fi
+    if ! echo "$header_block" | rg -q 'StopPropagation'; then
+        echo "[environment-rail] environment header actions must not toggle collapse" >&2
+        fail=1
+    fi
+    for side in left right; do
+        if ! echo "$header_block" | rg -q "with_${side}\(metrics\.content_pad_${side}\)"; then
+            echo "[environment-rail] Environment header must use shared content_pad_${side}" >&2
+            fail=1
+        fi
+    done
+    if ! HEADER_BLOCK="$header_block" python3 - <<'PY'
+import os
+
+block = os.environ["HEADER_BLOCK"]
+tokens = [
+    "WorkspaceAction::RefreshEnvironmentSessions",
+    "WorkspaceAction::ConnectEnvironment",
+    "WorkspaceAction::DisconnectEnvironment",
+]
+positions = [block.find(token) for token in tokens]
+if any(position < 0 for position in positions) or positions != sorted(positions):
+    raise SystemExit("Environment action order must be Refresh -> Connect -> Disconnect")
+PY
+    then
+        echo "[environment-rail] Environment header action order is invalid" >&2
+        fail=1
+    fi
+fi
+
+forbidden_pattern "obsolete environment chevron state" "environment_rail_chevron_mouse_states" app/src/workspace/view/vertical_tabs.rs
+
+if rg -n 'tab_bar\.add_child' app/src/workspace/view.rs | rg -q 'render_environment_indicator|environment_indicator'; then
+    echo "[environment-rail] environment indicator must not be hardcoded onto the tab bar strip" >&2
+    fail=1
+fi
+
+if ! rg -q 'rail_session_layout_plan_uses_natural_height_and_only_caps_competing_sections' app/src/workspace/view/environment_rail.rs; then
+    echo "[environment-rail] missing natural-height/competing-cap unit test" >&2
+    fail=1
+fi
+
+layout_source=$(sed -n '/pub(crate) fn rail_session_layout_plan(/,/^}/p' app/src/workspace/view/environment_rail.rs)
+if echo "$layout_source" | rg -q 'search_expanded|single_fill|available_px / n|always_even_split|water.?fill'; then
+    echo "[environment-rail] layout must not special-case search/active or allocate/even-split remaining height" >&2
+    fail=1
+fi
+if ! echo "$layout_source" | rg -q 'rail_session_natural_height_px'; then
+    echo "[environment-rail] layout plan must derive every viewport from natural content height" >&2
+    fail=1
+fi
+
+preview_scroll_block=$(
+    rg -n 'fn render_environment_rail_preview_viewport' app/src/workspace/view/vertical_tabs.rs \
+        | head -1 \
+        | cut -d: -f1
+)
+if [[ -n "$preview_scroll_block" ]]; then
+    if ! sed -n "${preview_scroll_block},$((preview_scroll_block + 90))p" app/src/workspace/view/vertical_tabs.rs \
+        | rg -q 'ClippedScrollable::vertical'; then
+        echo "[environment-rail] preview viewport must scroll internally" >&2
+        fail=1
+    fi
+fi
+
+icon_fn_line=$(
+    rg -n 'fn restored_session_icon' app/src/workspace/view/vertical_tabs.rs \
+        | head -1 \
+        | cut -d: -f1
+)
+if [[ -n "$icon_fn_line" ]]; then
+    icon_block=$(sed -n "${icon_fn_line},$((icon_fn_line + 20))p" app/src/workspace/view/vertical_tabs.rs)
+    if ! echo "$icon_block" | rg -q 'session_navigator_row_icon'; then
+        echo "[environment-rail] restored_session_icon must use session_navigator_row_icon only" >&2
+        fail=1
+    fi
+    if echo "$icon_block" | rg -q 'uses_multicolor_agent_logo|render_cli_agent_logo|render_pane_icon_with_status'; then
+        echo "[environment-rail] restored_session_icon must not mix multicolor/circle icon paths" >&2
+        fail=1
+    fi
+fi
+
+require_pattern "navigator row icon entry" "fn session_navigator_row_icon" app/src/workspace/view/agent_icon.rs
+require_pattern "padding square plate" "with_uniform_padding\\(padding\\)" app/src/workspace/view/agent_icon.rs
+require_pattern "global glyph inset" "PLATE_GLYPH_INSET_RATIO" app/src/workspace/view/agent_icon.rs
+require_pattern "shared session unit padding" "fn session_sidebar_unit_padding" app/src/workspace/view/session_sidebar_metrics.rs
+require_pattern "live unit shared padding" "session_sidebar_unit_padding\\(" app/src/workspace/view/vertical_tabs.rs
+require_pattern "overlay reorder target" "fn add_session_unit_insertion_target_overlay" app/src/workspace/view/vertical_tabs.rs
+require_pattern "shared left content padding" "content_pad_left" app/src/workspace/view/session_sidebar_metrics.rs
+require_pattern "shared right content padding" "content_pad_right" app/src/workspace/view/session_sidebar_metrics.rs
+require_pattern "vertical-only unit padding" "unit_outer_pad_y" app/src/workspace/view/session_sidebar_metrics.rs
+
+forbidden_pattern "legacy session indent" "RAIL_SESSION_INDENT" app/src/workspace/view/session_sidebar_metrics.rs
+forbidden_pattern "legacy row horizontal padding" "row_pad_x" app/src/workspace/view/session_sidebar_metrics.rs
+forbidden_pattern "global control-bar session refresh" "fn render_refresh_sessions_button" app/src/workspace/view/vertical_tabs.rs
+forbidden_pattern "current-only environment connect action" "ConnectCurrentEnvironment" app/src
+forbidden_pattern "product-level reconnect action" "ReconnectEnvironment" app/src
+forbidden_pattern "current-only session refresh action" "RefreshWorkspaceSessions" app/src
+
+metrics_block=$(sed -n '/fn session_sidebar_surface_metrics(/,/^}/p' app/src/workspace/view/session_sidebar_metrics.rs)
+if ! echo "$metrics_block" | rg -q 'content_pad_left: 4\.0'; then
+    echo "[environment-rail] shared left content padding must be 4px" >&2
+    fail=1
+fi
+if ! echo "$metrics_block" | rg -q 'content_pad_right: 4\.0'; then
+    echo "[environment-rail] shared right content padding must be 4px" >&2
+    fail=1
+fi
+
+unit_padding_block=$(sed -n '/fn session_sidebar_unit_padding(/,/^}/p' app/src/workspace/view/session_sidebar_metrics.rs)
+if ! echo "$unit_padding_block" | rg -q 'Padding::uniform\(0\.\)'; then
+    echo "[environment-rail] session unit wrapper must own vertical spacing only" >&2
+    fail=1
+fi
+
+session_row_render_block=$(sed -n '/fn render_restored_session_row(/,/fn render_session_unit_insertion_target/p' app/src/workspace/view/vertical_tabs.rs)
+for side in left right; do
+    if ! echo "$session_row_render_block" | rg -q "with_${side}\(metrics\.content_pad_${side}\)"; then
+        echo "[environment-rail] session row must use shared content_pad_${side}" >&2
+        fail=1
+    fi
+done
+
+control_bar_block=$(sed -n '/fn render_control_bar(/,/fn render_detail_kind_badge_icon(/p' app/src/workspace/view/vertical_tabs.rs)
+for side in left right; do
+    if ! echo "$control_bar_block" | rg -q "with_${side}\(metrics\.content_pad_${side}\)"; then
+        echo "[environment-rail] control bar must use shared content_pad_${side}" >&2
+        fail=1
+    fi
+done
+
+require_pattern "authority-scoped refresh action" "RefreshEnvironmentSessions" app/src/workspace/action.rs
+require_pattern "authority-scoped connect action" "ConnectEnvironment" app/src/workspace/action.rs
+require_pattern "navigation-key refresh feedback owner" "refresh_generation_by_navigation_key" app/src/workspace/view.rs
+require_pattern "targeted refresh implementation" "fn refresh_environment_sessions" app/src/workspace/view/session_navigator.rs
+require_pattern "shared refresh availability owner" "fn environment_session_refresh_availability" app/src/workspace/view.rs
+require_pattern "rail refresh capability projection" "refresh_availability" app/src/workspace/view/environment_rail.rs
+require_pattern "partitioned refresh feedback test" "environment_refresh_feedback_is_partitioned_by_navigation_key" app/src/workspace/view_test.rs
+require_pattern "shared horizontal padding test" "session_sidebar_surfaces_share_horizontal_content_padding" app/src/workspace/view/session_sidebar_metrics_tests.rs
+require_pattern "disjoint refresh connect matrix test" "build_sections_keeps_refresh_and_connect_transport_semantics_disjoint" app/src/workspace/view/environment_rail.rs
+require_pattern "connected helper refresh matrix test" "build_sections_keeps_connected_runtime_refresh_ready_without_terminal" app/src/workspace/view/environment_rail.rs
+require_pattern "terminal-independent discovery test" "remote_discovery_does_not_require_terminal_execution_carrier" app/src/workspace/view_test.rs
+require_pattern "backend helper readiness test" "runtime_refresh_backend_requires_connected_helper_before_scan" app/src/workspace/view_test.rs
+require_pattern "authority-scoped discovery issue tooltip test" "environment_discovery_issue_tooltip_uses_authority_scope" app/src/workspace/view_test.rs
+require_pattern "physical provider observation test" "discovery_plan_does_not_observe_unprovisioned_optional_provider" app/src/cli_agent_jsonl/tests.rs
+forbidden_pattern "hardcoded remote discovery issue scope" '"远端 \{\} 会话来源' app/src/workspace/view/session_navigator.rs
+
+require_pattern "typed alias subject" "enum WorkspaceSessionAliasSubject" app/src/app_state.rs
+require_pattern "single alias subject resolver" "fn alias_subject" app/src/app_state.rs
+require_pattern "durable alias follows live carrier test" "test_session_navigator_durable_alias_follows_session_into_live_container" app/src/workspace/view_test.rs
+require_pattern "binding rebind identity test" "rebind_detaches_old_durable_identity_from_reused_live_container" app/src/workspace/view/session_navigator_reducer_tests.rs
+require_pattern "late provider title promotion test" "generic_provider_native_title_can_arrive_after_first_user_message" app/src/cli_agent_jsonl/tests.rs
+rename_commit_block=$(sed -n '/pub(super) fn finish_workspace_session_rename(/,/pub(super) fn cancel_workspace_session_rename(/p' app/src/workspace/view/session_navigator.rs)
+if ! echo "$rename_commit_block" | rg -q 'rename\.subject\.key\(\)'; then
+    echo "[environment-rail] Rename must commit only the captured typed alias subject" >&2
+    fail=1
+fi
+if echo "$rename_commit_block" | rg -q 'session\.is_live_container\(\)|workspace_session_alias_keys'; then
+    echo "[environment-rail] Rename must not branch alias ownership by live/virtual or fan out keys" >&2
+    fail=1
+fi
+
+require_pattern "relationship X-Ray module" "mod session_navigator_xray" app/src/workspace/view.rs
+require_pattern "single relationship X-Ray builder" "fn session_navigator_xray" app/src/workspace/view/session_navigator_xray.rs
+require_pattern "canonical X-Ray logical identity" "\.logical_key\(\)" app/src/workspace/view/session_navigator_xray.rs
+require_pattern "canonical X-Ray durable identity" "\.durable_identity_key\(\)" app/src/workspace/view/session_navigator_xray.rs
+require_pattern "canonical X-Ray observed identities" "\.observed_identity_keys\(\)" app/src/workspace/view/session_navigator_xray.rs
+require_pattern "shared terminal runtime diagnostics" "fn runtime_diagnostics" app/src/terminal/terminal_manager.rs
+require_pattern "local runtime diagnostics implementation" "TerminalRuntimeKind::LocalPty" app/src/terminal/local_tty/terminal_manager.rs
+require_pattern "remote runtime diagnostics implementation" "TerminalRuntimeKind::RemoteEnvironmentPty" app/src/terminal/remote_tty/terminal_manager.rs
+require_pattern "X-Ray copy action" "CopyWorkspaceSessionXRay" app/src/workspace/action.rs
+require_pattern "debug-only X-Ray sidecar" "cfg!\(debug_assertions\)" app/src/workspace/view/vertical_tabs.rs
+require_pattern "exhaustive X-Ray presence test" "session_relationship_presence_classifier_is_exhaustive" app/src/workspace/view/session_navigator_xray.rs
+require_pattern "canonical X-Ray identity test" "session_relationship_identity_projection_uses_canonical_keys" app/src/workspace/view/session_navigator_xray.rs
+
+if [[ $(rg -n 'fn session_navigator_xray\(' app/src --glob '*.rs' | wc -l | tr -d ' ') -ne 1 ]]; then
+    echo "[environment-rail] SessionNavigatorXRay must have exactly one production builder" >&2
+    rg -n 'fn session_navigator_xray\(' app/src --glob '*.rs' >&2 || true
+    fail=1
+fi
+
+xray_source=$(sed '/#\[cfg(test)\]/,$d' app/src/workspace/view/session_navigator_xray.rs 2>/dev/null || true)
+if echo "$xray_source" | rg -q '::pane:|source:tab:|Command::new|\bps\b|\bpgrep\b|process.*name'; then
+    echo "[environment-rail] X-Ray must not compose identity keys or discover processes by command/name" >&2
+    fail=1
+fi
+
+refresh_action_block=$(sed -n '/pub(super) fn refresh_environment_sessions(/,/pub(super) fn refresh_workspace_sessions_passively(/p' app/src/workspace/view/session_navigator.rs)
+if ! REFRESH_ACTION_BLOCK="$refresh_action_block" python3 - <<'PY'
+import os
+
+block = os.environ["REFRESH_ACTION_BLOCK"]
+gate = block.find("environment_session_refresh_availability")
+generation = block.find("begin_environment_sessions_refresh")
+if gate < 0 or generation < 0 or gate > generation:
+    raise SystemExit("disabled or stale Refresh must be rejected before feedback generation allocation")
+PY
+then
+    echo "[environment-rail] Refresh action readiness must precede generation allocation" >&2
+    fail=1
+fi
+
+if rg -n 'lifecycle_state == EnvironmentLifecycleState::Connected' app/src/workspace/view/environment_rail.rs >/dev/null; then
+    echo "[environment-rail] Environment rail must not derive refreshability from lifecycle alone" >&2
+    fail=1
+fi
+
+runtime_refresh_backend=$(sed -n '/impl EnvironmentBackend for RuntimeEnvironmentBackend/,/^}/p' app/src/workspace/view.rs \
+    | sed -n '/fn refresh_indexed_sessions(/,/^    }/p')
+if ! echo "$runtime_refresh_backend" | rg -q 'environment_session_refresh_availability'; then
+    echo "[environment-rail] runtime refresh backend must reuse shared helper-client availability" >&2
+    fail=1
+fi
+if ! BACKEND_BLOCK="$runtime_refresh_backend" python3 - <<'PY'
+import os
+
+block = os.environ["BACKEND_BLOCK"]
+gate = block.find("environment_session_refresh_availability")
+scan = block.find("scan_environment_runtime_agent_sessions_with_refresh_generation")
+if gate < 0 or scan < 0 or gate > scan:
+    raise SystemExit("runtime refresh availability must fail closed before scan delivery")
+PY
+then
+    echo "[environment-rail] runtime refresh backend readiness order is invalid" >&2
+    fail=1
+fi
+
+if [[ -n "$header_fn_line" ]]; then
+    if ! echo "$header_block" | rg -q 'MainAxisAlignment::SpaceBetween'; then
+        echo "[environment-rail] Environment header must anchor identity and actions to opposite edges" >&2
+        fail=1
+    fi
+    if ! echo "$header_block" | rg -q 'identity_cluster'; then
+        echo "[environment-rail] Environment header missing left identity cluster" >&2
+        fail=1
+    fi
+    if ! echo "$header_block" | rg -q 'accessory_cluster'; then
+        echo "[environment-rail] Environment header missing right accessory/action cluster" >&2
+        fail=1
+    fi
+    if ! echo "$header_block" | rg -q 'on_left_mouse_down\(\|_, _, _\| DispatchEventResult::StopPropagation\)'; then
+        echo "[environment-rail] disabled Environment action must not fall through to header collapse" >&2
+        fail=1
+    fi
+    if ! echo "$header_block" | rg -q 'with_defer_events_to_children'; then
+        echo "[environment-rail] outer Environment header must defer handled child click events" >&2
+        fail=1
+    fi
+fi
+
+require_pattern "helper-native discovery roots RPC" "resolve_cli_agent_session_store_roots" crates/remote_server/src/client/mod.rs
+if sed -n '/fn scan_environment_runtime_agent_sessions_with_refresh_generation/,/^    }/p' app/src/workspace/view.rs \
+    | rg -q 'resolve_environment_cli_agent_store_roots|run_command'; then
+    echo "[environment-rail] remote session discovery must not depend on terminal RunCommand roots" >&2
+    fail=1
+fi
+
+viewport_projection_block=$(sed -n '/impl SessionNavigatorViewportProjection {/,/^}/p' app/src/workspace/view/vertical_tabs.rs)
+if echo "$viewport_projection_block" | rg -q '\.with_child\(render_session_unit_insertion_target'; then
+    echo "[environment-rail] live reorder targets must be overlay-only and must not widen row spacing" >&2
+    fail=1
+fi
+
+agent_icon_prod=$(sed '/#\[cfg(test)\]/,$d' app/src/workspace/view/agent_icon.rs)
+if ! echo "$agent_icon_prod" | rg -q 'plate_glyph_slot'; then
+    echo "[environment-rail] plate must apply global plate_glyph_slot inset" >&2
+    fail=1
+fi
+if echo "$agent_icon_prod" | rg -q 'Align::new|Stack::new|Rect::new'; then
+    echo "[environment-rail] navigator icon plate must use Container + uniform padding only" >&2
+    fail=1
+fi
+
+if [[ $fail -ne 0 ]]; then
+    echo "environment rail checks failed" >&2
+    exit 1
+fi
+
+echo "environment rail checks passed"

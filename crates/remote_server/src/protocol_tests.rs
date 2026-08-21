@@ -11,7 +11,6 @@ async fn round_trip_client_message() {
     let msg = ClientMessage {
         request_id: "test-123".to_string(),
         message: Some(client_message::Message::Initialize(Initialize {
-            auth_token: String::new(),
             protocol_revision: crate::REMOTE_SERVER_PROTOCOL_REVISION,
         })),
     };
@@ -128,7 +127,6 @@ fn try_extract_request_id_from_valid_message() {
     let msg = ClientMessage {
         request_id: "abc-123".to_string(),
         message: Some(client_message::Message::Initialize(Initialize {
-            auth_token: String::new(),
             protocol_revision: crate::REMOTE_SERVER_PROTOCOL_REVISION,
         })),
     };

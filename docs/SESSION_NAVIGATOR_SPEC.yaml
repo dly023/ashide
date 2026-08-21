@@ -1,8 +1,54 @@
-# Ashide Session Navigator 语义规范 v43
+# Ashide Session Navigator 语义规范 v52
 #
 # 这是 Session Navigator 排序、合并、置顶、删除、恢复、focus/active/selection
 # 行为的唯一权威定义。代码实现和所有测试必须与此 spec 一致。
 # 当 spec 与代码冲突时,以 spec 为准;修改行为先改 spec 再改代码。
+#
+# v52 变更摘要:
+#   - 别名 owner 从“live=container / virtual=session”改为 typed subject：有 durable binding
+#     的行默认重命名 session，无 durable binding 的 live 行才重命名 container
+#   - 自动标题只是 binding-scoped projection fact，不得写回 user alias 或
+#     PaneConfiguration.custom_vertical_tabs_title；重绑后按新 subject 纯投影
+#
+# v51 变更摘要:
+#   - 增加开发态关系 X-Ray，把左栏明确为 Environment / container / durable session /
+#     runtime instance 与 binding lifecycle 的只读 join；吸收 runtime diagnostics 而不引入 daemon
+#   - retiring lease 拆清 UndoRetained 与 Stopping 的可观察语义，禁止继续把暂藏 carrier
+#     对用户解释成“正在关闭”
+#   - Environment viewport 改为自然内容高度；单非空 section 可用整栏，多 section 才各自半栏封顶
+#
+# v50 变更摘要:
+#   - discovery plan 的 configured provider 与 physically observed source 分离；从未存在的
+#     可选 provider 是成功空结果且不得进入 observed_agents，避免下一轮伪造 SourceMissing
+#   - discovery issue 文案按 Environment authority 区分本机/远端；共享 wire 语义升至 v10
+#
+# v49 变更摘要:
+#   - Update Helper 使用展开后的 target HOME 扫描 channel daemon；终止前校验
+#     /proc/$pid/exe ownership，避免 quote 住 ~ 漏清理或过期 PID 误杀无关进程
+#
+# v48 变更摘要:
+#   - Environment 用户 action 统一为 Connect/Disconnect；断开后的再次 Connect 由底层
+#     transport 解释为 reconnect，UI/action model 禁止保留独立 ReconnectEnvironment
+#
+# v47 变更摘要:
+#   - provider transcript 删除必须携带 typed Agent identity，并与 discovery 共用
+#     CliAgentStoreRoots source authority；本地/远端 helper 使用相同越界与 source-shape 门禁
+#   - file-backed provider 删除成功后才提交 Navigator cache；数据库/index-backed source
+#     只能进入其 provider-native mutation，禁止退化为任意文件删除或 Codex index mutation
+#
+# v46 变更摘要:
+#   - remote Environment discovery 使用 helper-native target roots RPC，不依赖 terminal execution carrier
+#   - scan failure/source missing 与 transport/helper failure 由 canonical owner 持续投影到 exact Environment header
+#   - header child action 的完整 click 事件必须与 collapse handler 隔离
+#
+# v45 变更摘要:
+#   - Environment session Refresh 的 UI capability 与 backend delivery 必须共享 canonical
+#     execution-carrier readiness；transport Connected 但无 carrier 时保留 disabled action，禁止发送 RunCommand
+#   - Environment header 使用左 identity / 右 accessory-action cluster，计数和环境级操作固定右对齐
+#
+# v44 变更摘要:
+#   - Environment Rail 左栏多 section 布局、单行 36px 会话行、accent plate agent 图标、
+#     多环境均分高度 + 内外双滚动、顶部 Indicator 下拉 chip 打开 provider picker；见 docs/ENVIRONMENT_RAIL_SPEC.yaml
 #
 # v43 变更摘要:
 #   - 当前 Codex rollout 的真实用户发言可只存在于 response_item/message(role=user)；共享
@@ -388,15 +434,16 @@ state_model:
 
   environment_session_refresh_intent:
     id: "SN-ENV-SESSION-REFRESH-INTENT-25"
-    existing_abstractions: ["EnvironmentBackend.refresh_indexed_sessions", "EnvironmentTable indexed session cache", "EnvironmentLifecycleState", "Session Navigator refresh generation"]
+    existing_abstractions: ["EnvironmentBackend.refresh_indexed_sessions", "EnvironmentTable indexed session cache", "EnvironmentLifecycleState", "EnvironmentRuntimeExecutionCarrierGate", "Session Navigator refresh generation"]
     intent_rule: "调用方必须显式提交 PassiveProjection 或 UserInitiated { generation }；禁止用 Option<generation> 同时表达副作用权限和 toast completion"
     passive_rule: "PassiveProjection 只属于可能改变 provider 历史集合的语义事件：初始 authority discovery、history-enabled 设置变化、provider source mutation 成功、runtime target HOME 首次物化、agent-bound carrier 移除。generic TerminalSessionBootstrapped、split、普通 terminal 新建/关闭与纯 focus/layout reconciliation 只更新 committed live projection，禁止启动 provider discovery。target/client 不可用时保留 cache 与 persisted Error/Disconnected 状态并返回同步未刷新。"
-    explicit_rule: "只有 RefreshWorkspaceSessions action 才可创建 UserInitiated generation、无条件重扫、请求 reconnect 并驱动当前 Navigator header refresh icon；完整成功仅静默结束 spinner，显式失败才按同一 operation identity 发出一条 transient error。local/runtime 都消费相同 intent。"
+    explicit_rule: "只有 refreshable Environment header 的 RefreshEnvironmentSessions { authority_key } action 才可为该 canonical navigation_key 创建 UserInitiated generation、无条件重扫并驱动对应 refresh icon；Refresh 永不启动/restart transport，未连接 runtime 只能走独立 ConnectEnvironment action。runtime transport Connected 仍不等于 refreshable：UI capability 与 backend delivery 必须调用同一个 canonical helper readiness，helper 缺失时 action 保留原位但 disabled，stale action fail-closed 且不得发送 roots probe/scan RPC。完整成功仅静默结束 spinner，显式失败才按同一 authority-scoped operation identity 发出一条 transient error。local/helper-ready runtime 与当前/非当前 section 都消费相同 intent。"
+    feedback_identity_rule: "Workspace refresh feedback state 按 ParsedEnvironmentAuthority.navigation_key 分区；并发刷新两个 Environment 必须各自保有 generation/carrier，任一 stale completion 不得结束另一 section 的 spinner。Environment 被断连移除时清理其 feedback carrier，迟到 completion no-op。"
     feedback_rule: "PassiveProjection 只合并/收敛 canonical cache：不得创建或抢占 user generation、不得弹 toast。SourceMissing、PermanentlyDeleted、Cancelled 或 stale completion 只结束当前 operation/保留已提交 rows，绝不宣称完整刷新成功。"
     ownership_rule: "backend 只负责 I/O timing 与 transport side effect；EnvironmentTable cache、Navigator reducer、selection/order projection 继续共用"
     wire_identity_rule: "ScanCliAgentSessions 的 request 与 records.agent、observed_agents、source_missing_agent 都必须使用 CLIAgent::to_serialized_name 的协议值；remote scanner 只产出 typed CLIAgent，server_model 是唯一 typed→wire 投影点，desktop 与 helper 都只从该格式解码，禁止 command_prefix / display name 穿过 transport。任何 protobuf 仍可解码的语义变更必须递增 REMOTE_SERVER_PROTOCOL_REVISION，使旧 helper 在 Initialize 时 fail-closed 且不能进入 scan。"
-    wire_outcome_rule: "source_missing_agent 与 records/observed_agents 互斥；Complete 的每条 record.agent 必须存在于 observed_agents。desktop 必须在 mutation authority-scoped cache 之前一次性验证整帧，任一违反均拒绝整帧、保留上一 committed collection，绝不部分提交、更不回写 local。"
-    forbidden_parallel_paths: ["Option refresh generation intent", "configure-time implicit reconnect", "remote-only refresh wrapper", "passive refresh lifecycle mutation", "passive trigger invoking user refresh", "generic terminal bootstrap provider scan", "split/new-terminal provider scan", "global start/success refresh toast", "partial-preserved reported as complete", "TTL/debounce freshness guess"]
+    wire_outcome_rule: "source_missing_agent 与 records/observed_agents 互斥；Complete 的每条 record.agent 必须存在于 observed_agents。observed_agents 只包含本轮确实存在物理 source 的 provider；configured 但从未 provision 的 provider 是成功空结果且不得写入 observed_agents，只有上一 current generation 已观察过的 source 消失才允许 SourceMissing。desktop 必须在 mutation authority-scoped cache 之前一次性验证整帧，任一违反均拒绝整帧、保留上一 committed collection，绝不部分提交、更不回写 local。该可解码语义变更必须使用 REMOTE_SERVER_PROTOCOL_REVISION v10，旧 helper 在 scan 前 fail-closed。"
+    forbidden_parallel_paths: ["Option refresh generation intent", "lifecycle-only refresh capability", "UI-only execution readiness", "backend-only execution readiness", "refresh roots probe without execution carrier", "configure-time implicit reconnect", "remote-only refresh wrapper", "passive refresh lifecycle mutation", "passive trigger invoking user refresh", "generic terminal bootstrap provider scan", "split/new-terminal provider scan", "global start/success refresh toast", "partial-preserved reported as complete", "TTL/debounce freshness guess"]
 
   sourceless_restore_container_binding:
     id: "SN-SOURCELESS-RESTORE-CONTAINER-BINDING-26"
@@ -570,18 +617,18 @@ state_model:
     failure_rule: "当前 RowId 已被确认删除时才允许结束编辑态；禁止 physical session.id mismatch 静默卸载 editor、丢弃输入或把 alias 写到另一行"
     forbidden_parallel_paths: ["renaming WorkspaceSessionActionTarget", "physical session id rename comparison", "remote-only rename adapter", "rename state cache overlay", "materialization-time editor reset"]
 
-  live_container_title_ownership:
-    id: "SN-LIVE-CONTAINER-TITLE-OWNERSHIP-60"
-    existing_abstractions: ["PaneConfiguration.container_uuid", "PaneConfiguration.custom_vertical_tabs_title", "LeafSnapshot.custom_vertical_tabs_title", "Workspace::rename_pane", "WorkspaceSessionSnapshot::is_live_container", "EnvironmentBackend session user state"]
-    product_rule: "Session Navigator 一行代表一个 pane container；live row 的 Rename 必须编辑该 PaneConfiguration 的容器标题，virtual restore target 的 Rename 才编辑 durable session alias。菜单、inline editor、toast 与 clear/reset 文案必须明确当前对象，不得把两者都称为 session alias。"
-    title_rule: "PaneConfiguration.custom_vertical_tabs_title 是 live container 可见标题唯一 owner；PaneGroup.custom_title 只命名整个 Tab/pane group。WorkspaceSessionSnapshot::from_tabs 与 Navigator live_workspace_sessions 必须从每个 leaf 的容器标题读取 label，禁止把 Tab custom_title、OSC/shell prompt 或 environment.label 复制给 leaf。"
-    resume_seed_rule: "Resume/materialize 必须把当前已可见的扫描标题（title_fallback_label，可含 virtual alias）种子化写入新 pane 的 custom_vertical_tabs_title；禁止只写 Tab custom_title。Resume 不负责加载 metadata，只转移已投影标题的 owner。"
-    projection_rule: "authority-scoped alias enrichment 只作用于 virtual row；virtual source 被 live container consume 后，alias 不得覆盖 live container title。双方均为 Specific 时 live pane title 优先于 indexed/virtual；live Missing/Generic 时仍吸收 indexed Specific。关闭 live carrier 后，同一 durable virtual row可继续显示自己的 alias。"
-    identity_rule: "live rename 从 action locator 解析当前 PaneViewLocator，但 editor 生命周期继续由 container UUID/canonical RowId 识别；布局坐标只路由当次 action，不进入标题持久化。virtual alias 继续使用 stable_user_state_keys。"
-    persistence_rule: "打开 Rename editor 与 Escape 取消不得保存；Enter 或 Blur commit 只有在规范化标题确实变化后才触发一次 App State save。Pane title 随 LeafSnapshot/SQLite 冷恢复；virtual alias 继续由统一 EnvironmentBackend 在底层分发到 local sidecar 或 runtime RPC。"
-    parity_rule: "local 与 runtime live container 完全共用 PaneConfiguration mutation 与 App State save；只有 virtual alias persistence 在 EnvironmentBackend 最低层区分同步 sidecar 与异步 RPC。"
-    empty_rule: "trim 后空标题表示清除当前对象的 override：live row 清除 pane container title，virtual row 清除 durable alias；不得创建空字符串 owner。"
-    forbidden_parallel_paths: ["live row authority alias mutation", "alias overrides live label", "tab custom_title copied to every leaf", "environment.label as live session.label", "save when rename editor opens", "backend-specific live rename", "physical locator persisted as title identity"]
+  binding_scoped_alias_and_title_projection:
+    id: "SN-BINDING-SCOPED-ALIAS-TITLE-82"
+    existing_abstractions: ["PaneConfiguration.container_uuid", "PaneConfiguration.custom_vertical_tabs_title", "PaneSessionBinding", "WorkspaceSessionSnapshot.durable_identity_key", "EnvironmentBackend session user state", "shared provider metadata parser"]
+    object_rule: "container UUID 只是可见行/carrier 的稳定容器身份；durable session key 才是会话语义身份；PaneSessionBinding 是两者之间可替换、有生命周期的边。标题与别名必须先解析当前 binding subject，不得用 is_live_container 二分语义。"
+    alias_subject_rule: "Session Navigator 默认 Rename 只写一个 typed subject：当前行可解析 durable_identity_key 时为 DurableSession，别名随会话跨 container 移动；无 durable binding 的 live 行才为 Container；无 durable identity 的 virtual row 为 VirtualSource。禁止一次 rename 把同一文本广播写入 container/durable/source 多类 key。"
+    display_rule: "当前显示标题是无副作用投影：当前 session user alias > 显式 container override > provider/agent 原生标题 > 已定格的首条可信真实用户消息 > agent display name > pane fallback。当 binding 变更时重新计算 subject；旧 session alias 只随旧 durable key，container override 只留在原 container。"
+    automatic_title_rule: "provider 标题和 first_user_message 是 durable session 的观察事实，只能更新 projection；不得写入 user alias，不得种子化写入 PaneConfiguration.custom_vertical_tabs_title。first_user_message 在同一 durable session 内首次定格后不因后续注入/context/tool 行重选；后到的 provider 原生标题只提升显示来源等级。"
+    container_rule: "PaneConfiguration.custom_vertical_tabs_title 仍是显式 container override 的唯一 owner，PaneGroup.custom_title 仍只命名整个 Tab/pane group。当前 UI 在行无 durable binding 时才将 Rename 路由到 container；未来若暴露“固定容器名”必须是另一个明确 action，不得由系统猜。"
+    resume_rule: "Resume/materialize 只建立 container + PaneSessionBinding + runtime carrier；扫描标题与 alias 通过当前 durable subject 投影，不再复制为 pane custom title。因此 agent 后续自动命名/Refresh 可在无 user override 时更新显示，而 user alias 始终压过自动标题。"
+    persistence_rule: "DurableSession/VirtualSource alias 统一由 EnvironmentBackend 按 canonical Environment 分区写 sidecar 或 runtime RPC；Container override 随 LeafSnapshot/SQLite 持久化。空文本只清除当前 typed subject，打开 editor/Escape 不写任何 owner。"
+    parity_rule: "local/runtime 共用同一 alias subject resolver 与 title projection；差异只能留在 EnvironmentBackend 同步 sidecar / 异步 RPC delivery，不得有 remote-only live alias 特例。"
+    forbidden_parallel_paths: ["is_live_container rename split", "broadcast alias write to every observed key", "automatic title persisted as user alias", "Resume title seeded into pane custom title", "alias lookup rejects live durable session", "tab custom_title copied to every leaf", "environment.label as live session.label", "physical locator persisted as alias subject"]
 
   live_cli_agent_activity_projection:
     id: "SN-LIVE-CLI-AGENT-ACTIVITY-63"
@@ -726,12 +773,22 @@ state_model:
     id: "SN-CROSS-WINDOW-RETIRING-OWNER-02"
     owner_home: "WorkspaceRegistry"
     identity_source: "关闭前的 live WorkspaceSessionSnapshot.durable_identity_key；禁止从 command 字符串、tab/leaf locator 或 terminal UUID 重拼"
-    lifecycle: "Live/Pending → Retiring(PTY shutdown requested) → Released(TerminalModel handled_exit=true)"
-    activation_rule: "durable identity 命中 Retiring 时 Activate fail-closed，不进入 reducer、不 SpawnTerminal；用户稍后重试或由上层重新触发"
-    teardown_rule: "window、普通 tab、单 pane、hidden/undoable close 都必须对 durable CLI-agent terminal 调用统一 shutdown_pty 并建立 lease；ContentTransferred 不得建立 retiring lease 或杀死被转移 pane"
+    lifecycle: "Live/Pending → UndoRetained(carrier hidden, shutdown_requested=false) → Live（targeted Undo restore）或 Stopping(exact manager shutdown requested) → Released(TerminalModel handled_exit=true)；永久 close 可从 Live 直接进入 Stopping"
+    activation_rule: "durable identity 命中 UndoRetained 或 Stopping 时 Activate 均 fail-closed，不进入 reducer、不 SpawnTerminal；但可见解释必须不同：UndoRetained 指向恢复原 carrier，Stopping 指向等待/未来 exact force-stop，不得统一提示‘会话正在关闭’"
+    teardown_rule: "hidden/undoable close 建立 lease 但保留 PTY；restore 取消 exact durable+terminal lease；Undo discard/expiry 与永久 window/tab/pane close 对 exact TerminalManager 调用 shutdown_pty 并进入 Stopping；ContentTransferred 不得建立 lease 或杀死被转移 pane"
     no_timeout_rule: "禁止用固定延时猜测进程已退出；try_lock 暂时不可得时仍视为 Retiring"
     failure_rule: "shutdown 未完成时 lease 保持，宁可阻止恢复也不得让同一 provider session 出现两个可写进程"
     remote_exit_truth_rule: "远程 durable terminal owner 的 exit truth 来源有两类：PTY 进程自然退出（PtyExited 事件 → model.exit）和远端 transport 永久失效（RemoteProcessExited cause → model.exit(PtyDisconnected)）。RemoteProcessExited 只在 remote server manager 判定 child 已退出且跳过自动重连时 emit；它等价于本地 PTY 已死，必须立即 exit 受影响 durable terminal owner 的 TerminalModel 以释放 lease。TransportFailure（child 未退出、可重连）与 ExplicitTransportRestart（workspace 主动重启、复用旧 model）禁止 exit model。"
+
+  relationship_xray:
+    id: "SN-RELATIONSHIP-XRAY-01"
+    owner_rule: "SessionNavigatorXRay 只是 canonical owner 的瞬态只读 join，不拥有任何 membership、identity、lifecycle 或 persistence。Environment 来自 ParsedEnvironmentAuthority；container/logical/durable/observed keys 只能调用 WorkspaceSessionSnapshot API；binding 只读 PaneConfiguration；runtime 只读 TerminalManager::runtime_diagnostics；detached lease 只读 WorkspaceRegistry。"
+    product_rule: "Debug build 的会话 detail sidecar 显示紧凑摘要，context menu 与 sidecar 复制同一份结构化 JSON。默认单行 row 不增加字段或宽度；release build 不显示开发入口。"
+    presence_rule: "穷尽状态为 Cold、StartingHere、LiveHere、LiveElsewhere、UndoRetained、Stopping、Unknown。renderer 不得按 is_active、id=tab:*、命令文本或进程名自行猜状态；同一 classifier 同时供 sidecar、clipboard 与测试使用。"
+    runtime_rule: "本地 manager 暴露当前 exact PTY pid（若已启动）和 shutdown_requested；Environment remote manager 暴露 terminal SessionId runtime ref；普通 remote proxy明确标注无 Environment ref。未知不是空字符串成功态，禁止 ps|grep 或 basename 匹配寻找/杀死进程。"
+    legal_action_rule: "X-Ray 列出当前模型真实支持或缺失的动作：Cold=Resume；Starting=Wait；LiveHere=Focus/CloseCarrier；LiveElsewhere=FocusOwner；UndoRetained=UndoCloseLifo（并明确 TargetedRestoreMissing）；Stopping=WaitForExit（并明确 ForceStopMissing）；Unknown=Diagnose。诊断展示不得绕过 typed WorkspaceAction 直接产生副作用。"
+    forbidden_parallel_paths: ["render-composed pane/session identity", "tab/leaf as stable container", "TerminalView EntityId as durable identity", "process-name scan", "backend-specific X-Ray type", "X-Ray persistence", "X-Ray mutation", "second presence classifier"]
+    verification_rule: "pure classifier tests 覆盖七种 presence；identity projection test 覆盖 virtual cold 与 live container 且断言只调用 canonical key API；local/remote TerminalManager diagnostics tests 锁定 PID/SessionId 与 shutdown transition；source checker 锁定唯一 X-Ray builder、debug-only UI、copy action 与 forbidden key/process fallback。"
 
   provider_session_identity:
     id: "SN-CODEX-CANONICAL-SESSION-ID-01"
@@ -1542,6 +1599,48 @@ ux_contract_matrix:
       may_change: ["refresh_error_feedback"]
       must_preserve: ["previous_indexed_rows", "row_id", "position", "selection", "local_remote_scan_semantics"]
       test: "session_refresh_scan_failure_preserves_cached_rows"
+    - id: "SN-REMOTE-HELPER-NATIVE-DISCOVERY-77"
+      scope: "cross_environment"
+      event: "Connected remote Environment without any terminal execution carrier performs InitialScan/Refresh"
+      may_change: ["indexed_history_rows", "environment_discovery_issue"]
+      must_preserve: ["helper_native_target_roots", "no_RunCommand", "no_terminal_materialization", "previous_indexed_rows_on_failure", "authority_scoped_generation", "explicit_failure_not_empty"]
+      test: "remote_discovery_does_not_require_terminal_execution_carrier"
+    - id: "SN-ENVIRONMENT-HEADER-ACTION-ISOLATION-78"
+      scope: "within_environment"
+      event: "Refresh/Connect/UpdateHelper/Disconnect child action is clicked inside an Environment header"
+      may_change: ["target_environment_operation"]
+      must_preserve: ["collapsed", "active_environment", "section_order", "scroll_anchor", "single_typed_action"]
+      test: "environment_header_defers_handled_child_clicks_before_collapse"
+    - id: "SN-ENVIRONMENT-DISCOVERY-ISSUE-79"
+      scope: "cross_environment"
+      event: "current remote discovery fails, source disappears, or helper protocol/version mismatches"
+      may_change: ["environment_operational_issue", "helper_recovery_affordance"]
+      must_preserve: ["committed_rows", "row_id", "position", "selection", "issue_navigation_key", "stale_generation_isolation", "cancelled_helper_prompt_keeps_recovery"]
+      test: "environment_discovery_issue_is_owned_with_committed_projection"
+    - id: "SN-ENVIRONMENT-HELPER-REPLACEMENT-82"
+      scope: "cross_environment"
+      event: "Protocol/version mismatch is recovered through Connect/Update Helper"
+      may_change: ["target_channel_helper_binary", "target_channel_helper_daemon", "environment_transport_generation"]
+      must_preserve: ["expanded_target_home", "daemon_executable_ownership", "unrelated_target_processes", "environment_identity", "committed_rows"]
+      test: "remote_daemon_stop_command_expands_channel_home_directory"
+    - id: "SN-DISCOVERY-PHYSICAL-OBSERVATION-83"
+      scope: "cross_environment"
+      event: "Refresh includes configured providers whose session source has never existed"
+      may_change: ["records_from_physically_present_providers", "observed_agents_for_physically_present_providers"]
+      must_preserve: ["never_provisioned_provider_is_not_observed", "next_refresh_is_complete", "last_committed_collection_on_true_source_missing", "local_remote_tooltip_scope", "section_order", "selection"]
+      test: "discovery_plan_does_not_observe_unprovisioned_optional_provider + environment_discovery_issue_tooltip_uses_authority_scope"
+    - id: "SN-SESSION-DELETE-PROVIDER-ROOT-80"
+      scope: "cross_environment"
+      event: "Delete a discovered Claude/Codex/Droid/OpenCode/Copilot/Pi/Cursor/Antigravity/Omp session"
+      may_change: ["provider_transcript", "provider_native_store_entry", "indexed_source_cache", "lifecycle"]
+      must_preserve: ["typed_provider_identity", "shared_discovery_mutation_roots", "provider_source_shape", "symlink_and_outside_root_rejection", "database_entry_native_mutation_only", "optimistic_delete_rollback_on_refusal", "local_remote_mutation_semantics"]
+      test: "delete_antigravity_session_accepts_shared_discovery_root + delete_opencode_sqlite_session_uses_provider_native_store_entry + delete_cursor_store_entry_removes_only_exact_session_directory + remote_mutation_* provider authority tests"
+    - id: "SN-ENVIRONMENT-EXPLICIT-CONNECT-81"
+      scope: "cross_environment"
+      event: "Connect is clicked on a Dormant/Error runtime Environment, including one previously disconnected or failed"
+      may_change: ["transport_generation", "environment_lifecycle", "helper_recovery_prompt"]
+      must_preserve: ["authority_identity", "section_order", "collapsed_state", "committed_session_rows_until_new_discovery", "single_connect_action_semantics", "connect_is_visible_without_hover", "no_product_reconnect_action"]
+      test: "environment_rail_header_actions_are_authority_scoped_and_ordered + build_sections_keeps_refresh_and_connect_transport_semantics_disjoint"
     - id: "SN-INTRA-INITIAL-SCAN-BOUNDARY-01"
       scope: "within_environment"
       event: "Workspace construction followed by initial Session Navigator refresh"
@@ -1752,6 +1851,66 @@ ux_contract_matrix:
       may_change: ["target_last_active_tab"]
       must_preserve: ["navigation_environment", "surviving_tab_order", "future_switch_stability"]
       test: "test_environment_last_active_tab_fallback_and_reorder"
+    - id: "ER-01"
+      scope: "environment_rail"
+      event: "Single environment section fills remaining rail height"
+      may_change: ["session_viewport_height"]
+      must_preserve: ["live_session_order", "selection", "navigation_key_partition"]
+      test: "rail_session_layout_plan_single_fill"
+    - id: "ER-02"
+      scope: "environment_rail"
+      event: "Multiple open environments with preview row counts always even-split"
+      may_change: ["per_section_viewport_height"]
+      must_preserve: ["section_order_local_first", "current_environment_live_sessions", "nested_outer_and_inner_scroll"]
+      test: "rail_session_layout_plan_multi_env_always_even_split"
+    - id: "ER-03"
+      scope: "environment_rail"
+      event: "Click preview row in non-current environment section"
+      may_change: ["active_environment"]
+      must_preserve: ["preview_row_cardinality", "no_resume_without_switch"]
+      test: "script/check_environment_rail preview SwitchEnvironment gate"
+    - id: "ER-04"
+      scope: "environment_rail"
+      event: "Session navigator search query non-empty"
+      may_change: ["viewport_layout_plan"]
+      must_preserve: ["filtered_session_cardinality", "keyboard_cursor"]
+      test: "rail_session_layout_plan_search_expanded_single_fill"
+    - id: "ER-05"
+      scope: "environment_rail"
+      event: "Header toolbar Environment Indicator opens provider picker"
+      may_change: ["environment_picker_visibility", "header_toolbar_chip_selection"]
+      must_preserve: ["open_environments_in_left_rail", "picker_anchor_on_indicator"]
+      test: "script/check_environment_rail environment indicator toolbar gate"
+    - id: "ER-06"
+      scope: "environment_rail"
+      event: "EnvironmentHeaderIdentityClicked"
+      may_change: ["section_collapsed", "visible_preview_rows"]
+      must_preserve: ["active_environment", "section_header", "cached_navigation_key_model", "live_current_section_semantics"]
+      test: "environment_rail_header_identity_owns_collapse"
+    - id: "ER-09"
+      scope: "environment_rail"
+      event: "SecondEnvironmentConnected → OneSectionCollapsed"
+      may_change: ["section_collapsed", "session_viewport_height"]
+      must_preserve: ["explicit_viewport_height", "finite_outer_scroll_layout", "active_environment", "session_rows"]
+      test: "environment_rail_outer_scroll_children_have_explicit_heights"
+    - id: "ER-10"
+      scope: "environment_rail"
+      event: "EnvironmentHeaderActionClicked"
+      may_change: ["environment_runtime_lifecycle", "open_environment_sections"]
+      must_preserve: ["section_collapsed_on_reconnect", "action_event_isolation", "canonical_disconnect_reconnect_actions"]
+      test: "environment_rail_header_actions_are_isolated"
+    - id: "ER-11"
+      scope: "environment_rail"
+      event: "EnvironmentHeaderRefreshClicked(authority_key)"
+      may_change: ["target_environment_indexed_rows", "target_refresh_generation"]
+      must_preserve: ["active_environment", "other_environment_rows", "other_environment_refresh_generation", "section_collapsed"]
+      test: "environment_refresh_feedback_is_partitioned_by_navigation_key"
+    - id: "ER-12"
+      scope: "environment_rail"
+      event: "SessionSidebarRendered"
+      may_change: ["surface_density"]
+      must_preserve: ["shared_content_pad_left", "shared_content_pad_right", "zero_horizontal_unit_padding", "row_identity"]
+      test: "session_sidebar_surfaces_share_horizontal_content_padding"
     - id: "SN-ENV-ORDER-01"
       scope: "cross_environment"
       event: "LocalAndRemoteIndependentRefresh"
@@ -1931,10 +2090,10 @@ ux_contract_matrix:
       scope: "local_remote_parity"
       event: "User clicks Resume on a row already rendered from the committed SessionNavigatorModel"
       may_change: ["target_restore_lifecycle", "target_carrier", "focused_row"]
-      must_preserve: ["ui_thread_responsiveness", "unrelated_rows", "row_id", "display_order", "single_post_delivery_refresh", "no_action_time_full_pane_snapshot", "scanned_live_container_title", "SN-LIVE-CONTAINER-TITLE-OWNERSHIP-60"]
+      must_preserve: ["ui_thread_responsiveness", "unrelated_rows", "row_id", "display_order", "single_post_delivery_refresh", "no_action_time_full_pane_snapshot", "binding_scoped_alias_subject", "SN-BINDING-SCOPED-ALIAS-TITLE-82"]
       test: "resume_action_consumes_committed_model_without_action_time_refresh"
-      co_required_ownership: ["SN-LIVE-CONTAINER-TITLE-OWNERSHIP-60"]
-      inheritance_rule: "热路径重写 live projection 时必须同时继承 live container title ownership 的 static gate；禁止只为不卡 UI 加门禁而放开 tab/env 标题回填"
+      co_required_ownership: ["SN-BINDING-SCOPED-ALIAS-TITLE-82"]
+      inheritance_rule: "热路径重写 live projection 时必须同时继承 typed alias subject 与 automatic-title projection 的 static gate；禁止把 Resume/刷新得到的自动标题固化成 container override"
 
     - id: "SN-PASSIVE-DISCOVERY-SEMANTIC-TRIGGERS-68"
       scope: "local_remote_parity"
@@ -1995,22 +2154,21 @@ test_matrix:
 
   # 10.2 序列型测试 (v3 新增)
   sequences:
-    - name: "live/virtual rename → commit/cancel → cold restore"
+    - name: "binding-scoped rename → rebind → cold restore"
       steps:
-        - "一个 split Tab 含两个 live leaf，并有两个无关 virtual rows；每个 leaf 拥有不同 container UUID"
-        - "从 Session Navigator 重命名第一个 live row → 只更新该 leaf 的 custom_vertical_tabs_title；兄弟 leaf、Tab group custom_title、virtual aliases 与顺序不变"
-        - "Enter/Blur 在规范化标题变化后各只触发一次 App State save；Escape 不 mutation、不保存"
-        - "重排 Tab/leaf 后同一 container UUID 保持标题；坐标复用的新 container 不继承旧标题"
-        - "SQLite round-trip 后两个 leaf 标题按 container 恢复，Tab group title 仍独立"
-        - "重命名 local 与 runtime virtual row → UI 共用 alias action，底层分别写 sidecar/RPC；materialize 后 alias 不覆盖 live title"
-        - "空标题分别清除 live pane override 或 virtual alias，不生成空 owner"
+        - "一个 durable session A 绑定 container X，另有纯 terminal container Y 与无关 session B"
+        - "从 Session Navigator 重命名 A → 只写 DurableSession(A) alias，不写 X custom title / source aliases"
+        - "A 从 X 解绑并物化到 Y → alias 跟 A 到 Y；X 绑定 B 后不继承 A alias"
+        - "重命名无 durable binding 的 X → 只写 Container(X) override；坐标复用的新 container 不继承"
+        - "provider 先发现 first_user_message，后发现原生 title → 无 alias 时显示从 first message 提升为 native title，有 alias 时始终保持 alias"
+        - "空标题只清除当前 typed subject；Escape 不 mutation、不持久化"
 
-    - name: "Resume keeps scanned title on live container"
+    - name: "Resume keeps title as a binding projection"
       steps:
         - "local 与 runtime 各有一条 indexed virtual row（Specific 扫描标题）与两个无关 virtual rows"
-        - "Resume 分配 placeholder/terminal → 种子写入 focused pane 的 custom_vertical_tabs_title，不写 Tab custom_title 作为 leaf label"
-        - "RestoreStarted alias + Refresh collapse 后 Navigator 主标题仍是扫描标题，不退化为 agent 名 / OSC prompt / environment.label"
-        - "用户再 Rename live row → Specific pane title 覆盖 indexed；清空 pane title 后再次吸收 indexed Specific"
+        - "Resume 分配 placeholder/terminal → 只恢复 PaneSessionBinding，pane custom title 保持空"
+        - "RestoreStarted identity collapse 后 Navigator 从 durable binding 继续投影扫描标题，不退化为 agent 名 / OSC prompt / environment.label"
+        - "provider 后续自动命名刷新 → 无 user alias 时显示更新；用户 Rename 后后续自动标题不再覆盖"
 
     - name: "create → activate → pin → reorder → remove → restore focus"
       steps:

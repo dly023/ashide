@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use futures_util::stream::AbortHandle;
 use std::fs;
@@ -10,11 +11,11 @@ use super::super::proto::{
     client_message, exact_rename_response, finish_file_transfer_response, list_directory_response,
     promote_files_response, read_file_chunk_response, resolve_conflict_response,
     resolve_path_response, save_buffer_response, scan_cli_agent_sessions_response, server_message,
-    write_file_chunk_response, AbortFileTransfer, AppendFile, Authenticate, BeginFileTransfer,
-    ClientMessage, CreateDirectory, DeleteDirectory, DeleteDirectoryIdentity, ErrorCode,
-    ExactRename, FileTransferDirection, FileTransferHandle, FinishFileTransfer, Initialize,
-    ListDirectory, OpenBuffer, PromoteFiles, PromotionStatus, PromotionTarget, ReadFileChunk,
-    ResolveConflict, ResolvePath, SaveBuffer, WriteFileChunk,
+    write_file_chunk_response, AbortFileTransfer, AppendFile, BeginFileTransfer, ClientMessage,
+    CreateDirectory, DeleteDirectory, DeleteDirectoryIdentity, ErrorCode, ExactRename,
+    FileTransferDirection, FileTransferHandle, FinishFileTransfer, Initialize, ListDirectory,
+    OpenBuffer, PromoteFiles, PromotionStatus, PromotionTarget, ReadFileChunk, ResolveConflict,
+    ResolvePath, SaveBuffer, WriteFileChunk,
 };
 use super::super::protocol::RequestId;
 #[cfg(feature = "local_fs")]
@@ -52,7 +53,6 @@ fn test_model() -> ServerModel {
         pending_file_ops: PendingFileOps::new(),
         #[cfg(feature = "local_fs")]
         buffers: ServerBufferTracker::new(),
-        auth_token: None,
     }
 }
 
@@ -271,7 +271,6 @@ async fn register_initialized_test_connection(
             ClientMessage {
                 request_id: request_id.clone(),
                 message: Some(client_message::Message::Initialize(Initialize {
-                    auth_token: String::new(),
                     protocol_revision: remote_server::REMOTE_SERVER_PROTOCOL_REVISION,
                 })),
             },
@@ -933,15 +932,14 @@ fn connection_starts_awaiting_initialize() {
 fn pre_initialize_business_message_is_rejected_without_side_effects() {
     let mut model = test_model();
     let conn_id = insert_test_connection(&mut model);
-    let message = Some(client_message::Message::Authenticate(Authenticate {
-        auth_token: "must-not-apply".to_string(),
+    let message = Some(client_message::Message::ListDirectory(ListDirectory {
+        path: "/".to_string(),
     }));
 
     assert_eq!(
         model.validate_connection_message(conn_id, &message),
         Err(ConnectionMessageGateError::InitializeRequired)
     );
-    assert_eq!(model.auth_token(), None);
     let connection = model.connections.get(&conn_id).unwrap();
     assert!(connection.executors.is_empty());
     assert!(connection.ptys.is_empty());
@@ -954,7 +952,6 @@ fn failed_initialize_cannot_be_bypassed_by_later_business_message() {
     let outcome = model.handle_initialize(
         conn_id,
         Initialize {
-            auth_token: "must-not-apply".to_string(),
             protocol_revision: remote_server::REMOTE_SERVER_PROTOCOL_REVISION + 1,
         },
         &request_id(),
@@ -964,14 +961,13 @@ fn failed_initialize_cannot_be_bypassed_by_later_business_message() {
         server_message::Message::Error(_)
     ));
 
-    let business = Some(client_message::Message::Authenticate(Authenticate {
-        auth_token: "still-must-not-apply".to_string(),
+    let business = Some(client_message::Message::ListDirectory(ListDirectory {
+        path: "/".to_string(),
     }));
     assert_eq!(
         model.validate_connection_message(conn_id, &business),
         Err(ConnectionMessageGateError::InitializeRequired)
     );
-    assert_eq!(model.auth_token(), None);
 }
 
 #[test]
@@ -981,7 +977,6 @@ fn duplicate_initialize_is_rejected() {
     let first = model.handle_initialize(
         conn_id,
         Initialize {
-            auth_token: String::new(),
             protocol_revision: remote_server::REMOTE_SERVER_PROTOCOL_REVISION,
         },
         &request_id(),
@@ -992,7 +987,6 @@ fn duplicate_initialize_is_rejected() {
     ));
 
     let duplicate = Some(client_message::Message::Initialize(Initialize {
-        auth_token: String::new(),
         protocol_revision: remote_server::REMOTE_SERVER_PROTOCOL_REVISION,
     }));
     assert_eq!(
@@ -1334,45 +1328,20 @@ async fn two_remote_sessions_keep_distinct_execution_contexts() {
 }
 
 #[test]
-fn fresh_model_starts_without_auth_token() {
-    let model = test_model();
-
-    assert_eq!(model.auth_token(), None);
-}
-
-#[test]
-fn initialize_with_auth_token_stores_token() {
-    let mut model = test_model();
-    let conn_id = insert_test_connection(&mut model);
-
-    model.handle_initialize(
-        conn_id,
-        Initialize {
-            auth_token: "initial-token".to_string(),
-            protocol_revision: remote_server::REMOTE_SERVER_PROTOCOL_REVISION,
-        },
-        &request_id(),
-    );
-
-    assert_eq!(model.auth_token(), Some("initial-token"));
-}
-
-#[test]
 fn initialize_marks_only_matching_revision_ready() {
     let mut model = test_model();
     let conn_id = insert_test_connection(&mut model);
     model.handle_initialize(
         conn_id,
         Initialize {
-            auth_token: String::new(),
             protocol_revision: remote_server::REMOTE_SERVER_PROTOCOL_REVISION,
         },
         &request_id(),
     );
 
     assert_eq!(model.connections[&conn_id].phase, ConnectionPhase::Ready);
-    let business = Some(client_message::Message::Authenticate(Authenticate {
-        auth_token: "rotated".to_string(),
+    let business = Some(client_message::Message::ListDirectory(ListDirectory {
+        path: "/".to_string(),
     }));
     assert_eq!(
         model.validate_connection_message(conn_id, &business),
@@ -1381,43 +1350,13 @@ fn initialize_marks_only_matching_revision_ready() {
 }
 
 #[test]
-fn rejected_duplicate_initialize_preserves_existing_auth_token() {
-    let mut model = test_model();
-    let conn_id = insert_test_connection(&mut model);
-    model.handle_initialize(
-        conn_id,
-        Initialize {
-            auth_token: "initial-token".to_string(),
-            protocol_revision: remote_server::REMOTE_SERVER_PROTOCOL_REVISION,
-        },
-        &request_id(),
-    );
-
-    let outcome = model.handle_initialize(
-        conn_id,
-        Initialize {
-            auth_token: "must-not-replace".to_string(),
-            protocol_revision: remote_server::REMOTE_SERVER_PROTOCOL_REVISION,
-        },
-        &request_id(),
-    );
-
-    assert!(matches!(
-        outcome.into_message(),
-        server_message::Message::Error(_)
-    ));
-    assert_eq!(model.auth_token(), Some("initial-token"));
-}
-
-#[test]
-fn initialize_rejects_wrong_client_protocol_revision_before_auth_mutation() {
+fn initialize_rejects_wrong_client_protocol_revision() {
     let mut model = test_model();
     let conn_id = insert_test_connection(&mut model);
 
     let outcome = model.handle_initialize(
         conn_id,
         Initialize {
-            auth_token: "must-not-be-stored".to_string(),
             protocol_revision: remote_server::REMOTE_SERVER_PROTOCOL_REVISION + 1,
         },
         &request_id(),
@@ -1428,47 +1367,10 @@ fn initialize_rejects_wrong_client_protocol_revision_before_auth_mutation() {
     };
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
     assert!(error.message.contains("protocol revision mismatch"));
-    assert_eq!(model.auth_token(), None);
-}
-
-#[test]
-fn authenticate_with_auth_token_replaces_auth_token() {
-    let mut model = test_model();
-    let conn_id = insert_test_connection(&mut model);
-    model.handle_initialize(
-        conn_id,
-        Initialize {
-            auth_token: "initial-token".to_string(),
-            protocol_revision: remote_server::REMOTE_SERVER_PROTOCOL_REVISION,
-        },
-        &request_id(),
+    assert_eq!(
+        model.connections[&conn_id].phase,
+        ConnectionPhase::AwaitingInitialize
     );
-
-    model.handle_authenticate(Authenticate {
-        auth_token: "rotated-token".to_string(),
-    });
-
-    assert_eq!(model.auth_token(), Some("rotated-token"));
-}
-
-#[test]
-fn empty_authenticate_preserves_existing_auth_token() {
-    let mut model = test_model();
-    let conn_id = insert_test_connection(&mut model);
-    model.handle_initialize(
-        conn_id,
-        Initialize {
-            auth_token: "initial-token".to_string(),
-            protocol_revision: remote_server::REMOTE_SERVER_PROTOCOL_REVISION,
-        },
-        &request_id(),
-    );
-
-    model.handle_authenticate(Authenticate {
-        auth_token: String::new(),
-    });
-
-    assert_eq!(model.auth_token(), Some("initial-token"));
 }
 
 #[cfg(feature = "local_fs")]
@@ -2833,4 +2735,27 @@ fn remote_pty_default_context_uses_target_passwd_record() {
 
     assert_eq!(defaults.home, user.dir);
     assert_eq!(defaults.shell, user.shell);
+}
+
+#[test]
+fn target_cli_agent_roots_resolve_from_login_shell_context() {
+    let defaults = super::RemotePtyUserDefaults {
+        home: PathBuf::from("/home/target"),
+        shell: PathBuf::from("/bin/zsh"),
+    };
+    let stdout = b"login banner\n\0/home/target\0.config/claude\0/srv/codex\0\0\0.pi-custom\0\0";
+
+    let roots = super::cli_agent_roots_from_login_shell_stdout(&defaults, stdout)
+        .expect("target login-shell roots must decode");
+
+    assert_eq!(roots.home_dir, "/home/target");
+    assert_eq!(roots.claude_config_dir, "/home/target/.config/claude");
+    assert_eq!(roots.codex_home, "/srv/codex");
+    assert_eq!(
+        roots.opencode_data_dir,
+        "/home/target/.local/share/opencode"
+    );
+    assert_eq!(roots.copilot_home, "/home/target/.copilot");
+    assert_eq!(roots.pi_agent_home, "/home/target/.pi-custom");
+    assert_eq!(roots.omp_agent_home, "/home/target/.omp/agent");
 }

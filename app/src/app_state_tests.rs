@@ -846,6 +846,61 @@ fn test_session_navigator_live_pane_specific_title_wins_over_indexed_specific() 
 }
 
 #[test]
+fn workspace_session_alias_subject_prefers_durable_binding_over_live_container() {
+    let live_durable = test_workspace_session(
+        "tab:0:leaf:0",
+        Some("Codex"),
+        Some("codex-session-1"),
+        true,
+        Some(300),
+    );
+    assert_eq!(
+        live_durable.alias_subject(),
+        WorkspaceSessionAliasSubject::DurableSession(
+            "local::agent:Codex:codex-session-1".to_owned()
+        )
+    );
+
+    let live_unbound = test_workspace_session("tab:0:leaf:1", None, None, true, None);
+    assert!(matches!(
+        live_unbound.alias_subject(),
+        WorkspaceSessionAliasSubject::Container(_)
+    ));
+
+    let virtual_source =
+        test_workspace_session("external:plain-history", None, None, false, Some(200));
+    assert!(matches!(
+        virtual_source.alias_subject(),
+        WorkspaceSessionAliasSubject::VirtualSource(_)
+    ));
+}
+
+#[test]
+fn test_session_navigator_provider_title_can_replace_unaliased_live_title() {
+    let live_source = test_workspace_session(
+        "tab:0:leaf:0",
+        Some("Codex"),
+        Some("codex-session-1"),
+        true,
+        Some(300),
+    );
+    let mut index_source = test_workspace_session(
+        "external-index:Codex:index-a",
+        Some("Codex"),
+        Some("codex-session-1"),
+        false,
+        Some(400),
+    );
+    index_source.label = Some("Agent native title".to_owned());
+
+    let sessions =
+        WorkspaceSessionSnapshot::merge_for_session_navigator(vec![live_source, index_source]);
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].label.as_deref(), Some("Agent native title"));
+}
+
+#[test]
 fn test_workspace_session_title_fallback_is_independent_from_resume_flow() {
     let mut generic_codex_title = test_workspace_session(
         "external-index:Codex:index-a",

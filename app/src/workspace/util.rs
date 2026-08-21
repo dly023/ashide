@@ -51,6 +51,7 @@ pub(super) struct WorkspaceMouseStates {
     pub(super) notifications_mailbox: MouseStateHandle,
     pub(super) session_config_tab_config_chip_close: MouseStateHandle,
     pub(super) tools_panel_icon: MouseStateHandle,
+    pub(super) environment_indicator: MouseStateHandle,
     pub(super) title_bar_search_bar: MouseStateHandle,
     pub(super) environment_strip_add_provider_chip: MouseStateHandle,
     pub(super) environment_provider_picker_config_button: MouseStateHandle,

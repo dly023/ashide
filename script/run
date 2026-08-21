@@ -49,15 +49,6 @@ while (( "$#" )); do
         exit 1
       fi
       ;;
-    --host-id)
-      if [ -n "$2" ] && [ "${2:0:1}" != "-" ]; then
-        export ASHIDE_CLOUD_MODE_DEFAULT_HOST="$2"
-        shift 2
-      else
-        echo "Error: Argument for $1 is missing" >&2
-        exit 1
-      fi
-      ;;
     --dev-app)
       APP_VARIANT="dev"
       shift

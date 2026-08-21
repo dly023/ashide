@@ -391,13 +391,10 @@ mod tests {
         channel::{Channel, ChannelConfig, ChannelState},
         AppId,
     };
-    use warpui::{r#async::BoxFuture, App};
+    use warpui::App;
 
     fn static_auth_context() -> Arc<RemoteServerAuthContext> {
-        Arc::new(RemoteServerAuthContext::new(
-            || -> BoxFuture<'static, Option<String>> { Box::pin(async { None }) },
-            || "user id/with spaces".to_string(),
-        ))
+        Arc::new(RemoteServerAuthContext::new(|| "user id/with spaces".to_string()))
     }
 
     #[test]
@@ -429,10 +426,7 @@ mod tests {
             .expect("ASHIDE_LR123_SSH_TARGET must name the active remote target");
         let identity_key = env::var("ASHIDE_LR123_IDENTITY_KEY")
             .expect("ASHIDE_LR123_IDENTITY_KEY must name the active remote helper identity");
-        let auth_context = Arc::new(RemoteServerAuthContext::new(
-            || -> BoxFuture<'static, Option<String>> { Box::pin(async { None }) },
-            move || identity_key.clone(),
-        ));
+        let auth_context = Arc::new(RemoteServerAuthContext::new(move || identity_key.clone()));
         let transport = SshTransport::new_with_target(socket_path, ssh_target, auth_context);
 
         App::test((), |app| async move {
@@ -454,7 +448,7 @@ mod tests {
                 .expect("remote runtime proxy must connect");
             let initialized = connection
                 .client
-                .initialize(None)
+                .initialize()
                 .await
                 .expect("remote helper must initialize");
             assert_eq!(

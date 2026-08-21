@@ -3,8 +3,8 @@
 # 跨 backend 的共享行为先在此定义，再进入 capability matrix、静态门禁和测试。
 # Session Navigator 的专用状态模型仍以 docs/SESSION_NAVIGATOR_SPEC.yaml 为权威。
 
-spec_version: 43
-last_updated: "2026-07-27"
+spec_version: 50
+last_updated: "2026-08-21"
 
 application_lifecycle_contracts:
   single_gui_process:
@@ -1066,8 +1066,9 @@ ux_matrix:
   - id: ENV-SESSION-REFRESH-INTENT-25
     scenarios:
       - "Workspace configure、delete commit 与 source mutation 后的 PassiveProjection 只刷新已有 backend cache/target，不得隐式 reconnect。"
-      - "恢复 persisted runtime Error window 后被动 refresh 保持 Error；只有用户 Refresh 提交 UserInitiated generation 才获得 reconnect 权限。"
+      - "恢复 persisted runtime Error window 后被动 refresh 保持 Error；RefreshEnvironmentSessions/UserInitiated 永不获得 connect 权限，只有目标 Environment header 的独立 ConnectEnvironment action 可启动 transport。断开后再次 Connect 由底层 transport 复用既有 authority，产品 action 层禁止另建 Reconnect。"
       - "TerminalBootstrap 与 Runtime 共用 typed refresh intent、EnvironmentTable cache commit、selection/order projection；只允许 I/O timing 不同。"
+      - "当前与非当前 Environment 可并发显式刷新；反馈 generation/spinner 按 canonical navigation_key 分区，禁止刷新前切换 active Environment 或让一个 completion 清理另一个 carrier。"
       - "禁止 refresh_generation: Option<u64> 兼任 intent；toast generation 只属于 UserInitiated。"
     required_tests: [test_restored_error_window_snapshot_does_not_implicitly_connect, test_session_navigator_source_and_user_state_use_environment_backend, test_local_and_runtime_session_user_state_share_optimistic_commit_contract, local_remote_parity_static_session_refresh_intent_guard]
 
@@ -1139,23 +1140,23 @@ ux_matrix:
     source: LR-123
     capability: "remote helper explicit bidirectional protocol revision"
     local: "客户端与当前 checkout/release helper 使用同一 REMOTE_SERVER_PROTOCOL_REVISION；Initialize 请求和响应都携带该 revision。"
-    remote: "helper 在写入 auth token 或执行任何请求前校验 client revision；客户端在接受 host_id 前校验 server revision。"
+    remote: "helper 在标记 connection Ready 或执行任何请求前校验 client revision；客户端在接受 host_id 前校验 server revision。"
     invariant: "缺失、旧版或未知 protocol revision 必须在 Initialize 阶段显式失败；protobuf unknown-field/default-value 兼容不得把不兼容 helper 伪装成成功连接。"
-    source_build_delivery: "source/dev helper 安装身份由 REMOTE_SERVER_PROTOCOL_REVISION 派生；当前 CLI-agent discovery outcome revision 使用 dev-pty-v6，禁止复用任何更低 revision helper。"
-    release_delivery: "tag release helper 安装身份必须同时包含 release version 与 REMOTE_SERVER_PROTOCOL_REVISION（当前例如 v0.3.0-pty-v6）；同一 tag 下 protocol revision 变化时不得复用旧 helper。Initialize revision 仍是最终 fail-closed 证明，不能只依赖文件名或 --version/help 探针。"
-    side_effect_order: "server revision 校验严格早于 auth_token mutation；失败连接不得改变 daemon credential 或进入业务 handler。"
-    negative_space: ["new client + old helper response missing revision", "old client + new helper request missing revision", "wrong nonzero revision", "matching revision", "auth token supplied on mismatch"]
-    verification_rule: "协议 round-trip、client rejection、server rejection/no-auth-mutation、source/dev slot、release version+protocol slot 与 static guard 必须同时覆盖。"
+    source_build_delivery: "source/dev helper 安装身份由 REMOTE_SERVER_PROTOCOL_REVISION 派生；当前 revision 使用 dev-pty-v10，禁止复用任何更低 revision helper。"
+    release_delivery: "tag release helper 安装身份必须同时包含 release version 与 REMOTE_SERVER_PROTOCOL_REVISION（当前例如 v0.3.0-pty-v10）；同一 tag 下 protocol revision 变化时不得复用旧 helper。Initialize revision 仍是最终 fail-closed 证明，不能只依赖文件名或 --version/help 探针。"
+    side_effect_order: "server revision 校验严格早于 connection Ready；失败连接不得进入业务 handler。"
+    negative_space: ["new client + old helper response missing revision", "old client + new helper request missing revision", "wrong nonzero revision", "matching revision"]
+    verification_rule: "协议 round-trip、client rejection、server rejection/no-ready-transition、source/dev slot、release version+protocol slot 与 static guard 必须同时覆盖。"
 
   - id: REMOTE-CONNECTION-HANDSHAKE-OWNERSHIP-33
     source: LR-124
     capability: "per-connection handshake state owns business-message eligibility"
-    invariant: "每条 proxy connection 的 sender、Initialize phase 与 snapshot delivery state 由同一个 ConnectionState 原子持有；只有 Ready connection 可进入 Authenticate/SessionBootstrapped/Abort 和任何业务 RPC。"
+    invariant: "每条 proxy connection 的 sender、Initialize phase 与 snapshot delivery state 由同一个 ConnectionState 原子持有；只有 Ready connection 可进入 SessionBootstrapped/Abort 和任何业务 RPC。"
     lifecycle: "register=AwaitingInitialize；matching revision Initialize 原子转 Ready；mismatch 保持 Awaiting；deregister 删除完整 ConnectionState；重复 Initialize 明确失败。"
     failure_rule: "未 Initialize、Initialize 失败或 connection 不存在时，业务请求返回 InvalidRequest 且不得创建 executor/PTY、读取或修改文件/session state；notification 也不得产生副作用。"
     owner_rule: "禁止 sender map、initialized HashSet 与 snapshot roots map 三份平行状态；连接生命周期字段必须随 ConnectionState 一起注册/注销。"
-    negative_space: ["business request before Initialize", "Authenticate before Initialize", "wrong revision then business request", "successful Initialize then business request", "duplicate Initialize", "deregister then late message"]
-    verification_rule: "逐阶段断言 phase、auth 与业务副作用；只证明正常 client 总会先 Initialize 不算 server contract。"
+    negative_space: ["business request before Initialize", "wrong revision then business request", "successful Initialize then business request", "duplicate Initialize", "deregister then late message"]
+    verification_rule: "逐阶段断言 phase 与业务副作用；只证明正常 client 总会先 Initialize 不算 server contract。"
 
   - id: REMOTE-CONNECTION-RESOURCE-OWNERSHIP-34
     source: LR-125
@@ -1622,12 +1623,12 @@ ux_matrix:
   - id: SESSION-NAVIGATOR-RESUME-COMMITTED-HOT-PATH-88
     source: LR-190
     capability: "Resume consumes the committed visible row without synchronous full-layout reprojection"
-    invariant: "用户点击已渲染 Resume row 时，action 必须直接消费 EnvironmentTable 已提交 SessionNavigatorModel；禁止在 WarpUI action 内重新遍历全部 tabs/panes、构造 LeafContents/TerminalPaneSnapshot 或重做 indexed/live/history merge。Navigator live projection 只能读取 PaneConfiguration + tab Environment（必要时做轻量 transport/conversation 查询），禁止 PaneGroup::snapshot。lifecycle dispatch（RestoreStarted/Finished、Selection、Pin 等）只读 committed model。delivery 后只允许一次 canonical Refresh+RestoreStarted 原子提交新 carrier 与 lifecycle。热路径重写必须同时继承 SN-LIVE-CONTAINER-TITLE-OWNERSHIP-60：live label 只来自 custom_vertical_tabs_title，Resume 种子化 pane title。"
+    invariant: "用户点击已渲染 Resume row 时，action 必须直接消费 EnvironmentTable 已提交 SessionNavigatorModel；禁止在 WarpUI action 内重新遍历全部 tabs/panes、构造 LeafContents/TerminalPaneSnapshot 或重做 indexed/live/history merge。Navigator live projection 只能读取 PaneConfiguration + tab Environment（必要时做轻量 transport/conversation 查询），禁止 PaneGroup::snapshot。lifecycle dispatch（RestoreStarted/Finished、Selection、Pin 等）只读 committed model。delivery 后只允许一次 canonical Refresh+RestoreStarted 原子提交新 carrier 与 lifecycle。热路径重写必须同时继承 SN-BINDING-SCOPED-ALIAS-TITLE-82：有 durable binding 时别名跟会话，Resume 只建立 binding/carrier，禁止把自动标题种子化为 container override。"
     lifecycle: "committed render row → Activate reducer → backend delivery → one post-delivery Refresh/RestoreStarted commit；后台 source/live mutation 在产生可点击 row 前已经通过 sync 提交。"
     failure_rule: "禁止 action-time speculative Refresh、display-update helper、lifecycle dispatch 内嵌 session_navigator_action_model、live_or_pending 全量 live_workspace_sessions、重复 post-delivery sync、debounce/sleep/list freeze；禁止 live projection 从 Tab custom_title/environment.label 回填 leaf label；local/runtime 只允许 delivery timing 不同。"
     negative_space: ["many tabs and panes", "large terminal block lists", "source changes after last render", "local synchronous carrier", "runtime placeholder", "failure/cancel", "target plus unrelated rows", "indirect live_workspace_sessions from Resume helpers", "group_title as leaf label", "OSC prompt overwrites scanned title"]
     verification_rule: "源码测试锁定 Activate/lifecycle dispatch 只读 committed model、live projection 不调用 PaneGroup::snapshot 且禁止 tab/env 标题回填、locator 只读 PaneConfiguration binding、finalize 只做一次 canonical Refresh+RestoreStarted；static check 必须含负向探针证明重新引入 group_title 会 fail closed；运行时采样必须证明 Resume 后 UI main thread 不被 pane snapshot/terminal snapshot 长时间占用。"
-    co_required: ["SN-LIVE-CONTAINER-TITLE-OWNERSHIP-60", "HARNESS-PARALLEL-PATH-OWNERSHIP-INHERITANCE-89"]
+    co_required: ["SN-BINDING-SCOPED-ALIAS-TITLE-82", "HARNESS-PARALLEL-PATH-OWNERSHIP-INHERITANCE-89"]
 
   - id: HARNESS-PARALLEL-PATH-OWNERSHIP-INHERITANCE-89
     source: LR-193
@@ -1682,3 +1683,57 @@ ux_matrix:
     failure_rule: "禁止按 WindowId/tab/leaf 合并 source input；禁止 Registry 缓存或持久化 Navigator membership、直接写 SessionNavigatorModel 或绕过 EnvironmentTable commit；禁止 explicit refresh 让 passive token 永久 in-flight；禁止 stale worker 清理或投递新 generation。"
     negative_space: ["three restored windows with identical local inputs", "different workspace scopes", "different observed-provider sets", "explicit refresh during passive scan", "stale completion", "closed follower window", "source missing", "scan failure", "local/runtime separation"]
     verification_rule: "focused registry tests cover matching coalescing, scope separation and explicit preemption; static checker locks the one Registry coordinator, key fields, token fanout and no direct worker outside the coordinator; runtime cold start must show one scan transaction for equal restored local windows."
+
+  - id: ENVIRONMENT-HELPER-NATIVE-DISCOVERY-87
+    source: LR-211
+    capability: "terminal-independent remote Environment session discovery with explicit failure recovery"
+    invariant: "EnvironmentTable 原子持有 indexed-session scan token、committed collection 与 discovery issue；remote adapter 只通过 current connected helper 的 typed target-roots + scan RPC 执行 discovery，不依赖 terminal execution carrier。transport/helper failure 归 Environment entry，protocol/version mismatch 具有 typed UpdateHelper remediation。"
+    lifecycle: "Connected helper → ResolveTargetCliAgentStoreRoots → Scan → current generation Complete/SourceMissing/Failed；Complete 原子替换并清除 issue，SourceMissing/Failed 保留 committed collection并持续投影 exact Environment。helper mismatch → Error(UpdateHelper) → explicit confirm/update → 展开 target HOME、校验 daemon executable ownership、终止旧 daemon、安装并连接当前 helper；取消提示不清除 recovery state。"
+    failure_rule: "禁止 discovery 先发 RunCommand、等待/创建 terminal、读取 desktop/daemon HOME、把 failure 当空集合、只发 transient toast、stale completion覆盖 current issue，或 child action 冒泡触发 header collapse。"
+    negative_space: ["zero terminals", "one unrelated terminal", "many unrelated environments", "helper unavailable", "protocol mismatch", "version mismatch", "roots resolution failure", "scan failure", "source missing", "stale completion", "modal cancel", "action click propagation"]
+    verification_rule: "protocol/client/helper tests覆盖 target passwd/login-shell roots 与 mismatch；daemon-stop command test锁定 ~/ 经 target $HOME 展开且 PID executable 必须属于 channel helper 目录；EnvironmentTable 0/1/many 状态测试锁定 collection+issue 原子语义；UI source test锁定 defer handled children、右侧持续 issue/remediation；static checker以负向 probe 禁止恢复 RunCommand/execution-carrier discovery。"
+
+  - id: SESSION-DELETE-PROVIDER-ROOT-PARITY-88
+    source: LR-212
+    capability: "provider-typed Session Navigator source mutation"
+    invariant: "发现层、local mutation 与 remote helper 共用 CliAgentStoreRoots 定义的 provider source authority。file-backed source 的 Delete/Archive 必须携带 typed Agent identity，并只允许该 provider 的正本 transcript root 与扩展名/source shape；index/database-backed source 只能进入其 provider-native mutation。"
+    lifecycle: "committed row + typed source locator → resolve one target roots snapshot → provider/source authority validation → physical mutation success → remove cached source + passive refresh；校验、I/O 或 transport 失败均回滚 optimistic reducer projection。"
+    failure_rule: "禁止 mutation 维护少于 discovery provider 的平行 root 清单；禁止远端丢弃 agent identity 后按全局路径猜 provider；禁止 symlink 越界、非 transcript 扩展名、Omp tool log、OpenCode/Cursor database entry 进入普通文件删除；禁止物理删除失败后提交 cache removal。"
+    negative_space: ["Antigravity nested transcript", "Droid dual roots", "OpenCode legacy JSON", "OpenCode SQLite root with child sessions", "Cursor exact store directory", "Cursor projects JSONL", "Omp exact bucket", "provider/path mismatch", "outside root", "symlink escape", "missing source", "remote helper protocol mismatch", "unrelated committed rows"]
+    verification_rule: "local 与 remote helper focused tests 必须覆盖 Antigravity transcript、OpenCode SQLite root+children、Cursor exact store directory 的成功删除，以及 provider/path mismatch、outside root、symlink escape、incomplete store 与 Omp/tool-log 越界拒绝；protocol round-trip 保留 Agent identity；static checker锁定唯一 shared mutation primitive、typed external-store identity 及两端唯一调用点。"
+
+  - id: ENVIRONMENT-EXPLICIT-CONNECT-PARITY-89
+    source: LR-213
+    capability: "Environment explicit Connect/Disconnect intent"
+    invariant: "产品层只暴露 authority-scoped ConnectEnvironment 与 DisconnectEnvironment。Dormant/Error 常显 Connect，Connected 显示 Refresh+Disconnect，Connecting/Installing 只显示 Disconnect；同一 authority 断开或失败后再次 Connect 才在 transport owner 内部形成 reconnect。"
+    lifecycle: "Dormant/Error + Connect → one transport generation → Connecting/Installing → Connected or Error；Disconnected section 仍按现有产品规则从 rail 移除，未来重新选择 provider 后仍派发 Connect 而非另一套 Reconnect action。"
+    failure_rule: "禁止 Refresh 启动 transport；禁止 Connect click 透传为 collapse；禁止 UI/action model 同时保留 Connect 与 Reconnect；禁止 Connecting/Installing 重入 Connect；失败必须继续由 exact Environment issue carrier 暴露。"
+    negative_space: ["Dormant", "Error", "Connected", "Connecting", "Installing", "helper update required", "connection failed", "collapsed section", "non-current Environment", "repeated click"]
+    verification_rule: "source tests锁定 action 名称、状态矩阵、右对齐顺序与 StopPropagation；static checker禁止生产源码重新出现 ReconnectEnvironment product action。"
+
+  - id: AGENT-SESSION-PHYSICAL-OBSERVATION-PARITY-90
+    source: LR-214
+    capability: "provider physical-source observation and authority-scoped discovery feedback"
+    invariant: "AgentSessionDiscoveryPlan 的 configured providers 只决定要检查哪些 provider；Complete.observed_agents 只记录本轮 provider_source_exists=true 的物理来源。从未 provision 的可选 provider 返回成功空结果且保持 unobserved；只有上一 current generation 已观察过的来源消失才返回 SourceMissing 并保留完整 committed collection。"
+    lifecycle: "configured provider → physical source absent + never observed = Complete/unobserved；physical source present = scan + Complete/observed；previously observed source absent = SourceMissing/preserve；下一次 current Complete 清除 issue。local 与 runtime helper 执行同一 plan，wire revision v10 阻止旧 helper 写出 planned-as-observed 集合。"
+    failure_rule: "禁止把 plan.providers 直接写入 Complete.providers/observed_agents；禁止一个从未安装的 Droid/Copilot/Pi 等可选 provider 让第二次全局 refresh 失败；禁止本地 authority 的 issue tooltip 使用远端措辞，或 UI 自行按 agent 猜 backend。"
+    negative_space: ["zero provisioned providers", "one present empty provider plus two absent optional providers", "records in unrelated present providers", "true previously-observed source disappearance", "local authority", "saved SSH authority", "stale generation", "protocol v9 helper"]
+    verification_rule: "failing tests先复现首轮把 absent optional provider 写入 observed、次轮 SourceMissing，以及 local issue 显示远端文案；shared plan test覆盖0/1/many provider与连续两轮；Workspace test覆盖local/runtime tooltip scope；static checker禁止planned-as-observed和硬编码远端 source issue；remote protocol/current helper slot为v10。"
+
+  - id: SESSION-NAVIGATOR-RELATIONSHIP-XRAY-PARITY-91
+    source: LR-215
+    capability: "read-only Environment/container/session/runtime relationship diagnostics"
+    invariant: "Local 与 Runtime Session Navigator 共用一个 SessionNavigatorXRay join 和一个 SessionPresence classifier。X-Ray 不创建 identity/state owner：environment/container/durable/binding/lease 各自读取既有 canonical owner；backend 差异只由 TerminalManager::runtime_diagnostics 返回 local PID 或 remote terminal SessionId。"
+    lifecycle: "committed row → resolve current/other/detached canonical owner → read exact manager diagnostics → classify Cold/StartingHere/LiveHere/LiveElsewhere/UndoRetained/Stopping/Unknown → render debug sidecar or copy JSON；任何观察都零 mutation。"
+    failure_rule: "禁止 local-only PID overlay、remote-only presence enum、render 拼 key、process-name scan、X-Ray 触发 refresh/retry/kill、把 manager/lock unavailable 伪装 Cold、把 UndoRetained 解释为 Stopping。"
+    negative_space: ["cold local history", "cold remote history", "local live PID not ready", "remote terminal SessionId", "other window owner", "runtime placeholder", "undo-retained hidden carrier", "shutdown requested", "TerminalModel exit", "manager unavailable", "two unrelated rows"]
+    verification_rule: "pure presence/identity tests + local/remote manager diagnostics tests；static checker扫描 app production source，锁定 canonical API、唯一 builder、debug-only sidecar/copy入口与 process-name/key fallback 负向 probe；cargo check 与真实 debug GUI hover/copy验证。"
+
+  - id: SESSION-NAVIGATOR-BINDING-ALIAS-PARITY-92
+    source: LR-216
+    capability: "binding-scoped alias subject and automatic title projection"
+    invariant: "Local 与 Runtime Session Navigator 共用一个 WorkspaceSessionAliasSubject resolver。有 durable binding 时默认 Rename 只写 durable session key，别名跟会话移动；无 durable binding 的 live 行才写 container override。provider title/first user message 只是可变的投影事实，不写 alias 或 pane custom title。"
+    lifecycle: "provider source/CLI event 观察 durable session → PaneSessionBinding 建立或替换 container↔session edge → alias subject 按当前 durable identity 解析 → display 按 user alias > container override > native title > first trusted user message > agent 纯投影。Some(S)→Some(T) 必须清除 S source keys；Some(S)→None 在异步过渡中保留 S，不得把未观察当删除。"
+    failure_rule: "禁止按 live/virtual 分别决定 alias owner；禁止将同一 alias 广播写到 container/durable/source 多类 key；禁止只比较 agent+command 就继承旧 session source keys；禁止 Resume 把自动标题种子化为用户 container override。"
+    negative_space: ["live durable session", "virtual durable session", "live container without session", "same container S→T under same agent", "temporary missing session id", "session moves X→Y", "old container binds unrelated session", "provider title arrives after first message", "local sidecar failure", "runtime RPC failure"]
+    verification_rule: "pure alias-subject tests覆盖 durable/container/virtual source；Workspace tests覆盖 durable alias 进入 live carrier、跨 container 保持与旧 container 不继承；binding transition tests覆盖 S→S/S→T/S→None；static checker锁定唯一 subject resolver、单 key mutation 与 Resume 无 custom title seed。"

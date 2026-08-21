@@ -60,7 +60,16 @@ enum ConnectAndHandshakeError {
     Connect(anyhow::Error),
     /// `client.initialize()` handshake failed.
     #[error("initialize: {0:#}")]
-    Initialize(anyhow::Error),
+    Initialize(crate::client::ClientError),
+    /// The initialize protocol succeeded but the release tags prove that the
+    /// target helper belongs to another desktop build.
+    #[error(
+        "remote server version mismatch (client: {client_version:?}, server: {server_version:?}); update helper"
+    )]
+    HelperVersionMismatch {
+        client_version: Option<String>,
+        server_version: String,
+    },
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -68,7 +77,19 @@ impl ConnectAndHandshakeError {
     fn phase(&self) -> RemoteServerInitPhase {
         match self {
             Self::Connect(_) => RemoteServerInitPhase::Connect,
-            Self::Initialize(_) => RemoteServerInitPhase::Initialize,
+            Self::Initialize(_) | Self::HelperVersionMismatch { .. } => {
+                RemoteServerInitPhase::Initialize
+            }
+        }
+    }
+
+    fn remediation(&self) -> RemoteServerFailureRemediation {
+        match self {
+            Self::Initialize(error) if error.requires_helper_update() => {
+                RemoteServerFailureRemediation::UpdateHelper
+            }
+            Self::HelperVersionMismatch { .. } => RemoteServerFailureRemediation::UpdateHelper,
+            Self::Connect(_) | Self::Initialize(_) => RemoteServerFailureRemediation::Reconnect,
         }
     }
 }
@@ -81,6 +102,16 @@ pub enum RemoteServerInitPhase {
     Connect,
     /// `client.initialize()` failed (protocol handshake level).
     Initialize,
+}
+
+/// The recovery action owned by an environment after connection setup fails.
+/// This is emitted as typed state so UI layers never infer helper compatibility
+/// from localized error text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteServerFailureRemediation {
+    Reconnect,
+    UpdateHelper,
 }
 
 /// The remote server client operation that failed.
@@ -199,10 +230,6 @@ pub enum RemoteSessionState {
         client: Arc<RemoteServerClient>,
         host_id: HostId,
         /// Identity key that was active when this session was established.
-        /// Used by `rotate_auth_token` to ensure token rotation notifications
-        /// are only delivered to sessions that belong to the current user
-        /// identity, preventing a stale session for a previous identity from
-        /// receiving a different user's bearer token.
         identity_key: String,
         /// The transport's owning `Child`. See `Initializing::_child`.
         #[cfg(not(target_family = "wasm"))]
@@ -263,6 +290,8 @@ pub enum RemoteServerManagerEvent {
         phase: RemoteServerInitPhase,
         /// The error message from the failed phase.
         error: String,
+        /// The explicit recovery that can make progress from this failure.
+        remediation: RemoteServerFailureRemediation,
     },
     /// This session's connection dropped. Carries `host_id` so consumers
     /// don't need to look it up from the already-transitioned state.
@@ -1018,9 +1047,6 @@ impl RemoteServerManager {
             // Wrap the transport in an Arc so it can be stored on `Connected`
             // for reconnection after a spontaneous disconnect.
             let transport: Arc<dyn RemoteTransport> = Arc::new(transport);
-            let auth_context_for_task = Arc::clone(&auth_context);
-            // Capture the identity key synchronously so it travels with the
-            // session and can be used to filter token-rotation notifications.
             let identity_key = auth_context.remote_server_identity_key();
 
             ctx.background_executor()
@@ -1029,7 +1055,6 @@ impl RemoteServerManager {
                         session_id,
                         generation,
                         &*transport,
-                        &auth_context_for_task,
                         &spawner,
                         &executor,
                     )
@@ -1052,6 +1077,7 @@ impl RemoteServerManager {
                         Err(e) => {
                             log::error!("Connection failed for session {session_id:?}: {e}");
                             let phase = e.phase();
+                            let remediation = e.remediation();
                             let error = format!("{e}");
                             let _ = spawner
                                 .spawn(move |me, ctx| {
@@ -1074,6 +1100,7 @@ impl RemoteServerManager {
                                         session_id,
                                         phase,
                                         error,
+                                        remediation,
                                     });
                                     me.mark_session_disconnected(
                                         session_id,
@@ -1095,7 +1122,7 @@ impl RemoteServerManager {
     /// 1. Calls `transport.connect()` to establish streams.
     /// 2. Transitions the session to `Initializing` and starts draining the
     ///    event channel.
-    /// 3. Runs the initialize handshake with the current auth token, if any.
+    /// 3. Runs the initialize handshake.
     ///
     /// Returns `Ok(host_id)` on success, or a phase-tagged error.
     #[cfg(not(target_family = "wasm"))]
@@ -1103,7 +1130,6 @@ impl RemoteServerManager {
         session_id: SessionId,
         generation: u64,
         transport: &dyn RemoteTransport,
-        auth_context: &RemoteServerAuthContext,
         spawner: &ModelSpawner<Self>,
         executor: &Arc<warpui::r#async::executor::Background>,
     ) -> Result<HostId, ConnectAndHandshakeError> {
@@ -1161,18 +1187,22 @@ impl RemoteServerManager {
         }
 
         // Phase 2: Initialize handshake.
-        let auth_token = auth_context.get_auth_token().await;
-        let resp = client
-            .initialize(auth_token.as_deref())
-            .await
-            .map_err(|e| ConnectAndHandshakeError::Initialize(anyhow::anyhow!("{e:#}")))?;
+        let resp = match client.initialize().await {
+            Ok(response) => response,
+            Err(error) => {
+                if error.requires_helper_update() {
+                    Self::remove_stale_remote_binary(session_id, transport).await;
+                }
+                return Err(ConnectAndHandshakeError::Initialize(error));
+            }
+        };
 
         // Version compatibility check. If the server reports a different release
         // tag than the client expects, the binary on disk is stale. Remove it so
         // the next reconnect (or explicit reconnect by the user) will reinstall.
         //
-        // `Channel::Oss`(Ashide)下临时复用官方 release 二进制,客户端自己
-        // 没有 `GIT_RELEASE_TAG`,与服务器永远不匹配,故跳过严格校验。详见
+        // `Channel::Oss`(Ashide) 下 client 没有 `GIT_RELEASE_TAG`，与 helper
+        // release version 字符串可能不一致，故跳过严格校验。详见
         // [`should_enforce_remote_version_check`] 的注释。
         let client_version = ChannelState::app_version();
         let enforce_version_check = should_enforce_remote_version_check(ChannelState::channel());
@@ -1183,24 +1213,27 @@ impl RemoteServerManager {
                 resp.server_version
             );
 
-            const REMOVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
-            if let Err(e) = transport
-                .remove_remote_server_binary()
-                .with_timeout(REMOVAL_TIMEOUT)
-                .await
-                .unwrap_or_else(|_| Err(anyhow::anyhow!("timed out after {REMOVAL_TIMEOUT:?}")))
-            {
-                log::warn!("Failed to remove stale remote binary for session {session_id:?}: {e}");
-            }
-            return Err(ConnectAndHandshakeError::Initialize(anyhow::anyhow!(
-                "remote server version mismatch (client: {client_version:?}, \
-                 server: {:?}); reconnect to reinstall",
-                resp.server_version
-            )));
+            Self::remove_stale_remote_binary(session_id, transport).await;
+            return Err(ConnectAndHandshakeError::HelperVersionMismatch {
+                client_version: client_version.map(str::to_owned),
+                server_version: resp.server_version,
+            });
         }
 
         Ok(HostId::new(resp.host_id))
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    async fn remove_stale_remote_binary(session_id: SessionId, transport: &dyn RemoteTransport) {
+        const REMOVAL_TIMEOUT: Duration = Duration::from_secs(5);
+        if let Err(error) = transport
+            .remove_remote_server_binary()
+            .with_timeout(REMOVAL_TIMEOUT)
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("timed out after {REMOVAL_TIMEOUT:?}")))
+        {
+            log::warn!("Failed to remove stale remote binary for session {session_id:?}: {error}");
+        }
     }
 
     /// Removes a session from the manager and tears down its connection.
@@ -1387,42 +1420,6 @@ impl RemoteServerManager {
         match self.sessions.get(&self.canonical_session_id(session_id)) {
             Some(RemoteSessionState::Connected { client, .. }) => Some(client),
             _ => None,
-        }
-    }
-
-    /// Rotates the daemon-wide auth credential on each connected remote host.
-    ///
-    /// Only sessions whose stored `identity_key` matches the current identity
-    /// (from `auth_context`) receive the notification. This prevents a stale
-    /// session established under a previous user identity from receiving a
-    /// newly-rotated bearer token that belongs to a different user.
-    ///
-    /// Within the matching identity, a daemon may have multiple client
-    /// connections. The credential is stored daemon-wide, so sending one
-    /// notification per connected host is sufficient.
-    pub fn rotate_auth_token(&self, token: String) {
-        let Some(ref auth_context) = self.auth_context else {
-            log::warn!("rotate_auth_token: no auth_context available, skipping");
-            return;
-        };
-        let current_identity_key = auth_context.remote_server_identity_key();
-        let mut authenticated_hosts = HashSet::new();
-        for state in self.sessions.values() {
-            let RemoteSessionState::Connected {
-                client,
-                host_id,
-                identity_key,
-                ..
-            } = state
-            else {
-                continue;
-            };
-            if identity_key != &current_identity_key {
-                continue;
-            }
-            if authenticated_hosts.insert(host_id.clone()) {
-                client.authenticate(&token);
-            }
         }
     }
 
@@ -2009,7 +2006,6 @@ impl RemoteServerManager {
         let spawner = self.spawner.clone();
         let executor = ctx.background_executor().clone();
         let transport_clone = Arc::clone(&transport);
-        let auth_context_for_task = Arc::clone(&auth_context);
 
         ctx.background_executor()
             .spawn(async move {
@@ -2033,7 +2029,6 @@ impl RemoteServerManager {
                     session_id,
                     generation,
                     &*transport_clone,
-                    &auth_context_for_task,
                     &spawner,
                     &executor,
                 )

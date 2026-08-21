@@ -46,10 +46,11 @@ use crate::terminal::view::load_ai_conversation::ConversationRestorationInNewPan
 use crate::terminal::CLIAgent;
 
 pub(crate) use crate::environment_runtime_transport::auth::RemoteServerAuthContext as EnvironmentRuntimeAuthContext;
-pub(crate) use crate::environment_runtime_transport::auth_context::server_api_auth_context as environment_runtime_auth_context;
+pub(crate) use crate::environment_runtime_transport::auth_context::environment_runtime_auth_context;
 pub(crate) use crate::environment_runtime_transport::client::ClientError as EnvironmentRuntimeClientError;
 pub(crate) use crate::environment_runtime_transport::client::RemoteServerClient as EnvironmentRuntimeClient;
 pub(crate) use crate::environment_runtime_transport::manager::RemoteServerErrorKind as EnvironmentRuntimeErrorKind;
+pub(crate) use crate::environment_runtime_transport::manager::RemoteServerFailureRemediation as EnvironmentRuntimeFailureRemediation;
 pub(crate) use crate::environment_runtime_transport::manager::RemoteServerManager as EnvironmentRuntimeTransportManager;
 #[cfg(feature = "local_fs")]
 pub(crate) use crate::environment_runtime_transport::manager::RemoteServerManagerEvent as EnvironmentRuntimeTransportEvent;
@@ -763,7 +764,7 @@ pub(crate) struct EnvironmentDisplayInfo {
     pub(crate) chip_label: Option<String>,
     pub(crate) icon_kind: EnvironmentDisplayIconKind,
     pub(crate) supports_disconnect: bool,
-    pub(crate) supports_reconnect: bool,
+    pub(crate) supports_connect: bool,
 }
 
 pub(crate) fn environment_kind_label(kind: &EnvironmentKind) -> &'static str {
@@ -825,8 +826,11 @@ pub(crate) fn environment_display_info_for_environment(
     };
     let icon_kind = capabilities.display_icon_kind;
     let supports_disconnect = capabilities.uses_runtime_transport;
-    let supports_reconnect =
-        supports_disconnect && environment.lifecycle_state != EnvironmentLifecycleState::Connected;
+    let supports_connect = supports_disconnect
+        && matches!(
+            environment.lifecycle_state,
+            EnvironmentLifecycleState::Dormant | EnvironmentLifecycleState::Error
+        );
 
     EnvironmentDisplayInfo {
         kind_label,
@@ -834,7 +838,7 @@ pub(crate) fn environment_display_info_for_environment(
         chip_label,
         icon_kind,
         supports_disconnect,
-        supports_reconnect,
+        supports_connect,
     }
 }
 
@@ -1555,47 +1559,6 @@ pub(crate) fn environment_runtime_roots_from_probe_stdout(
     })
 }
 
-fn environment_cli_agent_store_roots_from_probe_stdout(
-    stdout: Vec<u8>,
-) -> Result<CliAgentStoreRoots, String> {
-    let mut fields = stdout.split(|byte| *byte == 0);
-    let mut next_path = |label: &str| -> Result<String, String> {
-        let bytes = fields
-            .next()
-            .ok_or_else(|| format!("environment CLI-agent root probe omitted {label}"))?;
-        let path = std::str::from_utf8(bytes)
-            .map_err(|error| format!("environment CLI-agent root {label} is not UTF-8: {error}"))?;
-        if path.is_empty() {
-            return Err(format!("environment CLI-agent root {label} is empty"));
-        }
-        if !path.starts_with('/') {
-            return Err(format!(
-                "environment CLI-agent root {label} is not absolute: {path}"
-            ));
-        }
-        Ok(path.to_owned())
-    };
-    let home_dir = next_path("home_dir")?;
-    let claude_config_dir = next_path("claude_config_dir")?;
-    let codex_home = next_path("codex_home")?;
-    let opencode_data_dir = next_path("opencode_data_dir")?;
-    let copilot_home = next_path("copilot_home")?;
-    let pi_agent_home = next_path("pi_agent_home")?;
-    let omp_agent_home = next_path("omp_agent_home")?;
-    if fields.any(|field| !field.is_empty()) {
-        return Err("environment CLI-agent root probe returned unexpected extra fields".to_owned());
-    }
-    CliAgentStoreRoots::from_explicit_target_store_roots(
-        PathBuf::from(home_dir),
-        PathBuf::from(claude_config_dir),
-        PathBuf::from(codex_home),
-        PathBuf::from(opencode_data_dir),
-        PathBuf::from(copilot_home),
-        PathBuf::from(pi_agent_home),
-        PathBuf::from(omp_agent_home),
-    )
-}
-
 fn environment_cli_agent_store_roots_to_proto(
     roots: &CliAgentStoreRoots,
 ) -> crate::environment_runtime_transport::proto::CliAgentSessionStoreRoots {
@@ -1610,31 +1573,35 @@ fn environment_cli_agent_store_roots_to_proto(
     }
 }
 
-fn environment_cli_agent_store_roots_probe_command() -> &'static str {
-    "test \"${ASHIDE_SESSION_EXECUTION_CONTEXT:-}\" = 1 || { echo 'target session execution context is unavailable' >&2; exit 1; }; \
-     home=${HOME:?target session HOME is unavailable}; pwd_root=$(pwd -P) || exit $?; \
-     case \"$home\" in /*) ;; *) home=\"$pwd_root/$home\";; esac; \
-     claude=${CLAUDE_CONFIG_DIR:-$home/.claude}; case \"$claude\" in /*) ;; *) claude=\"$pwd_root/$claude\";; esac; \
-     codex=${CODEX_HOME:-$home/.codex}; case \"$codex\" in /*) ;; *) codex=\"$pwd_root/$codex\";; esac; \
-     opencode=${OPENCODE_CONFIG_DIR:-$home/.local/share/opencode}; case \"$opencode\" in /*) ;; *) opencode=\"$pwd_root/$opencode\";; esac; \
-     copilot=${COPILOT_HOME:-$home/.copilot}; case \"$copilot\" in /*) ;; *) copilot=\"$pwd_root/$copilot\";; esac; \
-     pi=${PI_CODING_AGENT_DIR:-$home/.pi/agent}; case \"$pi\" in /*) ;; *) pi=\"$pwd_root/$pi\";; esac; \
-     omp=${OMP_CODING_AGENT_DIR:-$home/.omp/agent}; case \"$omp\" in /*) ;; *) omp=\"$pwd_root/$omp\";; esac; \
-     printf '%s\\0%s\\0%s\\0%s\\0%s\\0%s\\0%s\\0' \"$home\" \"$claude\" \"$codex\" \"$opencode\" \"$copilot\" \"$pi\" \"$omp\""
-}
-
 #[cfg(not(target_family = "wasm"))]
 pub(crate) async fn resolve_environment_cli_agent_store_roots(
     client: &EnvironmentRuntimeClient,
-    session_id: SessionId,
 ) -> Result<CliAgentStoreRoots, String> {
-    let stdout = run_command_success(
-        client,
-        session_id,
-        environment_cli_agent_store_roots_probe_command().to_owned(),
-    )
-    .await?;
-    environment_cli_agent_store_roots_from_probe_stdout(stdout)
+    let response = client
+        .resolve_cli_agent_session_store_roots()
+        .await
+        .map_err(|error| format!("target CLI-agent roots request failed: {error:#}"))?;
+    match response.result {
+        Some(
+            crate::environment_runtime_transport::proto::resolve_cli_agent_session_store_roots_response::Result::Success(
+                roots,
+            ),
+        ) => CliAgentStoreRoots::from_explicit_target_store_roots(
+            PathBuf::from(roots.home_dir),
+            PathBuf::from(roots.claude_config_dir),
+            PathBuf::from(roots.codex_home),
+            PathBuf::from(roots.opencode_data_dir),
+            PathBuf::from(roots.copilot_home),
+            PathBuf::from(roots.pi_agent_home),
+            PathBuf::from(roots.omp_agent_home),
+        ),
+        Some(
+            crate::environment_runtime_transport::proto::resolve_cli_agent_session_store_roots_response::Result::Error(
+                error,
+            ),
+        ) => Err(format!("target CLI-agent roots resolution failed: {}", error.message)),
+        None => Err("target CLI-agent roots response omitted result".to_owned()),
+    }
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -1651,7 +1618,12 @@ pub(crate) async fn run_environment_cli_agent_session_source_action(
     };
     let roots = environment_cli_agent_store_roots_to_proto(&roots);
     client
-        .mutate_cli_agent_session(target.source.clone(), mutation as i32, roots)
+        .mutate_cli_agent_session(
+            target.source.clone(),
+            target.agent.to_serialized_name(),
+            mutation as i32,
+            roots,
+        )
         .await
         .map_err(|error| format!("{error:#}"))
         .and_then(|response| match response.result {
@@ -2142,12 +2114,11 @@ fn decode_environment_cli_agent_scan_success(
 #[cfg(not(target_family = "wasm"))]
 pub(crate) async fn scan_environment_cli_agent_sessions(
     client: Arc<EnvironmentRuntimeClient>,
-    session_id: SessionId,
     enabled_agents: &[crate::terminal::CLIAgent],
     previously_observed_agents: &HashSet<CLIAgent>,
     scope_paths: &[PathBuf],
 ) -> Result<EnvironmentCliAgentSessionDiscovery, String> {
-    let roots = resolve_environment_cli_agent_store_roots(&client, session_id).await?;
+    let roots = resolve_environment_cli_agent_store_roots(&client).await?;
     scan_environment_cli_agent_sessions_with_roots(
         client,
         roots,
@@ -3404,10 +3375,16 @@ mod tests {
 
     #[test]
     fn environment_cli_agent_store_roots_are_shared_by_scan_read_mutate_and_fork() {
-        let roots = environment_cli_agent_store_roots_from_probe_stdout(
-            b"/home/target\0/srv/claude-config\0/srv/codex-home\0/srv/opencode\0/srv/copilot\0/srv/pi-agent\0/srv/omp-agent\0".to_vec(),
+        let roots = CliAgentStoreRoots::from_explicit_target_store_roots(
+            PathBuf::from("/home/target"),
+            PathBuf::from("/srv/claude-config"),
+            PathBuf::from("/srv/codex-home"),
+            PathBuf::from("/srv/opencode"),
+            PathBuf::from("/srv/copilot"),
+            PathBuf::from("/srv/pi-agent"),
+            PathBuf::from("/srv/omp-agent"),
         )
-        .expect("parse target Environment roots");
+        .expect("construct target Environment roots");
 
         assert_eq!(roots.home_dir, PathBuf::from("/home/target"));
         assert_eq!(roots.claude_config_dir, PathBuf::from("/srv/claude-config"));
@@ -3425,80 +3402,6 @@ mod tests {
         assert_eq!(proto.copilot_home, "/srv/copilot");
         assert_eq!(proto.pi_agent_home, "/srv/pi-agent");
         assert_eq!(proto.omp_agent_home, "/srv/omp-agent");
-    }
-
-    #[test]
-    fn environment_cli_agent_store_root_probe_rejects_relative_or_missing_paths() {
-        let relative = environment_cli_agent_store_roots_from_probe_stdout(
-            b"/home/target\0relative-claude\0/srv/codex\0/srv/opencode\0/srv/copilot\0/srv/pi\0/srv/omp\0".to_vec(),
-        )
-        .expect_err("relative target roots must fail before RPC");
-        assert!(relative.contains("claude_config_dir is not absolute"));
-
-        let missing = environment_cli_agent_store_roots_from_probe_stdout(
-            b"/home/target\0/srv/claude\0/srv/codex\0".to_vec(),
-        )
-        .expect_err("incomplete root snapshots must fail before RPC");
-        assert!(missing.contains("opencode_data_dir"));
-    }
-
-    #[cfg(not(target_family = "wasm"))]
-    #[tokio::test]
-    async fn environment_cli_agent_roots_use_session_owned_execution_context() {
-        use crate::terminal::model::session::command_executor::{
-            ExecuteCommandOptions, LocalCommandExecutionContext, LocalCommandExecutor,
-        };
-        use crate::terminal::shell::ShellType;
-
-        let cwd = tempfile::tempdir().expect("create target session cwd");
-        let canonical_cwd = std::fs::canonicalize(cwd.path()).expect("canonical target cwd");
-        let authoritative_names = [
-            "ASHIDE_SESSION_EXECUTION_CONTEXT",
-            "HOME",
-            "PATH",
-            "CODEX_HOME",
-            "CLAUDE_CONFIG_DIR",
-        ];
-        let executor = LocalCommandExecutor::new(
-            Some(PathBuf::from("/bin/bash")),
-            ShellType::Bash,
-            LocalCommandExecutionContext {
-                working_directory: Some(cwd.path().to_path_buf()),
-                environment_variables: HashMap::from([
-                    (
-                        "ASHIDE_SESSION_EXECUTION_CONTEXT".to_owned(),
-                        "1".to_owned(),
-                    ),
-                    ("HOME".to_owned(), "relative-home".to_owned()),
-                    ("PATH".to_owned(), "/target/bin".to_owned()),
-                    ("CODEX_HOME".to_owned(), "relative-codex".to_owned()),
-                    ("CLAUDE_CONFIG_DIR".to_owned(), "relative-claude".to_owned()),
-                ]),
-                authoritative_environment_variable_names: authoritative_names
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect(),
-            },
-        );
-
-        let output = executor
-            .execute_local_command(
-                environment_cli_agent_store_roots_probe_command(),
-                None,
-                None,
-                ExecuteCommandOptions::default(),
-            )
-            .await
-            .expect("target session root probe must execute");
-        let roots = environment_cli_agent_store_roots_from_probe_stdout(output.stdout)
-            .expect("target session root probe must return complete roots");
-
-        assert_eq!(roots.home_dir, canonical_cwd.join("relative-home"));
-        assert_eq!(
-            roots.claude_config_dir,
-            canonical_cwd.join("relative-claude")
-        );
-        assert_eq!(roots.codex_home, canonical_cwd.join("relative-codex"));
     }
 
     #[test]

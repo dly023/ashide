@@ -146,8 +146,8 @@ pub trait RemoteTransport: Send + Sync + std::fmt::Debug {
     /// Called by the manager after the initialize handshake reports a
     /// version that disagrees with the client's: the file at the expected
     /// path is stale/wrong, so we remove it so the next setup sees a miss
-    /// and reinstalls from the CDN instead of looping on the same bad
-    /// binary.
+    /// and reinstalls from GitHub release (or the configured local-first
+    /// source) instead of looping on the same bad binary.
     ///
     /// [`install_binary`]: RemoteTransport::install_binary
     fn remove_remote_server_binary(

@@ -27,6 +27,7 @@ use warpui::{AppContext, SingletonEntity};
 #[schemars(rename_all = "snake_case")]
 pub enum HeaderToolbarItemKind {
     TabsPanel,
+    EnvironmentIndicator,
     ToolsPanel,
     CodeReview,
     NotificationsMailbox,
@@ -36,6 +37,7 @@ impl HeaderToolbarItemKind {
     pub fn display_label(&self) -> &'static str {
         match self {
             Self::TabsPanel => "Tabs Panel",
+            Self::EnvironmentIndicator => "Environment",
             Self::ToolsPanel => "Tools Panel",
             Self::CodeReview => "Code Review",
             Self::NotificationsMailbox => "Notifications",
@@ -45,6 +47,7 @@ impl HeaderToolbarItemKind {
     pub fn icon(&self) -> Icon {
         match self {
             Self::TabsPanel => Icon::Menu,
+            Self::EnvironmentIndicator => Icon::Laptop,
             Self::ToolsPanel => Icon::Tool2,
             Self::CodeReview => Icon::Diff,
             Self::NotificationsMailbox => Icon::Inbox,
@@ -56,7 +59,7 @@ impl HeaderToolbarItemKind {
     /// Does not check user show/hide preferences — use `is_available` for that.
     pub fn is_supported(&self, app: &AppContext) -> bool {
         match self {
-            Self::TabsPanel => {
+            Self::TabsPanel | Self::EnvironmentIndicator => {
                 FeatureFlag::VerticalTabs.is_enabled()
                     && *TabSettings::as_ref(app).use_vertical_tabs
             }
@@ -75,7 +78,7 @@ impl HeaderToolbarItemKind {
         match self {
             Self::CodeReview => *TabSettings::as_ref(app).show_code_review_button.value(),
             Self::NotificationsMailbox => *AISettings::as_ref(app).show_agent_notifications,
-            _ => true,
+            Self::TabsPanel | Self::EnvironmentIndicator | Self::ToolsPanel => true,
         }
     }
 
@@ -86,17 +89,22 @@ impl HeaderToolbarItemKind {
     }
 
     pub fn default_left() -> Vec<Self> {
-        vec![Self::TabsPanel, Self::ToolsPanel]
+        vec![Self::TabsPanel, Self::EnvironmentIndicator]
     }
 
     pub fn default_right() -> Vec<Self> {
-        vec![Self::CodeReview, Self::NotificationsMailbox]
+        vec![
+            Self::ToolsPanel,
+            Self::CodeReview,
+            Self::NotificationsMailbox,
+        ]
     }
 
     /// All toolbar item variants (availability filtering is done at the call site).
     pub fn all_items() -> Vec<Self> {
         vec![
             Self::TabsPanel,
+            Self::EnvironmentIndicator,
             Self::ToolsPanel,
             Self::CodeReview,
             Self::NotificationsMailbox,

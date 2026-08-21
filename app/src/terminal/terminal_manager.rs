@@ -1,5 +1,6 @@
 use parking_lot::FairMutex;
 use pathfinder_geometry::vector::Vector2F;
+use serde::Serialize;
 use settings::Setting as _;
 use std::{any::Any, path::PathBuf, sync::Arc};
 use warpui::{AppContext, SingletonEntity, ViewHandle};
@@ -22,6 +23,28 @@ use super::{
 };
 use crate::pane_group::pane::DetachType;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalRuntimeKind {
+    LocalPty,
+    RemoteEnvironmentPty,
+    RemoteProxy,
+    Mock,
+}
+
+/// Terminal runtime 的只读、精确诊断快照。
+///
+/// `runtime_ref` 只承载 backend 原生身份：本地由 `process_id` 表示，
+/// Environment remote 使用 transport SessionId。它不参与 Session Navigator
+/// 的逻辑身份或持久化。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct TerminalRuntimeDiagnostics {
+    pub(crate) kind: TerminalRuntimeKind,
+    pub(crate) runtime_ref: Option<String>,
+    pub(crate) process_id: Option<u32>,
+    pub(crate) shutdown_requested: bool,
+}
+
 pub trait TerminalManager: Any {
     /// Returns the backing terminal model.
     fn model(&self) -> Arc<FairMutex<TerminalModel>>;
@@ -41,6 +64,9 @@ pub trait TerminalManager: Any {
     /// This must not depend on `TerminalView` subscriptions still being live so
     /// undo-stack expiry can close terminals retained by a closed window.
     fn shutdown_pty(&mut self, app: &mut AppContext);
+
+    /// 返回 exact runtime carrier 的只读诊断；禁止据此构造 durable identity。
+    fn runtime_diagnostics(&self) -> TerminalRuntimeDiagnostics;
 
     /// Returns this [`TerminalManager`] as an [`Any`], to support downcasting.
     fn as_any(&self) -> &dyn Any;

@@ -75,6 +75,10 @@ pub(crate) enum AgentSessionDiscoverySource {
         path: PathBuf,
         provider_session_id: String,
     },
+    CursorCliStoreEntry {
+        path: PathBuf,
+        provider_session_id: String,
+    },
 }
 
 #[cfg(feature = "local_fs")]
@@ -87,6 +91,10 @@ impl AgentSessionDiscoverySource {
                 provider_session_id,
             } => format!("{}:{provider_session_id}", path.to_string_lossy()),
             Self::OpenCodeSqliteEntry {
+                path,
+                provider_session_id,
+            } => format!("{}#{provider_session_id}", path.to_string_lossy()),
+            Self::CursorCliStoreEntry {
                 path,
                 provider_session_id,
             } => format!("{}#{provider_session_id}", path.to_string_lossy()),
@@ -244,13 +252,14 @@ impl AgentSessionDiscoveryPlan {
     ) -> AgentSessionDiscoveryResult {
         if self.logical_limit == 0 {
             return AgentSessionDiscoveryResult::Complete {
-                providers: self.providers.clone(),
+                providers: Vec::new(),
                 records: Vec::new(),
             };
         }
 
         enum ProviderScan {
             Records(Vec<AgentSessionDiscoveryRecord>),
+            NotProvisioned,
             SourceMissing(AgentSessionDiscoveryProvider),
         }
 
@@ -265,23 +274,32 @@ impl AgentSessionDiscoveryPlan {
                     Ok(false) if previously_observed_providers.contains(provider) => {
                         Ok(ProviderScan::SourceMissing(*provider))
                     }
-                    Ok(_) => scan_agent_session_provider(*provider, roots, self.logical_limit)
+                    Ok(false) => Ok(ProviderScan::NotProvisioned),
+                    Ok(true) => scan_agent_session_provider(*provider, roots, self.logical_limit)
                         .map(ProviderScan::Records),
                 };
                 (*provider, provider_started_at.elapsed(), result)
             })
             .collect::<Vec<_>>();
 
+        let mut observed_providers = Vec::new();
         let mut records = Vec::new();
         for (provider, elapsed, result) in provider_scans {
             match result {
                 Ok(ProviderScan::Records(provider_records)) => {
+                    observed_providers.push(provider);
                     log::info!(
                         "Session Navigator discovery provider {provider:?} scanned {} records in {} ms",
                         provider_records.len(),
                         elapsed.as_millis(),
                     );
                     records.extend(provider_records);
+                }
+                Ok(ProviderScan::NotProvisioned) => {
+                    log::info!(
+                        "Session Navigator discovery provider {provider:?} is not provisioned after {} ms",
+                        elapsed.as_millis(),
+                    );
                 }
                 Ok(ProviderScan::SourceMissing(provider)) => {
                     log::info!(
@@ -329,7 +347,7 @@ impl AgentSessionDiscoveryPlan {
             }
         }
         AgentSessionDiscoveryResult::Complete {
-            providers: self.providers.clone(),
+            providers: observed_providers,
             records: limited,
         }
     }
@@ -359,24 +377,7 @@ pub(crate) fn provider_source_exists(
     provider: AgentSessionDiscoveryProvider,
     roots: &CliAgentStoreRoots,
 ) -> Result<bool, CliAgentSessionScanError> {
-    let paths = match provider {
-        AgentSessionDiscoveryProvider::Claude => vec![roots.claude_projects()],
-        AgentSessionDiscoveryProvider::Codex => vec![roots.codex_sessions(), roots.codex_index()],
-        AgentSessionDiscoveryProvider::Droid => {
-            vec![roots.droid_sessions(), roots.droid_projects()]
-        }
-        AgentSessionDiscoveryProvider::OpenCode => {
-            vec![
-                roots.opencode_legacy_sessions(),
-                roots.opencode_databases_dir(),
-            ]
-        }
-        AgentSessionDiscoveryProvider::Copilot => vec![roots.copilot_sessions()],
-        AgentSessionDiscoveryProvider::Pi => vec![roots.pi_sessions()],
-        AgentSessionDiscoveryProvider::Cursor => vec![roots.cursor_projects()],
-        AgentSessionDiscoveryProvider::Antigravity => vec![roots.antigravity_brain()],
-        AgentSessionDiscoveryProvider::Omp => vec![roots.omp_sessions()],
-    };
+    let paths = roots.provider_session_discovery_roots(provider.agent());
     paths.into_iter().try_fold(false, |found, path| {
         if found {
             return Ok(true);
@@ -447,13 +448,9 @@ pub(crate) fn scan_agent_session_provider(
             roots,
             parse_pi_discovery_record,
         ),
-        AgentSessionDiscoveryProvider::Cursor => scan_jsonl_provider_roots(
-            CLIAgent::CursorCli,
-            &[roots.cursor_projects()],
-            logical_limit,
-            roots,
-            parse_cursor_discovery_record,
-        ),
+        AgentSessionDiscoveryProvider::Cursor => {
+            scan_cursor_discovery_records(roots, logical_limit)
+        }
         AgentSessionDiscoveryProvider::Antigravity => scan_jsonl_provider_roots(
             CLIAgent::Antigravity,
             &[roots.antigravity_brain()],
@@ -576,7 +573,8 @@ fn parse_generic_jsonl_metadata(
     let values = read_jsonl_values_from_path(path, Some(300))?;
     let mut session_id = None;
     let mut cwd = None;
-    let mut title = None;
+    let mut provider_title = None;
+    let mut first_user_message = None;
     for value in &values {
         if session_id.is_none() {
             session_id = first_string(&[
@@ -594,21 +592,21 @@ fn parse_generic_jsonl_metadata(
                 super::parse::nested_string(value, &["data", "cwd"]),
             ]);
         }
-        if title.is_none() {
-            title = first_string(&[
+        if provider_title.is_none() {
+            provider_title = first_string(&[
                 string_field(value, "title"),
                 string_field(value, "customTitle"),
                 super::parse::nested_string(value, &["data", "title"]),
             ]);
         }
-        if title.is_none() && record_role(value) == Some("user") {
-            title = json_message_text(value);
+        if first_user_message.is_none() && record_role(value) == Some("user") {
+            first_user_message = json_message_text(value);
         }
-        if title.is_none() && string_field(value, "type") == Some("user.message") {
-            title = json_message_text(value);
+        if first_user_message.is_none() && string_field(value, "type") == Some("user.message") {
+            first_user_message = json_message_text(value);
         }
     }
-    Ok((session_id, cwd, title))
+    Ok((session_id, cwd, provider_title.or(first_user_message)))
 }
 
 #[cfg(feature = "local_fs")]
@@ -664,6 +662,13 @@ fn parse_cursor_discovery_record(
     file: RecentJsonlFile,
     roots: &CliAgentStoreRoots,
 ) -> Result<Option<AgentSessionDiscoveryRecord>, CliAgentSessionScanError> {
+    if file
+        .path
+        .components()
+        .any(|component| component.as_os_str() == "subagents")
+    {
+        return Ok(None);
+    }
     if !file
         .path
         .components()
@@ -671,7 +676,15 @@ fn parse_cursor_discovery_record(
     {
         return Ok(None);
     }
-    let (session_id, cwd, title) = parse_generic_jsonl_metadata(&file.path)?;
+    let (mut session_id, cwd, title) = parse_generic_jsonl_metadata(&file.path)?;
+    if session_id.is_none() {
+        session_id = file
+            .path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty());
+    }
     Ok(Some(generic_session_record(
         CLIAgent::CursorCli,
         file,
@@ -680,6 +693,153 @@ fn parse_cursor_discovery_record(
         title,
         cwd,
     )))
+}
+
+#[cfg(feature = "local_fs")]
+#[derive(serde::Deserialize)]
+struct CursorChatMeta {
+    title: Option<String>,
+    cwd: Option<String>,
+    #[serde(rename = "updatedAtMs")]
+    updated_at_ms: Option<i64>,
+    #[serde(rename = "createdAtMs")]
+    created_at_ms: Option<i64>,
+}
+
+#[cfg(feature = "local_fs")]
+fn scan_cursor_discovery_records(
+    roots: &CliAgentStoreRoots,
+    logical_limit: usize,
+) -> Result<Vec<AgentSessionDiscoveryRecord>, CliAgentSessionScanError> {
+    let physical_limit =
+        crate::app_state::WORKSPACE_SESSION_NAVIGATOR_PHYSICAL_SOURCE_LIMIT_PER_PROVIDER;
+    let mut records = scan_cursor_chats_store_records(roots, physical_limit)?;
+    let mut indexed_ids: HashSet<String> = records
+        .iter()
+        .map(|record| record.provider_session_id.clone())
+        .collect();
+    let jsonl_records = scan_jsonl_provider_roots(
+        CLIAgent::CursorCli,
+        &[roots.cursor_projects()],
+        logical_limit,
+        roots,
+        parse_cursor_discovery_record,
+    )?;
+    for record in jsonl_records {
+        if indexed_ids.insert(record.provider_session_id.clone()) {
+            records.push(record);
+        }
+    }
+    Ok(limit_cli_agent_session_sources(records, logical_limit))
+}
+
+#[cfg(feature = "local_fs")]
+fn scan_cursor_chats_store_records(
+    roots: &CliAgentStoreRoots,
+    physical_limit: usize,
+) -> Result<Vec<AgentSessionDiscoveryRecord>, CliAgentSessionScanError> {
+    let chats_root = roots.cursor_chats();
+    let root_metadata = match fs::symlink_metadata(&chats_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(CliAgentSessionScanError::io(
+                &chats_root,
+                "读取 Cursor CLI chats 目录",
+                error,
+            ));
+        }
+    };
+    if !root_metadata.file_type().is_dir() {
+        return Err(CliAgentSessionScanError::expected_directory(&chats_root));
+    }
+
+    let mut records = Vec::new();
+    let mut candidate_count = 0;
+    let project_entries = fs::read_dir(&chats_root).map_err(|error| {
+        CliAgentSessionScanError::io(&chats_root, "枚举 Cursor CLI project bucket", error)
+    })?;
+    for project_entry in project_entries {
+        let project_entry = project_entry.map_err(|error| {
+            CliAgentSessionScanError::io(&chats_root, "读取 Cursor CLI project bucket", error)
+        })?;
+        if !project_entry
+            .file_type()
+            .map(|file_type| file_type.is_dir())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let project_path = project_entry.path();
+        let session_entries = fs::read_dir(&project_path).map_err(|error| {
+            CliAgentSessionScanError::io(&project_path, "枚举 Cursor CLI session", error)
+        })?;
+        for session_entry in session_entries {
+            let session_entry = session_entry.map_err(|error| {
+                CliAgentSessionScanError::io(&project_path, "读取 Cursor CLI session", error)
+            })?;
+            if !session_entry
+                .file_type()
+                .map(|file_type| file_type.is_dir())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            reserve_discovery_candidate(&chats_root, &mut candidate_count, Some(physical_limit))?;
+            let session_dir = session_entry.path();
+            let store_db = session_dir.join("store.db");
+            let meta_path = session_dir.join("meta.json");
+            if !store_db.is_file() || !meta_path.is_file() {
+                continue;
+            }
+            let session_id = session_dir
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .filter(|id| !id.is_empty());
+            let Some(session_id) = session_id else {
+                continue;
+            };
+            let meta_text = fs::read_to_string(&meta_path).map_err(|error| {
+                CliAgentSessionScanError::io(&meta_path, "读取 Cursor CLI session meta", error)
+            })?;
+            let meta: CursorChatMeta = serde_json::from_str(&meta_text).map_err(|error| {
+                CliAgentSessionScanError::parse(
+                    &meta_path,
+                    "解析 Cursor CLI session meta",
+                    error.to_string(),
+                )
+            })?;
+            let modified = fs::metadata(&store_db)
+                .and_then(|metadata| metadata.modified())
+                .map(system_time_to_epoch_millis)
+                .unwrap_or(0);
+            let modified_epoch_millis = meta
+                .updated_at_ms
+                .or(meta.created_at_ms)
+                .unwrap_or(modified);
+            records.push(AgentSessionDiscoveryRecord {
+                agent: CLIAgent::CursorCli,
+                provider_session_id: session_id.clone(),
+                source: AgentSessionDiscoverySource::CursorCliStoreEntry {
+                    path: store_db,
+                    provider_session_id: session_id,
+                },
+                label: meta
+                    .title
+                    .as_deref()
+                    .and_then(super::parse::first_message_excerpt),
+                cwd: normalize_cli_agent_session_cwd(meta.cwd.as_deref(), roots),
+                modified_epoch_millis,
+            });
+        }
+    }
+    records.sort_by(|left, right| {
+        right
+            .modified_epoch_millis
+            .cmp(&left.modified_epoch_millis)
+            .then_with(|| left.provider_session_id.cmp(&right.provider_session_id))
+    });
+    Ok(records)
 }
 
 #[cfg(feature = "local_fs")]

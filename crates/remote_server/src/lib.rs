@@ -3,9 +3,9 @@
 /// Bump this whenever protobuf compatibility would preserve decoding while changing
 /// request meaning or required fields. Initialize rejects every mismatch.
 ///
-/// Revision 7 extends `CliAgentSessionStoreRoots` and discovery semantics for
-/// Droid/OpenCode/Copilot/Pi/Cursor/Antigravity persisted sessions.
-pub const REMOTE_SERVER_PROTOCOL_REVISION: u32 = 7;
+/// Revision 9 adds helper-native target-user CLI-agent store-root resolution,
+/// removing the terminal execution-context dependency from Environment discovery.
+pub const REMOTE_SERVER_PROTOCOL_REVISION: u32 = 10;
 
 pub mod auth;
 pub mod client;

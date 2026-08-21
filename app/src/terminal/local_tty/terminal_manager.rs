@@ -30,7 +30,7 @@ use crate::pane_group::TerminalViewResources;
 use crate::persistence::ModelEvent;
 
 use crate::settings::DebugSettings;
-use crate::settings::{PrivacySettings, SshSettings};
+use crate::settings::SshSettings;
 
 use crate::terminal::model::session::Sessions;
 
@@ -102,12 +102,9 @@ pub struct TerminalManager {
     #[expect(dead_code)]
     environment_runtime_controller: ModelHandle<EnvironmentRuntimeController>,
 
-    /// The process ID of the PTY. Purely used for integration tests. None if the PTY has not yet
-    /// been started.
-    #[cfg(feature = "integration_tests")]
+    /// PTY 的 exact process ID。None 表示尚未启动。
     pid: Option<u32>,
 
-    #[cfg(test)]
     shutdown_requested: bool,
 
     /// An inactive receiver for PTY reads that we can upgrade to an active
@@ -338,10 +335,8 @@ impl TerminalManager {
             pty_controller,
             environment_runtime_controller,
 
-            #[cfg(feature = "integration_tests")]
             pid: None,
 
-            #[cfg(test)]
             shutdown_requested: false,
 
             inactive_pty_reads_rx,
@@ -524,7 +519,6 @@ impl TerminalManager {
             }
         };
 
-        #[cfg(feature = "integration_tests")]
         let pid = pty.get_pid();
         #[cfg(unix)]
         let fd = pty.get_fd();
@@ -538,10 +532,7 @@ impl TerminalManager {
         );
 
         self.event_loop_handle = Some(event_loop_handle);
-        #[cfg(feature = "integration_tests")]
-        {
-            self.pid = Some(pid);
-        }
+        self.pid = Some(pid);
 
         self.view.update(ctx, |terminal_view, ctx| {
             terminal_view.on_shell_determined(ctx);
@@ -609,7 +600,6 @@ impl TerminalManager {
             .is_shell_debug_mode_enabled
             .value();
         let is_honor_ps1_enabled = *SessionSettings::as_ref(ctx).honor_ps1;
-        let is_crash_reporting_enabled = PrivacySettings::as_ref(ctx).is_crash_reporting_enabled;
 
         // The TMUX SSH wrapper supercedes the original ControlMaster wrapper.
         let enable_ssh_wrapper = if FeatureFlag::SSHTmuxWrapper.is_enabled() {
@@ -636,7 +626,6 @@ impl TerminalManager {
 
         Pty::new(
             options,
-            is_crash_reporting_enabled,
             #[cfg(windows)]
             event_loop_tx,
             ctx,
@@ -823,7 +812,6 @@ impl TerminalManager {
         });
     }
 
-    #[cfg(feature = "integration_tests")]
     pub fn pid(&self) -> Option<u32> {
         self.pid
     }
@@ -922,11 +910,12 @@ impl crate::terminal::TerminalManager for TerminalManager {
     }
 
     fn shutdown_pty(&mut self, _app: &mut AppContext) {
-        #[cfg(test)]
-        {
-            self.shutdown_requested = true;
-        }
+        self.shutdown_requested = true;
         self.shutdown_event_loop();
+    }
+
+    fn runtime_diagnostics(&self) -> crate::terminal::TerminalRuntimeDiagnostics {
+        local_terminal_runtime_diagnostics(self.pid, self.shutdown_requested)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -938,10 +927,38 @@ impl crate::terminal::TerminalManager for TerminalManager {
     }
 }
 
-#[cfg(test)]
 impl TerminalManager {
+    #[cfg(test)]
     pub(crate) fn shutdown_requested(&self) -> bool {
         self.shutdown_requested
+    }
+}
+
+fn local_terminal_runtime_diagnostics(
+    process_id: Option<u32>,
+    shutdown_requested: bool,
+) -> crate::terminal::TerminalRuntimeDiagnostics {
+    crate::terminal::TerminalRuntimeDiagnostics {
+        kind: crate::terminal::TerminalRuntimeKind::LocalPty,
+        runtime_ref: None,
+        process_id,
+        shutdown_requested,
+    }
+}
+
+#[cfg(test)]
+mod runtime_diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn local_terminal_runtime_diagnostics_exposes_pid_and_shutdown() {
+        let live = local_terminal_runtime_diagnostics(Some(4242), false);
+        assert_eq!(live.kind, crate::terminal::TerminalRuntimeKind::LocalPty);
+        assert_eq!(live.process_id, Some(4242));
+        assert!(!live.shutdown_requested);
+
+        let stopping = local_terminal_runtime_diagnostics(Some(4242), true);
+        assert!(stopping.shutdown_requested);
     }
 }
 

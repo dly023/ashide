@@ -91,6 +91,7 @@ pub(crate) mod cli_agent_sessions;
 pub use mock_terminal_manager::MockTerminalManager;
 use model_events::{ModelEvent, ModelEventDispatcher};
 pub use terminal_manager::TerminalManager;
+pub use terminal_manager::{TerminalRuntimeDiagnostics, TerminalRuntimeKind};
 
 pub use block_list_settings::*;
 pub use secret_regex_updater::CustomSecretRegexUpdater;

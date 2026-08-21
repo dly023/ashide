@@ -287,7 +287,7 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
         // Add bindings for each visibility option.
         app.register_fixed_bindings([
             FixedBinding::empty(
-                "Always show tab bar".to_string(),
+                crate::t!("settings-appearance-zen-keybinding-always-show").to_string(),
                 builder(SettingsAction::AppearancePageToggle(
                     AppearancePageAction::SetWorkspaceDecorationVisibility(
                         WorkspaceDecorationVisibility::AlwaysShow,
@@ -297,7 +297,7 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
             )
             .with_group(bindings::BindingGroup::Settings.as_str()),
             FixedBinding::empty(
-                "Hide tab bar if fullscreen".to_string(),
+                crate::t!("settings-appearance-zen-keybinding-hide-fullscreen").to_string(),
                 builder(SettingsAction::AppearancePageToggle(
                     AppearancePageAction::SetWorkspaceDecorationVisibility(
                         WorkspaceDecorationVisibility::HideFullscreen,
@@ -307,7 +307,7 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
             )
             .with_group(bindings::BindingGroup::Settings.as_str()),
             FixedBinding::empty(
-                "Only show tab bar on hover".to_string(),
+                crate::t!("settings-appearance-zen-keybinding-on-hover").to_string(),
                 builder(SettingsAction::AppearancePageToggle(
                     AppearancePageAction::SetWorkspaceDecorationVisibility(
                         WorkspaceDecorationVisibility::OnHover,
@@ -337,6 +337,15 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
     }
 
     if FeatureFlag::VerticalTabs.is_enabled() {
+        toggle_binding_pairs.push(ToggleSettingActionPair::new(
+            &crate::t!("toggle-suffix-show-session-navigator-in-restored-windows"),
+            builder(SettingsAction::AppearancePageToggle(
+                AppearancePageAction::ToggleShowVerticalTabPanelInRestoredWindows,
+            )),
+            context,
+            flags::USE_VERTICAL_TABS_FLAG,
+        ));
+    } else {
         toggle_binding_pairs.push(ToggleSettingActionPair::new(
             &crate::t!("toggle-suffix-vertical-tabs"),
             builder(SettingsAction::AppearancePageToggle(
@@ -1352,21 +1361,46 @@ impl AppearanceSettingsPageView {
         ));
 
         let tab_settings = TabSettings::as_ref(ctx);
-        let mut tab_settings_widgets: Vec<Box<dyn SettingsWidget<View = Self>>> =
-            vec![Box::new(TabIndicatorWidget::default())];
-        if FeatureFlag::FullScreenZenMode.is_enabled()
-            && tab_settings
-                .workspace_decoration_visibility
-                .is_supported_on_current_platform()
-        {
-            tab_settings_widgets.push(Box::new(ZenModeWidget::default()));
-        }
-        if FeatureFlag::TabCloseButtonOnLeft.is_enabled() {
-            tab_settings_widgets.push(Box::new(TabCloseButtonPositionWidget::default()));
-        }
-        tab_settings_widgets.push(Box::new(PreserveActiveTabColorWidget::default()));
+        let mut tab_settings_widgets: Vec<Box<dyn SettingsWidget<View = Self>>> = Vec::new();
 
         if FeatureFlag::VerticalTabs.is_enabled() {
+            tab_settings_widgets.push(Box::new(
+                ShowVerticalTabPanelInRestoredWindowsWidget::default(),
+            ));
+            tab_settings_widgets.push(Box::new(ShowTitleBarSearchBarWidget::default()));
+            tab_settings_widgets.push(Box::new(
+                UseLatestUserPromptAsConversationTitleInTabNamesWidget::default(),
+            ));
+            if FeatureFlag::ConfigurableToolbar.is_enabled() {
+                tab_settings_widgets.push(Box::new(EditToolbarWidget));
+            }
+            if FeatureFlag::FullScreenZenMode.is_enabled()
+                && tab_settings
+                    .workspace_decoration_visibility
+                    .is_supported_on_current_platform()
+            {
+                tab_settings_widgets.push(Box::new(ZenModeWidget::default()));
+            }
+            if FeatureFlag::DirectoryTabColors.is_enabled() {
+                let add_picker = ctx.add_typed_action_view(DirectoryColorAddPicker::new);
+                ctx.subscribe_to_view(&add_picker, |me, _, event, ctx| {
+                    me.handle_directory_color_add_picker_event(event, ctx);
+                });
+                tab_settings_widgets.push(Box::new(DirectoryTabColorsWidget { add_picker }));
+            }
+        } else {
+            tab_settings_widgets.push(Box::new(TabIndicatorWidget::default()));
+            if FeatureFlag::FullScreenZenMode.is_enabled()
+                && tab_settings
+                    .workspace_decoration_visibility
+                    .is_supported_on_current_platform()
+            {
+                tab_settings_widgets.push(Box::new(ZenModeWidget::default()));
+            }
+            if FeatureFlag::TabCloseButtonOnLeft.is_enabled() {
+                tab_settings_widgets.push(Box::new(TabCloseButtonPositionWidget::default()));
+            }
+            tab_settings_widgets.push(Box::new(PreserveActiveTabColorWidget::default()));
             tab_settings_widgets.push(Box::new(VerticalTabsWidget::default()));
             tab_settings_widgets.push(Box::new(
                 ShowVerticalTabPanelInRestoredWindowsWidget::default(),
@@ -1378,18 +1412,23 @@ impl AppearanceSettingsPageView {
             if FeatureFlag::ConfigurableToolbar.is_enabled() {
                 tab_settings_widgets.push(Box::new(EditToolbarWidget));
             }
-        }
-
-        if FeatureFlag::DirectoryTabColors.is_enabled() {
-            let add_picker = ctx.add_typed_action_view(DirectoryColorAddPicker::new);
-            ctx.subscribe_to_view(&add_picker, |me, _, event, ctx| {
-                me.handle_directory_color_add_picker_event(event, ctx);
-            });
-            tab_settings_widgets.push(Box::new(DirectoryTabColorsWidget { add_picker }));
+            if FeatureFlag::DirectoryTabColors.is_enabled() {
+                let add_picker = ctx.add_typed_action_view(DirectoryColorAddPicker::new);
+                ctx.subscribe_to_view(&add_picker, |me, _, event, ctx| {
+                    me.handle_directory_color_add_picker_event(event, ctx);
+                });
+                tab_settings_widgets.push(Box::new(DirectoryTabColorsWidget { add_picker }));
+            }
         }
 
         categories.push(Category::new(
-            Box::leak(crate::t!("settings-appearance-category-tabs").into_boxed_str()),
+            Box::leak(
+                if FeatureFlag::VerticalTabs.is_enabled() {
+                    crate::t!("settings-appearance-category-session-navigator").into_boxed_str()
+                } else {
+                    crate::t!("settings-appearance-category-tabs").into_boxed_str()
+                },
+            ),
             tab_settings_widgets,
         ));
 
@@ -4644,12 +4683,20 @@ impl SettingsWidget for EditToolbarWidget {
             ToggleState::Enabled,
             appearance,
         );
+        let description = Text::new_inline(
+            crate::t!("settings-appearance-tab-toolbar-layout-description"),
+            appearance.ui_font_family(),
+            12.,
+        )
+        .with_color(appearance.theme().sub_text_color(appearance.theme().background()).into())
+        .finish();
         let editor = Container::new(ChildView::new(&view.header_toolbar_inline_editor).finish())
             .with_padding_bottom(HEADER_PADDING)
             .finish();
 
         Flex::column()
-            .with_child(Container::new(label).with_margin_bottom(4.).finish())
+            .with_child(Container::new(label).with_margin_bottom(2.).finish())
+            .with_child(Container::new(description).with_margin_bottom(4.).finish())
             .with_child(editor)
             .finish()
     }
@@ -4880,7 +4927,7 @@ impl SettingsWidget for ZenModeWidget {
     type View = AppearanceSettingsPageView;
 
     fn search_terms(&self) -> &str {
-        "zen mode minimal tab bar window decoration"
+        "environment strip zen mode minimal workspace decoration chrome"
     }
 
     fn render(

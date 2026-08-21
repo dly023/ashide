@@ -168,6 +168,33 @@ pub struct PaneSessionBinding {
     pub(crate) source_identity_keys: Vec<String>,
 }
 
+/// Session Navigator Rename 当次操作的稳定语义对象。
+///
+/// 行的可见 carrier 可以是 container，但有 durable binding 时用户起的名字
+/// 属于会话，并应随会话跨 container 移动。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", content = "key", rename_all = "snake_case")]
+pub enum WorkspaceSessionAliasSubject {
+    DurableSession(String),
+    Container(String),
+    VirtualSource(String),
+}
+
+impl WorkspaceSessionAliasSubject {
+    pub fn key(&self) -> &str {
+        match self {
+            Self::DurableSession(key) | Self::Container(key) | Self::VirtualSource(key) => key,
+        }
+    }
+
+    pub fn user_state_key(&self) -> Option<&str> {
+        match self {
+            Self::DurableSession(key) | Self::VirtualSource(key) => Some(key),
+            Self::Container(_) => None,
+        }
+    }
+}
+
 impl PaneSessionBinding {
     pub(crate) fn from_workspace_session(session: &WorkspaceSessionSnapshot) -> Option<Self> {
         let binding = Self {
@@ -506,6 +533,24 @@ impl WorkspaceSessionSnapshot {
 
     pub fn stable_pin_keys(&self) -> Vec<String> {
         self.stable_user_state_keys()
+    }
+
+    /// Resolve the one owner a user Rename/ClearAlias action is allowed to mutate.
+    pub fn alias_subject(&self) -> WorkspaceSessionAliasSubject {
+        if let Some(key) = self.durable_identity_key() {
+            return WorkspaceSessionAliasSubject::DurableSession(key);
+        }
+
+        let key = self.logical_key();
+        assert!(
+            !Self::is_volatile_layout_identity_key(&key),
+            "Session Navigator alias subject 禁止使用布局 locator"
+        );
+        if self.is_live_container() {
+            WorkspaceSessionAliasSubject::Container(key)
+        } else {
+            WorkspaceSessionAliasSubject::VirtualSource(key)
+        }
     }
 
     fn is_stable_source_id(id: &str) -> bool {

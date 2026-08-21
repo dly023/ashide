@@ -34,14 +34,13 @@ use warp_util::file::FileId;
 
 use super::proto::{
     client_message, create_pty_response, delete_file_response, run_command_response,
-    server_message, write_file_response, Abort, Authenticate, ClientMessage, ClosePty, CreatePty,
-    CreatePtyError, CreatePtyResponse, CreatePtySuccess, DeleteFile, DeleteFileResponse,
-    DeleteFileSuccess, ErrorCode, ErrorResponse, FailedFileRead, FileContextProto,
-    FileOperationError, Initialize, InitializeResponse, NavigatedToDirectory,
-    NavigatedToDirectoryResponse, PtyExitedPush, PtyOutputPush, ReadFileContextResponse, ResizePty,
-    RunCommandError, RunCommandErrorCode, RunCommandRequest, RunCommandResponse, RunCommandSuccess,
-    ServerMessage, SessionBootstrapped, SessionExecutionContextDeregistered, WriteFile,
-    WriteFileResponse, WriteFileSuccess, WritePty,
+    server_message, write_file_response, Abort, ClientMessage, ClosePty, CreatePty, CreatePtyError,
+    CreatePtyResponse, CreatePtySuccess, DeleteFile, DeleteFileResponse, DeleteFileSuccess,
+    ErrorCode, ErrorResponse, FailedFileRead, FileContextProto, FileOperationError, Initialize,
+    InitializeResponse, NavigatedToDirectory, NavigatedToDirectoryResponse, PtyExitedPush,
+    PtyOutputPush, ReadFileContextResponse, ResizePty, RunCommandError, RunCommandErrorCode,
+    RunCommandRequest, RunCommandResponse, RunCommandSuccess, ServerMessage, SessionBootstrapped,
+    SessionExecutionContextDeregistered, WriteFile, WriteFileResponse, WriteFileSuccess, WritePty,
 };
 
 // Buffer-sync 相关:依赖 GlobalBufferModel,后者的 server-managed current-app 操作只在
@@ -53,7 +52,8 @@ use super::proto::{
     finish_file_transfer_response, get_cli_agent_session_user_state_response,
     list_directory_response, mutate_cli_agent_session_response,
     mutate_cli_agent_session_user_state_response, promote_files_response,
-    read_cli_agent_session_response, read_file_chunk_response, resolve_conflict_response,
+    read_cli_agent_session_response, read_file_chunk_response,
+    resolve_cli_agent_session_store_roots_response, resolve_conflict_response,
     resolve_path_response, save_buffer_response, scan_cli_agent_sessions_response,
     write_file_chunk_response, AbortFileTransfer, AbortFileTransferResponse,
     AbortFileTransferSuccess, AppendFile, AppendFileResponse, AppendFileSuccess, BeginFileTransfer,
@@ -71,7 +71,8 @@ use super::proto::{
     MutateCliAgentSessionUserStateSuccess, OpenBuffer, OpenBufferResponse, PromoteFiles,
     PromoteFilesResponse, PromoteFilesSuccess, PromotionResult, PromotionStatus,
     ReadCliAgentSession, ReadCliAgentSessionResponse, ReadCliAgentSessionSuccess, ReadFileChunk,
-    ReadFileChunkResponse, ReadFileChunkSuccess, ResolveConflict, ResolveConflictResponse,
+    ReadFileChunkResponse, ReadFileChunkSuccess, ResolveCliAgentSessionStoreRoots,
+    ResolveCliAgentSessionStoreRootsResponse, ResolveConflict, ResolveConflictResponse,
     ResolveConflictSuccess, ResolvePath, ResolvePathNotFound, ResolvePathResponse,
     ResolvePathSuccess, SaveBuffer, SaveBufferResponse, SaveBufferSuccess, ScanCliAgentSessions,
     ScanCliAgentSessionsResponse, ScanCliAgentSessionsSuccess, TextEdit, WriteFileChunk,
@@ -122,6 +123,123 @@ fn remote_pty_user_defaults() -> Result<RemotePtyUserDefaults, String> {
         home: user.dir,
         shell: user.shell,
     })
+}
+
+#[cfg(all(unix, feature = "local_fs"))]
+fn cli_agent_roots_from_login_shell_stdout(
+    defaults: &RemotePtyUserDefaults,
+    stdout: &[u8],
+) -> Result<CliAgentSessionStoreRoots, String> {
+    let marker = stdout
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or_else(|| "target login shell omitted the roots marker".to_owned())?;
+    let mut fields = stdout[marker + 1..].split(|byte| *byte == 0);
+    let mut next = |name: &str| -> Result<String, String> {
+        let bytes = fields
+            .next()
+            .ok_or_else(|| format!("target login shell omitted {name}"))?;
+        std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|error| format!("target login shell returned non-UTF-8 {name}: {error}"))
+    };
+    let shell_home = next("HOME")?;
+    let home = if shell_home.is_empty() {
+        defaults.home.clone()
+    } else {
+        PathBuf::from(shell_home)
+    };
+    if !home.is_absolute() {
+        return Err(format!("target login shell HOME is not absolute: {home:?}"));
+    }
+    let resolve = |value: String, default: PathBuf| {
+        if value.is_empty() {
+            default
+        } else {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                path
+            } else {
+                home.join(path)
+            }
+        }
+    };
+    let claude = resolve(next("CLAUDE_CONFIG_DIR")?, home.join(".claude"));
+    let codex = resolve(next("CODEX_HOME")?, home.join(".codex"));
+    let opencode = resolve(
+        next("OPENCODE_CONFIG_DIR")?,
+        home.join(".local/share/opencode"),
+    );
+    let copilot = resolve(next("COPILOT_HOME")?, home.join(".copilot"));
+    let pi = resolve(next("PI_CODING_AGENT_DIR")?, home.join(".pi/agent"));
+    let omp = resolve(next("OMP_CODING_AGENT_DIR")?, home.join(".omp/agent"));
+    Ok(CliAgentSessionStoreRoots {
+        home_dir: home.to_string_lossy().into_owned(),
+        claude_config_dir: claude.to_string_lossy().into_owned(),
+        codex_home: codex.to_string_lossy().into_owned(),
+        opencode_data_dir: opencode.to_string_lossy().into_owned(),
+        copilot_home: copilot.to_string_lossy().into_owned(),
+        pi_agent_home: pi.to_string_lossy().into_owned(),
+        omp_agent_home: omp.to_string_lossy().into_owned(),
+    })
+}
+
+#[cfg(all(unix, feature = "local_fs"))]
+fn resolve_target_cli_agent_session_store_roots() -> Result<CliAgentSessionStoreRoots, String> {
+    let defaults = remote_pty_user_defaults()?;
+    let shell_type = ShellType::from_name(&defaults.shell.to_string_lossy());
+    if !matches!(
+        shell_type,
+        Some(ShellType::Bash | ShellType::Zsh | ShellType::Fish)
+    ) {
+        return Err(format!(
+            "target login shell {:?} cannot provide CLI-agent store roots",
+            defaults.shell
+        ));
+    }
+
+    let script = match shell_type {
+        Some(ShellType::Bash | ShellType::Zsh) => {
+            "printf '\\0%s\\0%s\\0%s\\0%s\\0%s\\0%s\\0%s\\0' \"$HOME\" \"${CLAUDE_CONFIG_DIR-}\" \"${CODEX_HOME-}\" \"${OPENCODE_CONFIG_DIR-}\" \"${COPILOT_HOME-}\" \"${PI_CODING_AGENT_DIR-}\" \"${OMP_CODING_AGENT_DIR-}\""
+        }
+        Some(ShellType::Fish) => {
+            "for name in CLAUDE_CONFIG_DIR CODEX_HOME OPENCODE_CONFIG_DIR COPILOT_HOME PI_CODING_AGENT_DIR OMP_CODING_AGENT_DIR; set -q $name; or set -g $name ''; end; printf '\\0%s\\0%s\\0%s\\0%s\\0%s\\0%s\\0%s\\0' \"$HOME\" \"$CLAUDE_CONFIG_DIR\" \"$CODEX_HOME\" \"$OPENCODE_CONFIG_DIR\" \"$COPILOT_HOME\" \"$PI_CODING_AGENT_DIR\" \"$OMP_CODING_AGENT_DIR\""
+        }
+        _ => unreachable!("unsupported shell rejected above"),
+    };
+    let mut command = Command::new(&defaults.shell);
+    command
+        .arg("-l")
+        .arg("-c")
+        .arg(script)
+        .current_dir(&defaults.home)
+        .env("HOME", &defaults.home)
+        .env("SHELL", &defaults.shell);
+    for variable in [
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+        "OPENCODE_CONFIG_DIR",
+        "COPILOT_HOME",
+        "PI_CODING_AGENT_DIR",
+        "OMP_CODING_AGENT_DIR",
+    ] {
+        command.env_remove(variable);
+    }
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to run target login shell for roots: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "target login shell roots probe failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    cli_agent_roots_from_login_shell_stdout(&defaults, &output.stdout)
+}
+
+#[cfg(all(not(unix), feature = "local_fs"))]
+fn resolve_target_cli_agent_session_store_roots() -> Result<CliAgentSessionStoreRoots, String> {
+    Err("target login-shell roots discovery is unavailable on this platform".to_owned())
 }
 
 /// Outcome of dispatching a request-style `ClientMessage`.
@@ -382,13 +500,6 @@ pub struct ServerModel {
     /// buffer requests (OpenBuffer, SaveBuffer, ResolveConflict).
     #[cfg(feature = "local_fs")]
     buffers: ServerBufferTracker,
-    /// Daemon-wide bearer credential for the identity-scoped daemon.
-    ///
-    /// The token is written by Initialize when the client supplies a
-    /// non-empty credential, or by Authenticate during token rotation. It is
-    /// intentionally retained across proxy connection teardown and cleared
-    /// only by daemon process exit.
-    auth_token: Option<String>,
 }
 
 #[cfg(feature = "local_fs")]
@@ -496,7 +607,6 @@ impl ServerModel {
             pending_file_ops: PendingFileOps::new(),
             #[cfg(feature = "local_fs")]
             buffers: ServerBufferTracker::new(),
-            auth_token: None,
         };
         // Subscribe to FileModel and RepoMetadataModel events
         // file operation results and repo metadata pushes are forwarded to all
@@ -858,10 +968,6 @@ impl ServerModel {
             Some(client_message::Message::Initialize(msg)) => {
                 self.handle_initialize(conn_id, msg, &request_id)
             }
-            Some(client_message::Message::Authenticate(msg)) => {
-                self.handle_authenticate(msg);
-                return;
-            }
             Some(client_message::Message::SessionBootstrapped(msg)) => {
                 self.handle_session_bootstrapped(conn_id, msg);
                 return;
@@ -969,6 +1075,10 @@ impl ServerModel {
             #[cfg(feature = "local_fs")]
             Some(client_message::Message::PromoteFiles(msg)) => self.handle_promote_files(msg),
             #[cfg(feature = "local_fs")]
+            Some(client_message::Message::ResolveCliAgentSessionStoreRoots(msg)) => {
+                self.handle_resolve_cli_agent_session_store_roots(msg)
+            }
+            #[cfg(feature = "local_fs")]
             Some(client_message::Message::ScanCliAgentSessions(msg)) => {
                 self.handle_scan_cli_agent_sessions(msg)
             }
@@ -1006,6 +1116,7 @@ impl ServerModel {
                 | client_message::Message::FinishFileTransfer(_)
                 | client_message::Message::AbortFileTransfer(_)
                 | client_message::Message::PromoteFiles(_)
+                | client_message::Message::ResolveCliAgentSessionStoreRoots(_)
                 | client_message::Message::ScanCliAgentSessions(_)
                 | client_message::Message::ReadCliAgentSession(_)
                 | client_message::Message::MutateCliAgentSession(_)
@@ -1185,9 +1296,6 @@ impl ServerModel {
             }));
         }
         connection.phase = ConnectionPhase::Ready;
-        if !msg.auth_token.is_empty() {
-            self.auth_token = Some(msg.auth_token);
-        }
         let server_version = ChannelState::app_version().unwrap_or("").to_string();
         HandlerOutcome::Sync(server_message::Message::InitializeResponse(
             InitializeResponse {
@@ -1196,20 +1304,6 @@ impl ServerModel {
                 protocol_revision: remote_server::REMOTE_SERVER_PROTOCOL_REVISION,
             },
         ))
-    }
-
-    /// Handles `Authenticate` by replacing the daemon-wide credential.
-    /// This is a notification — no response is sent.
-    fn handle_authenticate(&mut self, msg: Authenticate) {
-        if msg.auth_token.is_empty() {
-            log::warn!("Received Authenticate notification with empty auth token; ignoring");
-            return;
-        }
-        self.auth_token = Some(msg.auth_token);
-    }
-
-    pub fn auth_token(&self) -> Option<&str> {
-        self.auth_token.as_deref()
     }
 
     /// Handles `Abort` by cancelling the in-progress request it targets.
@@ -2653,6 +2747,29 @@ impl ServerModel {
     /// Scans Claude/Codex session history natively on the daemon. Replaces the
     /// former remote-Python scan heredoc with one round trip over `std::fs`.
     #[cfg(feature = "local_fs")]
+    fn handle_resolve_cli_agent_session_store_roots(
+        &self,
+        _msg: ResolveCliAgentSessionStoreRoots,
+    ) -> HandlerOutcome {
+        let result =
+            match resolve_target_cli_agent_session_store_roots() {
+                Ok(roots) => resolve_cli_agent_session_store_roots_response::Result::Success(roots),
+                Err(message) => resolve_cli_agent_session_store_roots_response::Result::Error(
+                    FileOperationError { message },
+                ),
+            };
+        HandlerOutcome::Sync(
+            server_message::Message::ResolveCliAgentSessionStoreRootsResponse(
+                ResolveCliAgentSessionStoreRootsResponse {
+                    result: Some(result),
+                },
+            ),
+        )
+    }
+
+    /// Scans Claude/Codex session history natively on the daemon. Replaces the
+    /// former remote-Python scan heredoc with one round trip over `std::fs`.
+    #[cfg(feature = "local_fs")]
     fn handle_scan_cli_agent_sessions(&self, msg: ScanCliAgentSessions) -> HandlerOutcome {
         let ScanCliAgentSessions {
             limit,
@@ -2715,6 +2832,7 @@ impl ServerModel {
     /// Archives or deletes a session source natively on the daemon.
     #[cfg(feature = "local_fs")]
     fn handle_mutate_cli_agent_session(&self, msg: MutateCliAgentSession) -> HandlerOutcome {
+        let agent = crate::terminal::CLIAgent::from_serialized_name(&msg.agent);
         let mutation = match msg.mutation() {
             CliAgentSessionMutation::Delete => super::cli_agent_sessions::Mutation::Delete,
             // Archive and the unspecified default both archive (the client
@@ -2723,9 +2841,13 @@ impl ServerModel {
                 super::cli_agent_sessions::Mutation::Archive
             }
         };
-        let result = match cli_agent_store_roots_from_request(msg.roots).and_then(|roots| {
-            super::cli_agent_sessions::mutate_session(&msg.source, mutation, &roots)
-        }) {
+        let result = match (!matches!(agent, crate::terminal::CLIAgent::Unknown))
+            .then_some(())
+            .ok_or_else(|| "CLI-agent session mutation omitted a known Agent identity".to_owned())
+            .and_then(|()| cli_agent_store_roots_from_request(msg.roots))
+            .and_then(|roots| {
+                super::cli_agent_sessions::mutate_session(&msg.source, agent, mutation, &roots)
+            }) {
             Ok(()) => {
                 mutate_cli_agent_session_response::Result::Success(MutateCliAgentSessionSuccess {})
             }

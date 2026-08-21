@@ -5904,7 +5904,7 @@ impl SettingsWidget for NewTabPlacementWidget {
     type View = FeaturesPageView;
 
     fn search_terms(&self) -> &str {
-        "new tab placement"
+        "new environment tab placement session navigator"
     }
 
     fn render(

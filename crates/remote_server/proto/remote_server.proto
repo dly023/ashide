@@ -1,5 +1,5 @@
 // A protobuf-based API for communication between
-// the Warp client and the remote server binary.
+// the Ashide desktop client and the remote helper binary.
 //
 // Messages are length-prefixed: [4-byte little-endian length][protobuf bytes].
 
@@ -22,7 +22,6 @@ message ClientMessage {
     DeleteFile delete_file = 8;
     RunCommandRequest run_command = 9;
     ReadFileContextRequest read_file_context = 10;
-    Authenticate authenticate = 11;
     OpenBuffer open_buffer = 13;
     BufferEdit buffer_edit = 14;
     CloseBuffer close_buffer = 15;
@@ -50,6 +49,7 @@ message ClientMessage {
     AbortFileTransfer abort_file_transfer = 37;
     PromoteFiles promote_files = 38;
     SessionExecutionContextDeregistered session_execution_context_deregistered = 39;
+    ResolveCliAgentSessionStoreRoots resolve_cli_agent_session_store_roots = 40;
   }
 }
 // Top-level envelope for all server → client messages.
@@ -92,6 +92,7 @@ message ServerMessage {
     FinishFileTransferResponse finish_file_transfer_response = 35;
     AbortFileTransferResponse abort_file_transfer_response = 36;
     PromoteFilesResponse promote_files_response = 37;
+    ResolveCliAgentSessionStoreRootsResponse resolve_cli_agent_session_store_roots_response = 38;
   }
 }
 
@@ -99,21 +100,10 @@ message ServerMessage {
 
 // Sent by the client immediately after connecting to negotiate the protocol.
 message Initialize {
-  // Optional bearer token used by the daemon for Warp-server requests.
-  // Empty means no credential was available and does not clear an existing
-  // daemon credential.
-  string auth_token = 1;
+  reserved 1;
+  reserved "auth_token";
   // Exact wire/semantic protocol revision expected by this client.
   uint32 protocol_revision = 2;
-}
-
-// Sent by the client when its bearer credential rotates after initialization.
-// This is a notification (fire-and-forget) — the server does not send a response.
-message Authenticate {
-  // Optional bearer token used by the daemon for Warp-server requests.
-  // Empty means no credential was available and does not clear an existing
-  // daemon credential.
-  string auth_token = 1;
 }
 
 // Sent by the client to cancel an in-progress request.
@@ -847,6 +837,18 @@ message CliAgentSessionStoreRoots {
   string omp_agent_home = 7;
 }
 
+// Client → server: resolve provider store roots from the target OS user's
+// passwd/login-shell configuration. This host operation is deliberately
+// independent of SessionBootstrapped and terminal execution contexts.
+message ResolveCliAgentSessionStoreRoots {}
+
+message ResolveCliAgentSessionStoreRootsResponse {
+  oneof result {
+    CliAgentSessionStoreRoots success = 1;
+    FileOperationError error = 2;
+  }
+}
+
 // Client → server: scan recent Claude/Codex session files and return a
 // deduplicated, oldest-first list of records (newest-trimmed to `limit`).
 message ScanCliAgentSessions {
@@ -922,6 +924,9 @@ message MutateCliAgentSession {
   string source = 1;
   CliAgentSessionMutation mutation = 2;
   CliAgentSessionStoreRoots roots = 3;
+  // Provider identity from the discovered source locator. The helper validates
+  // source shape against this exact provider before touching the filesystem.
+  string agent = 4;
 }
 
 message MutateCliAgentSessionSuccess {}

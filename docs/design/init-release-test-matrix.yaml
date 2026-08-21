@@ -496,15 +496,15 @@ release_regression_checks:
 
   - id: REMOTE-HELPER-PROTOCOL-REVISION
     source: LR-123
-    requirement: "remote helper protocol compatibility 必须由 Initialize 双向 revision 明确证明；source/dev 与 release 安装身份都含 protocol slot；旧 client/helper、缺失字段和错误 revision 全部 fail-closed，且失败先于 auth mutation。"
+    requirement: "remote helper protocol compatibility 必须由 Initialize 双向 revision 明确证明；source/dev 与 release 安装身份都含 protocol slot；旧 client/helper、缺失字段和错误 revision 全部 fail-closed，且失败先于 connection Ready。"
     gates:
       - initialize_sends_current_protocol_revision
       - initialize_rejects_missing_server_protocol_revision
       - initialize_rejects_wrong_server_protocol_revision
-      - initialize_rejects_wrong_client_protocol_revision_before_auth_mutation
+      - initialize_rejects_wrong_client_protocol_revision
       - protocol_round_trip_preserves_revision
       - release_remote_server_slot_includes_protocol_revision
-      - oss_source_build_remote_server_binary_uses_dev_protocol_slot_v6
+      - oss_source_build_remote_server_binary_uses_dev_protocol_slot_v9
       - local_remote_parity_static_remote_protocol_revision_guard
       - real_remote_helper_current_revision_initialize_pty_and_server_file_browser
       - full_workspace_nextest

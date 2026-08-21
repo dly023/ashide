@@ -568,6 +568,39 @@ fn reconcile_display_order(
     }
 }
 
+/// A container is a carrier, not a permanent alias for every durable session it
+/// has ever hosted. When the same live container is now bound to a different
+/// durable session, detach only the container identity from the old RowId before
+/// normal reconciliation. The old durable identity keeps its RowId/order/state.
+fn detach_rebound_live_container_identities(
+    previous_sessions: &[WorkspaceSessionSnapshot],
+    observed_sessions: &[WorkspaceSessionSnapshot],
+    state: &mut SessionNavigatorState,
+) {
+    let previous_durable_by_container = previous_sessions
+        .iter()
+        .filter(|session| is_live(session))
+        .filter_map(|session| {
+            session
+                .durable_identity_key()
+                .map(|durable| (logical_key(session), durable))
+        })
+        .collect::<HashMap<_, _>>();
+
+    for session in observed_sessions.iter().filter(|session| is_live(session)) {
+        let container = logical_key(session);
+        let Some(previous_durable) = previous_durable_by_container.get(&container) else {
+            continue;
+        };
+        let Some(current_durable) = session.durable_identity_key() else {
+            continue;
+        };
+        if previous_durable != &current_durable {
+            state.row_id_by_identity.remove(&container);
+        }
+    }
+}
+
 /// Collapse backing projections that have already been explicitly aliased to
 /// the same canonical RowId. This is the materialization boundary for restore
 /// sources without a provider-native session ID: the reducer prefers the live
@@ -1014,6 +1047,7 @@ pub fn reduce(
             // 先让本帧 observed source 进入 canonical identity registry，再与上一帧
             // carrier reconcile。Restore source 暂时缺席不等于删除：只要 RowId 仍处于
             // restoring，就保留原 carrier；live carrier 出现后同 RowId collapse 为 live。
+            detach_rebound_live_container_identities(&sessions, &new_sessions, &mut state);
             reconcile_display_order(&new_sessions, &mut state);
             let mut sessions = reconcile_refresh_projection(sessions, new_sessions, &state);
             for session in &mut sessions {

@@ -837,9 +837,9 @@ if [[ -n "$activation_product_calls" ]] && ! grep -q 'EnvironmentNavigationActiv
     fail=1
 fi
 
-# LR-116: refresh side-effect permission is explicit. Passive cache projection
-# cannot reconnect a runtime; only a user-initiated refresh owns a generation
-# and transport retry permission.
+# LR-116: refresh intent is explicit, but neither passive nor user-initiated
+# session refresh may own transport reconnect permission. UserInitiated only
+# owns an authority-scoped feedback generation.
 require_contract_marker "LR-116" "ENV-SESSION-REFRESH-INTENT-25" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
 require_contract_marker "LR-116" "SN-ENV-SESSION-REFRESH-INTENT-25" docs/SESSION_NAVIGATOR_SPEC.yaml
 require_contract_marker "LR-116" "id: LR-116" docs/design/local-remote-parity-tracker.yaml
@@ -859,6 +859,21 @@ fi
 if rg -n 'refresh_generation: Option<u64>' \
     app/src/workspace/environment_backend.rs app/src/workspace/view/session_navigator.rs >/dev/null; then
     echo "[LR-116] Option refresh generation must not encode passive versus user refresh intent" >&2
+    fail=1
+fi
+if ! python3 - <<'PYCONTRACT'
+from pathlib import Path
+
+view = Path("app/src/workspace/view.rs").read_text()
+runtime_backend = view.split("impl EnvironmentBackend for RuntimeEnvironmentBackend", 1)[1]
+refresh = runtime_backend.split("fn refresh_indexed_sessions(", 1)[1]
+if "reconnect_environment_runtime_authority" in refresh:
+    raise SystemExit("runtime session refresh must not start or restart transport")
+if "reconnect it before refreshing" not in refresh:
+    raise SystemExit("disconnected runtime refresh must fail closed with reconnect guidance")
+PYCONTRACT
+then
+    echo "[LR-116] Session refresh regained transport reconnect permission" >&2
     fail=1
 fi
 
@@ -952,7 +967,7 @@ require_contract_marker "LR-118" "test_environment_projection_data_uses_canonica
 require_contract_marker "LR-118" "test_session_navigator_alias_projection_uses_canonical_environment_navigation_key" app/src/workspace/view_test.rs
 require_contract_marker "LR-118" "indexed_cli_agent_sessions_by_navigation_key" app/src/workspace/environment_table.rs
 require_contract_marker "LR-118" "cli_agent_session_user_state_by_navigation_key" app/src/workspace/environment_table.rs
-require_contract_marker "LR-118" "self.apply_workspace_session_aliases(&mut merged, &user_state, ctx);" app/src/workspace/view/session_navigator.rs
+require_contract_marker "LR-118" "self.apply_workspace_session_aliases(&mut merged, &user_state);" app/src/workspace/view/session_navigator.rs
 require_contract_marker "LR-118" "test_session_navigator_source_and_user_state_use_environment_backend" app/src/workspace/view_test.rs
 
 if rust_type_contains 'struct EnvironmentEntry' 'indexed_cli_agent_sessions|cli_agent_session_user_state' app/src/workspace/environment_table.rs; then
@@ -1140,25 +1155,25 @@ require_contract_marker "LR-123" "uint32 protocol_revision = 3;" crates/remote_s
 require_contract_marker "LR-123" "ProtocolRevisionMismatch" crates/remote_server/src/client/mod.rs
 require_rust_test_name "LR-123" "initialize_rejects_missing_server_protocol_revision" crates/remote_server/src/client_tests.rs
 require_rust_test_name "LR-123" "initialize_rejects_wrong_server_protocol_revision" crates/remote_server/src/client_tests.rs
-require_rust_test_name "LR-123" "initialize_rejects_wrong_client_protocol_revision_before_auth_mutation" app/src/remote_server/server_model_tests.rs
+require_rust_test_name "LR-123" "initialize_rejects_wrong_client_protocol_revision" app/src/remote_server/server_model_tests.rs
 require_rust_test_name "LR-123" "protocol_round_trip_preserves_revision" crates/remote_server/src/protocol_tests.rs
 require_contract_marker "LR-123" 'format!("dev-pty-v{}", crate::REMOTE_SERVER_PROTOCOL_REVISION)' crates/remote_server/src/setup.rs
-require_rust_test_name "LR-123" "oss_source_build_remote_server_binary_uses_dev_protocol_slot_v7" crates/remote_server/src/setup_tests.rs
+require_rust_test_name "LR-123" "oss_source_build_remote_server_binary_uses_dev_protocol_slot_v10" crates/remote_server/src/setup_tests.rs
 require_contract_marker "LR-123" 'format!("{version}-pty-v{}", crate::REMOTE_SERVER_PROTOCOL_REVISION)' crates/remote_server/src/setup.rs
 require_rust_test_name "LR-123" "release_remote_server_slot_includes_protocol_revision" crates/remote_server/src/setup_tests.rs
 require_rust_test_name "LR-123" "real_remote_helper_current_revision_initialize_pty_and_server_file_browser" app/src/remote_server/ssh_transport.rs
-if rg -n 'pty-v6' crates/remote_server/src app/src/remote_server >/dev/null 2>&1; then
-    echo "[LR-123] active source must not retain the obsolete v6 helper slot after protocol revision 7" >&2
+if rg -n 'pty-v(7|8|9)([^0-9]|$)' crates/remote_server/src app/src/remote_server >/dev/null 2>&1; then
+    echo "[LR-123] active source must not retain obsolete helper slots after protocol revision 10" >&2
     fail=1
 fi
-initialize_handler=$(sed -n '/fn handle_initialize(/,/fn handle_authenticate(/p' app/src/remote_server/server_model.rs)
+initialize_handler=$(sed -n '/fn handle_initialize(/,/fn handle_abort(/p' app/src/remote_server/server_model.rs)
 revision_line=$(grep -n 'protocol_revision' <<<"$initialize_handler" | head -1 | cut -d: -f1 || true)
-auth_line=$(grep -n 'self.auth_token = Some' <<<"$initialize_handler" | head -1 | cut -d: -f1 || true)
-if [[ -z "$revision_line" || -z "$auth_line" || "$revision_line" -ge "$auth_line" ]]; then
-    echo "[LR-123] server must validate protocol revision before mutating auth token" >&2
+ready_line=$(grep -n 'connection.phase = ConnectionPhase::Ready' <<<"$initialize_handler" | head -1 | cut -d: -f1 || true)
+if [[ -z "$revision_line" || -z "$ready_line" || "$revision_line" -ge "$ready_line" ]]; then
+    echo "[LR-123] server must validate protocol revision before marking connection Ready" >&2
     fail=1
 fi
-if rg -n 'dev-pty-v1' crates/remote_server/src/setup.rs crates/remote_server/src/setup_tests.rs app/src/remote_server/dev_remote_install.rs >/dev/null 2>&1; then
+if rg -n 'dev-pty-v1([^0-9]|$)' crates/remote_server/src/setup.rs crates/remote_server/src/setup_tests.rs app/src/remote_server/dev_remote_install.rs >/dev/null 2>&1; then
     echo "[LR-123] incompatible source helper path must not reuse dev-pty-v1" >&2
     fail=1
 fi
@@ -2561,11 +2576,10 @@ require_contract_marker "LR-144" "terminal runtime: session-owned command execut
 require_contract_marker "LR-144" "optional string working_directory = 4;" crates/remote_server/proto/remote_server.proto
 require_contract_marker "LR-144" "map<string, string> environment_variables = 5;" crates/remote_server/proto/remote_server.proto
 require_contract_marker "LR-144" "SessionExecutionContextDeregistered session_execution_context_deregistered = 39;" crates/remote_server/proto/remote_server.proto
-require_contract_marker "LR-144" "REMOTE_SERVER_PROTOCOL_REVISION: u32 = 7" crates/remote_server/src/lib.rs
+require_contract_marker "LR-144" "REMOTE_SERVER_PROTOCOL_REVISION: u32 = 10" crates/remote_server/src/lib.rs
 require_contract_marker "LR-144" "working_directory" app/assets/bundled/bootstrap/bash_body.sh app/assets/bundled/bootstrap/zsh_body.sh app/assets/bundled/bootstrap/fish.sh app/assets/bundled/bootstrap/pwsh.ps1
 require_contract_marker "LR-144" "codex_home" app/assets/bundled/bootstrap/bash_body.sh app/assets/bundled/bootstrap/zsh_body.sh app/assets/bundled/bootstrap/fish.sh app/assets/bundled/bootstrap/pwsh.ps1
 require_contract_marker "LR-144" "claude_config_dir" app/assets/bundled/bootstrap/bash_body.sh app/assets/bundled/bootstrap/zsh_body.sh app/assets/bundled/bootstrap/fish.sh app/assets/bundled/bootstrap/pwsh.ps1
-require_contract_marker "LR-144" "ASHIDE_SESSION_EXECUTION_CONTEXT" app/src/terminal/model/session.rs app/src/remote_server/server_model.rs app/src/workspace/environment_runtime.rs
 require_contract_marker "LR-144" "SessionExecutionRegistry" crates/remote_server/src/manager.rs
 require_contract_marker "LR-144" "register_session_execution_context" crates/remote_server/src/manager.rs app/src/workspace/environment_runtime.rs
 require_contract_marker "LR-144" "replay_transport" crates/remote_server/src/manager.rs crates/remote_server/src/manager_tests.rs
@@ -2575,7 +2589,6 @@ require_contract_marker "LR-144" "SessionExecutionContextDeregistered" crates/re
 require_contract_marker "LR-144" "environment_runtime_execution_carrier_gate" app/src/workspace/environment_runtime.rs app/src/workspace/view.rs
 require_contract_marker "LR-144" "authoritative_environment_variable_names" app/src/remote_server/server_model.rs app/src/terminal/model/session/command_executor/local_command_executor.rs
 require_contract_marker "LR-144" "command_process.env_remove(name)" app/src/terminal/model/session/command_executor/local_command_executor.rs
-require_contract_marker "LR-144" "environment_cli_agent_roots_use_session_owned_execution_context" app/src/workspace/environment_runtime.rs
 require_rust_test_name "LR-144" "terminal_bootstrap_captures_cli_agent_execution_context" app/src/terminal/model/early_output_tests.rs
 require_rust_test_name "LR-144" "session_bootstrapped_transports_target_execution_context" crates/remote_server/src/client_tests.rs
 require_rust_test_name "LR-144" "session_execution_context_deregistered_is_transported" crates/remote_server/src/client_tests.rs
@@ -2875,7 +2888,7 @@ require_contract_marker "LR-150" "id: LR-150" docs/design/local-remote-parity-tr
 require_rust_test_name "LR-150" "test_environment_runtime_reconnect_preserves_owner_session_id" app/src/workspace/view_test.rs
 require_rust_test_name "LR-150" "reconnect_preserves_owner_alias_execution_contexts" crates/remote_server/src/manager_tests.rs
 require_rust_test_name "LR-150" "test_environment_runtime_reconnect_preserves_project_explorer_session_binding" app/src/workspace/view_test.rs
-reconnect_owner_contract=$(sed -n '/fn reconnect_environment_runtime_authority(/,/pub fn reconnect_current_environment/p' app/src/workspace/view.rs)
+reconnect_owner_contract=$(sed -n '/fn reconnect_environment_runtime_authority(/,/pub fn open_environment_file_browser/p' app/src/workspace/view.rs)
 if grep -q 'disconnect_environment_runtime_state\|next_environment_runtime_session_id\|deregister_session' <<<"$reconnect_owner_contract"; then
     echo "[LR-150] retained reconnect must not teardown/deregister the canonical owner or allocate a replacement SessionId" >&2
     fail=1
@@ -2928,7 +2941,7 @@ require_rust_callsite_owners \
     "LR-152" \
     "force Environment reconnect primitive" \
     '\.reconnect_environment_runtime_authority\(' \
-    $'app/src/workspace/view.rs:reconnect_failed_environment_after_user_visible_activation\napp/src/workspace/view.rs:reconnect_environment_runtime_authority_if_transport_inactive\napp/src/workspace/view.rs:reconnect_current_environment'
+    $'app/src/workspace/view.rs:reconnect_failed_environment_after_user_visible_activation\napp/src/workspace/view.rs:handle_environment_runtime_failure\napp/src/workspace/view.rs:reconnect_environment_runtime_authority_if_transport_inactive\napp/src/workspace/view.rs:handle_action'
 if rg -U -n \
     'assert_ne!\([[:space:]]*(replacement_session_id|owner_session_id),[[:space:]]*stale_session_id' \
     app/src/workspace --glob '*test*.rs' >/dev/null 2>&1; then
@@ -3028,24 +3041,25 @@ then
     fail=1
 fi
 
-# LR-165: live pane title and virtual durable alias are distinct capabilities.
-# Opening an inline editor is not a persistence boundary; only the normalized
-# title mutation may call workspace:save_app.
-require_contract_marker "LR-165" "SN-LIVE-CONTAINER-TITLE-OWNERSHIP-60" docs/SESSION_NAVIGATOR_SPEC.yaml
-require_contract_marker "LR-165" "id: LR-165" docs/design/local-remote-parity-tracker.yaml
-require_contract_marker "LR-165" "Session Navigator: live container versus virtual alias title ownership" docs/design/local-remote-capability-matrix.csv
-require_contract_marker "LR-165" "if session.is_live_container()" app/src/workspace/view/session_navigator.rs
-require_contract_marker "LR-165" "custom_vertical_tabs_title.as_deref()" app/src/app_state.rs
-require_contract_marker "LR-165" "fn finish_tab_rename" app/src/workspace/view.rs
-require_rust_test_name "LR-165" "test_live_pane_rename_commits_on_enter_or_blur_and_escape_keeps_container_title" app/src/workspace/view_test.rs
-require_rust_test_name "LR-165" "test_environment_runtime_live_placeholder_does_not_apply_durable_alias" app/src/workspace/view_test.rs
-require_rust_test_name "LR-192" "test_resume_seeds_pane_container_title_not_tab_group_title" app/src/workspace/view_test.rs
+# LR-216: the visible row is a container, but Rename resolves its current typed
+# alias subject. Durable bindings follow the session across containers; only an
+# unbound live row writes a container override. Automatic titles remain projection facts.
+require_contract_marker "LR-216" "SN-BINDING-SCOPED-ALIAS-TITLE-82" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-216" "SESSION-NAVIGATOR-BINDING-ALIAS-PARITY-92" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
+require_contract_marker "LR-216" "id: LR-216" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-216" "Session Navigator binding-scoped alias/title" docs/design/local-remote-capability-matrix.csv
+require_contract_marker "LR-216" "WorkspaceSessionAliasSubject" app/src/app_state.rs
+require_contract_marker "LR-216" "fn alias_subject" app/src/app_state.rs
+require_contract_marker "LR-216" "custom_vertical_tabs_title.as_deref()" app/src/app_state.rs
+require_contract_marker "LR-216" "fn finish_tab_rename" app/src/workspace/view.rs
+require_rust_test_name "LR-216" "workspace_session_alias_subject_prefers_durable_binding_over_live_container" app/src/app_state_tests.rs
+require_rust_test_name "LR-216" "test_session_navigator_durable_alias_follows_session_into_live_container" app/src/workspace/view_test.rs
+require_rust_test_name "LR-216" "pane_session_binding_replaces_source_keys_only_for_exact_new_session" app/src/pane_group/pane/terminal_pane.rs
+require_rust_test_name "LR-216" "rebind_detaches_old_durable_identity_from_reused_live_container" app/src/workspace/view/session_navigator_reducer_tests.rs
+require_rust_test_name "LR-216" "generic_provider_native_title_can_arrive_after_first_user_message" app/src/cli_agent_jsonl/tests.rs
+require_rust_test_name "LR-216" "resume_does_not_persist_automatic_title_as_container_override" app/src/workspace/view_test.rs
 require_rust_test_name "LR-192" "test_session_navigator_collapse_keeps_indexed_title_when_live_label_is_generic" app/src/workspace/view/session_navigator_reducer_tests.rs
-require_rust_test_name "LR-192" "test_session_navigator_live_pane_specific_title_wins_over_indexed_specific" app/src/app_state_tests.rs
-require_contract_marker "LR-192" "SN-LIVE-CONTAINER-TITLE-OWNERSHIP-60" docs/SESSION_NAVIGATOR_SPEC.yaml
-require_contract_marker "LR-192" "id: LR-192" docs/design/local-remote-parity-tracker.yaml
-require_contract_marker "LR-192" "Session Navigator Resume scanned title ownership" docs/design/local-remote-capability-matrix.csv
-require_contract_marker "LR-192" "resume_seed_rule" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_rust_test_name "LR-216" "test_session_navigator_provider_title_can_replace_unaliased_live_title" app/src/app_state_tests.rs
 
 if rg -n 'collect_workspace_sessions_from_node\([^;]*tab\.custom_title|label: tab_title' app/src/app_state.rs; then
     echo "[LR-165] Tab group custom title is still copied into leaf/session labels" >&2
@@ -3053,8 +3067,13 @@ if rg -n 'collect_workspace_sessions_from_node\([^;]*tab\.custom_title|label: ta
 fi
 
 if ! sed -n '/fn workspace_session_alias_with_state/,/^    }/p' app/src/workspace/view/session_navigator.rs \
-    | rg -q 'session\.is_live_container\(\)'; then
-    echo "[LR-165] alias projection no longer rejects live containers" >&2
+    | rg -q 'alias_subject\(\)'; then
+    echo "[LR-216] alias projection must resolve the current typed subject" >&2
+    fail=1
+fi
+if sed -n '/fn workspace_session_alias_with_state/,/^    }/p' app/src/workspace/view/session_navigator.rs \
+    | rg -q 'is_live_container\(\)'; then
+    echo "[LR-216] alias projection must not reject a live durable binding" >&2
     fail=1
 fi
 
@@ -3699,7 +3718,7 @@ from pathlib import Path
 agent = Path("app/src/terminal/cli_agent.rs").read_text()
 discovery = Path("app/src/cli_agent_jsonl/discovery.rs").read_text()
 roots = Path("app/src/cli_agent_jsonl/roots.rs").read_text()
-remote = Path("app/src/remote_server/cli_agent_sessions.rs").read_text()
+mutation = Path("app/src/cli_agent_jsonl/mutation.rs").read_text()
 icons = Path("crates/warp_core/src/ui/icons.rs").read_text()
 
 for required in [
@@ -3712,7 +3731,6 @@ for required in [
         raise SystemExit(f"Omp discovery-resume capability contract changed: {required}")
 for required in [
     'Self::Omp => CLIAgent::Omp',
-    'AgentSessionDiscoveryProvider::Omp => vec![roots.omp_sessions()]',
     'AgentSessionDiscoveryProvider::Omp => recent_omp_session_files(',
     '.par_iter()',
     'scan_agent_session_provider(*provider, roots, self.logical_limit)',
@@ -3721,15 +3739,23 @@ for required in [
         raise SystemExit(f"Omp bounded parallel discovery contract missing: {required}")
 if 'scan_agent_session_provider(*provider, roots, usize::MAX)' in discovery:
     raise SystemExit("provider discovery must not parse unbounded records before the logical limit")
-for required in ['pub(crate) fn is_omp_session_source', 'pub(crate) fn omp_sessions']:
+for required in [
+    'pub(crate) fn is_omp_session_source',
+    'pub(crate) fn omp_sessions',
+    'CLIAgent::Omp => vec![self.omp_sessions()]',
+    'is_omp_session_source(&root, resolved_path)',
+]:
     if required not in roots:
         raise SystemExit(f"Omp authoritative store contract missing: {required}")
-for required in ['let omp_sessions = real(&roots.omp_sessions());', 'is_omp_session_source(&omp_sessions, &resolved)']:
-    if required not in remote:
-        raise SystemExit(f"remote Omp mutation authority missing: {required}")
+for required in [
+    'roots.is_authoritative_session_transcript(agent, &path)',
+    'CliAgentSessionSourceMutation::Delete => fs::remove_file(&path)',
+]:
+    if required not in mutation:
+        raise SystemExit(f"shared Omp mutation authority missing: {required}")
 if 'Icon::OmpLogo => "bundled/svg/omp.svg"' not in icons:
     raise SystemExit("Omp icon mapping missing")
-for source in [agent, discovery, roots, remote, icons]:
+for source in [agent, discovery, roots, mutation, icons]:
     if 'Jcode' in source or 'jcode' in source.lower():
         raise SystemExit("Jcode must not re-enter the native agent registry or provider path")
 OMP_DISCOVERY_GUARD
@@ -3876,8 +3902,8 @@ require_contract_marker "LR-198" "session_navigator_refresh_feedback_static_guar
 require_rust_callsite_owners \
     "LR-198" \
     "explicit Session Navigator refresh action" \
-    '\brefresh_workspace_sessions\(' \
-    $'app/src/workspace/view/session_navigator.rs:refresh_workspace_sessions\napp/src/workspace/view.rs:handle_action'
+    '\brefresh_environment_sessions\(' \
+    $'app/src/workspace/view/session_navigator.rs:refresh_environment_sessions\napp/src/workspace/view.rs:handle_action'
 if ! python3 - <<'PYCONTRACT'
 from pathlib import Path
 
@@ -3911,18 +3937,18 @@ def function_body(source: str, marker: str, next_marker: str) -> str:
 
 begin = function_body(
     navigator,
-    "pub(super) fn begin_workspace_sessions_refresh",
-    "pub(super) fn finish_workspace_sessions_refresh_if_current",
+    "pub(super) fn begin_environment_sessions_refresh",
+    "pub(super) fn finish_environment_sessions_refresh_if_current",
 )
 finish = function_body(
     navigator,
-    "pub(super) fn finish_workspace_sessions_refresh_if_current",
-    "pub(super) fn fail_workspace_sessions_refresh_if_current",
+    "pub(super) fn finish_environment_sessions_refresh_if_current",
+    "pub(super) fn fail_environment_sessions_refresh_if_current",
 )
 fail = function_body(
     navigator,
-    "pub(super) fn fail_workspace_sessions_refresh_if_current",
-    "pub(super) fn show_workspace_session_success_toast",
+    "pub(super) fn fail_environment_sessions_refresh_if_current",
+    "pub(super) fn cancel_environment_sessions_refresh",
 )
 if "DismissibleToast" in begin or "DismissibleToast" in finish:
     raise SystemExit("start/complete must not emit global Session Navigator refresh toasts")
@@ -3932,14 +3958,14 @@ if "String" in finish:
     raise SystemExit("complete/partial refresh must not accept a success message")
 
 # Source-wide caller inventory: a UI user-refresh primitive has only its
-# definition and the typed RefreshWorkspaceSessions action owner. This makes a
+# definition and the typed RefreshEnvironmentSessions action owner. This makes a
 # new setting/pin/reorder wrapper fail closed even when it is added in another file.
 production_sources = sorted(
     path
     for path in Path("app/src").rglob("*.rs")
     if "test" not in path.name and "/test_" not in path.as_posix()
 )
-needle = ".refresh_workspace_sessions(ctx)"
+needle = ".refresh_environment_sessions(authority_key, ctx)"
 locations = []
 for path in production_sources:
     for line_number, line in enumerate(path.read_text().splitlines(), 1):
@@ -3947,7 +3973,7 @@ for path in production_sources:
             locations.append(f"{path}:{line_number}")
 print("[LR-198 inventory] explicit refresh callers:", ", ".join(locations))
 if len(locations) != 1 or locations[0].split(":", 1)[0] != "app/src/workspace/view.rs":
-    raise SystemExit("only Workspace::handle_action RefreshWorkspaceSessions may invoke user refresh")
+    raise SystemExit("only Workspace::handle_action RefreshEnvironmentSessions may invoke user refresh")
 
 for passive_owner in [
     "AISettingsChangedEvent::CLIAgentHistoryEnabledAgents",
@@ -3956,7 +3982,7 @@ for passive_owner in [
     start = view.index(passive_owner) if passive_owner.startswith("AI") else navigator.index(passive_owner)
     source = view if passive_owner.startswith("AI") else navigator
     window = source[start:start + 1800]
-    if ".refresh_workspace_sessions(ctx)" in window:
+    if ".refresh_environment_sessions(" in window:
         raise SystemExit(f"passive owner must not invoke user refresh: {passive_owner}")
 if "EnvironmentSessionRefreshIntent::PassiveProjection" not in view:
     raise SystemExit("settings reconciliation must retain explicit PassiveProjection")
@@ -4274,7 +4300,7 @@ require_contract_marker "LR-190" "SN-RESUME-COMMITTED-ACTION-HOT-PATH-64" docs/S
 require_contract_marker "LR-190" "id: LR-190" docs/design/local-remote-parity-tracker.yaml
 require_contract_marker "LR-190" "Session Navigator Resume committed hot path" docs/design/local-remote-capability-matrix.csv
 require_contract_marker "LR-190" "resume_action_consumes_committed_model_without_action_time_refresh" app/src/workspace/view_test.rs
-require_contract_marker "LR-190" "SN-LIVE-CONTAINER-TITLE-OWNERSHIP-60" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-190" "SN-BINDING-SCOPED-ALIAS-TITLE-82" docs/SESSION_NAVIGATOR_SPEC.yaml
 require_contract_marker "LR-190" "co_required_ownership" docs/SESSION_NAVIGATOR_SPEC.yaml
 require_contract_marker "LR-191" "SESSION-NAVIGATOR-LIVE-AGENT-ACTIVITY-87" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
 require_contract_marker "LR-191" "SN-LIVE-CLI-AGENT-ACTIVITY-63" docs/SESSION_NAVIGATOR_SPEC.yaml
@@ -4398,10 +4424,14 @@ runtime_restore = function_body(
 )
 assert_requires(
     runtime_restore,
-    ["title_fallback_label", "allocate_environment_runtime_placeholder_tab"],
-    "runtime Resume title seed",
+    ["allocate_environment_runtime_placeholder_tab"],
+    "runtime Resume binding projection",
 )
-assert_forbids(runtime_restore, ["session.label.clone()"], "runtime Resume title seed")
+assert_forbids(
+    runtime_restore,
+    ["title_fallback_label", "workspace_session_alias"],
+    "runtime Resume must not persist an automatic/user title as container override",
+)
 
 local_restore = function_body(
     "app/src/workspace/view.rs",
@@ -4409,10 +4439,14 @@ local_restore = function_body(
 )
 assert_requires(
     local_restore,
-    ["title_fallback_label", "open_terminal_bootstrap_tab_in_environment"],
-    "local Resume title seed",
+    ["open_terminal_bootstrap_tab_in_environment"],
+    "local Resume binding projection",
 )
-assert_forbids(local_restore, ["session.label.clone()"], "local Resume title seed")
+assert_forbids(
+    local_restore,
+    ["title_fallback_label", "workspace_session_alias"],
+    "local Resume must not persist an automatic/user title as container override",
+)
 
 collapse = function_body(
     "app/src/workspace/view/session_navigator_reducer.rs",
@@ -4562,7 +4596,7 @@ require_rust_callsite_owners \
     "LR-186" \
     "remote session cache authority-scoped ownership" \
     'clear_indexed_environment_cli_agent_sessions_for_authority\(|refresh_indexed_sessions_for_authority\(|commit_indexed_environment_cli_agent_sessions\(' \
-    $'app/src/workspace/view/session_navigator.rs:commit_indexed_environment_cli_agent_sessions\napp/src/workspace/view/session_navigator.rs:clear_indexed_environment_cli_agent_sessions_for_authority\napp/src/workspace/view/session_navigator.rs:refresh_workspace_sessions\napp/src/workspace/view/session_navigator.rs:refresh_workspace_sessions_passively\napp/src/workspace/view/session_navigator.rs:refresh_indexed_sessions_for_authority\napp/src/workspace/view/session_navigator.rs:finish_workspace_session_delete_plan\napp/src/workspace/view.rs:configure_new_workspace\napp/src/workspace/view.rs:schedule_environment_cli_agent_session_source_action\napp/src/workspace/view.rs:finish_resolve_environment_runtime_root\napp/src/workspace/view.rs:remove_tab\napp/src/workspace/view.rs:disconnect_environment_runtime_state'
+    $'app/src/workspace/view/session_navigator.rs:commit_indexed_environment_cli_agent_sessions\napp/src/workspace/view/session_navigator.rs:clear_indexed_environment_cli_agent_sessions_for_authority\napp/src/workspace/view/session_navigator.rs:refresh_environment_sessions\napp/src/workspace/view/session_navigator.rs:refresh_workspace_sessions_passively\napp/src/workspace/view/session_navigator.rs:refresh_indexed_sessions_for_authority\napp/src/workspace/view/session_navigator.rs:finish_workspace_session_delete_plan\napp/src/workspace/view.rs:configure_new_workspace\napp/src/workspace/view.rs:schedule_environment_cli_agent_session_source_action\napp/src/workspace/view.rs:finish_resolve_environment_runtime_root\napp/src/workspace/view.rs:remove_tab\napp/src/workspace/view.rs:disconnect_environment_runtime_state'
 
 # LR-187: remote CLI-agent scan fields must cross the RPC boundary only as the
 # canonical serde identity. The daemon scanner owns typed provider facts; the
@@ -4577,9 +4611,9 @@ require_rust_test_name "LR-187" "remote_cli_agent_scan_rejects_command_prefix_wi
 require_rust_test_name "LR-187" "environment_cli_agent_scan_requires_serialized_agent_names" app/src/workspace/environment_runtime.rs
 require_rust_test_name "LR-187" "environment_cli_agent_scan_rejects_mixed_source_missing_outcome" app/src/workspace/environment_runtime.rs
 require_rust_test_name "LR-187" "environment_cli_agent_scan_rejects_record_without_observed_provider" app/src/workspace/environment_runtime.rs
-require_contract_marker "LR-187" "REMOTE_SERVER_PROTOCOL_REVISION 到 7" docs/design/local-remote-parity-tracker.yaml
-require_contract_marker "LR-187" "REMOTE_SERVER_PROTOCOL_REVISION: u32 = 7" crates/remote_server/src/lib.rs
-require_rust_test_name "LR-187" "oss_source_build_remote_server_binary_uses_dev_protocol_slot_v7" crates/remote_server/src/setup_tests.rs
+require_contract_marker "LR-187" "当前 revision 10" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-187" "REMOTE_SERVER_PROTOCOL_REVISION: u32 = 10" crates/remote_server/src/lib.rs
+require_rust_test_name "LR-187" "oss_source_build_remote_server_binary_uses_dev_protocol_slot_v10" crates/remote_server/src/setup_tests.rs
 if ! python3 - <<'PYCONTRACT'
 from pathlib import Path
 
@@ -4666,8 +4700,8 @@ finish_end = view.index("impl EnvironmentBackend for TerminalBootstrapEnvironmen
 finish = view[finish_start:finish_end]
 for required in [
     "commit_indexed_environment_cli_agent_session_discovery",
-    "finish_workspace_sessions_refresh_if_current",
-    "fail_workspace_sessions_refresh_if_current",
+    "finish_environment_sessions_refresh_if_current",
+    "fail_environment_sessions_refresh_if_current",
 ]:
     if required not in finish:
         raise SystemExit(f"local scan recipient commit helper lost lifecycle delivery: {required}")
@@ -4770,7 +4804,7 @@ require_rust_callsite_owners \
     "LR-199" \
     "passive provider discovery semantic trigger ownership" \
     'refresh_indexed_sessions_for_authority\(' \
-    $'app/src/workspace/view/session_navigator.rs:refresh_workspace_sessions\napp/src/workspace/view/session_navigator.rs:refresh_workspace_sessions_passively\napp/src/workspace/view/session_navigator.rs:refresh_indexed_sessions_for_authority\napp/src/workspace/view/session_navigator.rs:finish_workspace_session_delete_plan\napp/src/workspace/view.rs:configure_new_workspace\napp/src/workspace/view.rs:schedule_environment_cli_agent_session_source_action\napp/src/workspace/view.rs:finish_resolve_environment_runtime_root\napp/src/workspace/view.rs:remove_tab'
+    $'app/src/workspace/view/session_navigator.rs:refresh_environment_sessions\napp/src/workspace/view/session_navigator.rs:refresh_workspace_sessions_passively\napp/src/workspace/view/session_navigator.rs:refresh_indexed_sessions_for_authority\napp/src/workspace/view/session_navigator.rs:finish_workspace_session_delete_plan\napp/src/workspace/view.rs:configure_new_workspace\napp/src/workspace/view.rs:schedule_environment_cli_agent_session_source_action\napp/src/workspace/view.rs:finish_resolve_environment_runtime_root\napp/src/workspace/view.rs:remove_tab'
 if ! python3 - <<'PYCONTRACT'
 from pathlib import Path
 
@@ -4855,23 +4889,30 @@ then
 fi
 
 
-# LR-194: Omp 的发现 source shape 也是 remote helper 的 mutation authority。
-# 不能只扩大目录 root，否则 nested tool log 会绕过 source-shape gate；所有
-# native file delete 必须仍集中到 mutate_file → ensure_allowed。
+# LR-194: Omp 的 discovery/mutation 都进入 CliAgentStoreRoots 的同一个
+# provider source-shape policy；local/helper 不得恢复各自的 allow-list 或
+# filesystem side-effect primitive。
 if ! python3 - <<'PYCONTRACT'
 import re
 from pathlib import Path
 
 roots = Path("app/src/cli_agent_jsonl/roots.rs").read_text()
 discovery = Path("app/src/cli_agent_jsonl/discovery.rs").read_text()
+mutation = Path("app/src/cli_agent_jsonl/mutation.rs").read_text()
 remote = Path("app/src/remote_server/cli_agent_sessions.rs").read_text()
 
 def function_body(source: str, name: str) -> str:
     start = source.index(f"fn {name}(")
-    next_match = re.search(r"\nfn [A-Za-z_]", source[start + 1:])
-    if next_match is None:
-        return source[start:]
-    return source[start:start + 1 + next_match.start()]
+    brace = source.index("{", start)
+    depth = 0
+    for index in range(brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+    raise ValueError(f"unterminated function: {name}")
 
 omp_shape = function_body(roots, "is_omp_session_source")
 for required in [
@@ -4884,19 +4925,34 @@ for required in [
 if "|path| is_omp_session_source(root, path)" not in discovery:
     raise SystemExit("Omp discovery must reuse the native mutation source predicate")
 
-allow = function_body(remote, "ensure_allowed")
-for required in [
-    "let omp_sessions = real(&roots.omp_sessions());",
-    "is_omp_session_source(&omp_sessions, &resolved)",
-]:
-    if required not in allow:
-        raise SystemExit(f"remote helper allow-list must reuse Omp source shape: {required}")
+authority = function_body(roots, "is_authoritative_session_transcript")
+for required in ["CLIAgent::Omp", "is_omp_session_source(&root, resolved_path)"]:
+    if required not in authority:
+        raise SystemExit(f"shared provider authority must retain Omp source shape: {required}")
 
-mutation = function_body(remote, "mutate_file")
-if "let path = ensure_allowed(source, roots)?;" not in mutation:
-    raise SystemExit("native file mutation must pass through ensure_allowed")
-if mutation.count("std::fs::remove_file(&path)") != 1:
-    raise SystemExit("native CLI-agent delete must retain exactly one canonical primitive")
+def authority_contract(source: str) -> bool:
+    body = function_body(source, "is_authoritative_session_transcript")
+    return "CLIAgent::Omp" in body and "is_omp_session_source(&root, resolved_path)" in body
+
+negative_probe = roots.replace(
+    "is_omp_session_source(&root, resolved_path)",
+    "resolved_path.starts_with(&root)",
+    1,
+)
+if authority_contract(negative_probe):
+    raise SystemExit("Omp authority negative probe did not reject recursive root widening")
+
+file_mutation = function_body(mutation, "mutate_transcript_file")
+if "roots.is_authoritative_session_transcript(agent, &path)" not in file_mutation:
+    raise SystemExit("native file mutation must pass through shared provider authority")
+if file_mutation.count("fs::remove_file(&path)") != 1:
+    raise SystemExit("native CLI-agent delete must retain exactly one canonical file primitive")
+
+remote_mutation = function_body(remote, "mutate_session")
+if "mutate_cli_agent_session_source(source, agent, mutation, roots)" not in remote_mutation:
+    raise SystemExit("remote helper must delegate to the shared provider mutation primitive")
+if "remove_file" in remote_mutation or "remove_dir_all" in remote_mutation:
+    raise SystemExit("remote helper restored a parallel filesystem mutation primitive")
 
 for test_name in [
     "remote_mutation_deletes_omp_authoritative_session_file",
@@ -4958,6 +5014,7 @@ for parser in [
         raise SystemExit(f"expanded provider parser missing: {parser}")
 for required in [
     "OpenCodeSqliteEntry",
+    "CursorCliStoreEntry",
     ".filter_map(|path| fs::canonicalize(path).ok())",
     "normalize_cli_agent_session_cwd",
     "scope_paths: impl IntoIterator<Item = PathBuf>",
@@ -5031,6 +5088,7 @@ for path in [
     "app/src/cli_agent_jsonl/discovery.rs",
     "app/src/cli_agent_jsonl/error.rs",
     "app/src/cli_agent_jsonl/mod.rs",
+    "app/src/cli_agent_jsonl/mutation.rs",
     "app/src/cli_agent_jsonl/parse.rs",
     "app/src/cli_agent_jsonl/roots.rs",
 ]:
@@ -5938,8 +5996,168 @@ require_contract_marker "LR-208" "id: LR-208" docs/design/local-remote-parity-tr
 require_contract_marker "LR-208" "session navigator: inline rename viewport invalidation" docs/design/local-remote-capability-matrix.csv
 require_rust_test_name "LR-208" "session_navigator_viewport_cache_invalidates_for_inline_rename_lifecycle" app/src/workspace/view/vertical_tabs_tests.rs
 if ! sed -n '/fn sync_session_navigator_viewport/,/^    }/p' app/src/workspace/view/vertical_tabs.rs \
-    | rg -q 'renaming_workspace_session_identity'; then
+    | rg -q 'renaming_workspace_session'; then
     echo "[LR-208] viewport cache does not include Workspace-owned inline rename identity" >&2
+    fail=1
+fi
+
+# LR-211: remote Environment discovery is a helper-native host operation, and
+# failures remain owned with the exact Environment projection.
+require_contract_marker "LR-211" "SN-REMOTE-HELPER-NATIVE-DISCOVERY-77" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-211" "SN-ENVIRONMENT-HELPER-REPLACEMENT-82" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-211" "id: LR-211" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-211" "Environment helper-native discovery and explicit recovery" docs/design/local-remote-capability-matrix.csv
+require_rust_test_name "LR-211" "environment_header_defers_handled_child_clicks_before_collapse" app/src/workspace/view/vertical_tabs_tests.rs
+require_rust_test_name "LR-211" "environment_discovery_issue_is_owned_with_committed_projection" app/src/workspace/environment_table.rs
+require_rust_test_name "LR-211" "target_cli_agent_roots_resolve_from_login_shell_context" app/src/remote_server/server_model_tests.rs
+require_rust_test_name "LR-211" "resolve_cli_agent_session_store_roots_round_trip" crates/remote_server/src/client_tests.rs
+require_rust_test_name "LR-211" "helper_protocol_mismatch_is_typed_as_update_required" crates/remote_server/src/client_tests.rs
+require_rust_test_name "LR-211" "helper_compatibility_failure_selects_update_remediation" crates/remote_server/src/manager_tests.rs
+require_rust_test_name "LR-211" "remote_daemon_stop_command_expands_channel_home_directory" app/src/remote_server/dev_remote_install.rs
+require_contract_marker "LR-211" "RemoteServerFailureRemediation" crates/remote_server/src/manager.rs app/src/workspace/environment_runtime.rs
+require_contract_marker "LR-211" "Helper 需更新" app/src/workspace/view/session_navigator.rs
+require_contract_marker "LR-211" "with_defer_events_to_children" app/src/workspace/view/vertical_tabs.rs
+require_contract_marker "LR-211" "remote_environment_daemon_stop_command" app/src/remote_server/dev_remote_install.rs
+require_contract_marker "LR-211" 'readlink "/proc/$pid/exe"' app/src/remote_server/dev_remote_install.rs
+if ! rg -q 'ResolveCliAgentSessionStoreRoots' crates/remote_server/proto/remote_server.proto; then
+    echo "[LR-211] helper-native target roots protocol is missing" >&2
+    fail=1
+fi
+runtime_discovery=$(sed -n '/fn scan_environment_runtime_agent_sessions_with_refresh_generation/,/^    }/p' app/src/workspace/view.rs)
+if echo "$runtime_discovery" | rg -q 'resolve_environment_cli_agent_store_roots|run_command'; then
+    echo "[LR-211] runtime discovery still depends on terminal execution context" >&2
+    fail=1
+fi
+
+# LR-212: provider source authority and physical mutation are each defined once;
+# local and helper adapters preserve the typed Agent identity, while distinct
+# file/index/database/store locators cannot be routed through another provider.
+require_contract_marker "LR-212" "SN-SESSION-DELETE-PROVIDER-ROOT-80" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-212" "SESSION-DELETE-PROVIDER-ROOT-PARITY-88" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
+require_contract_marker "LR-212" "id: LR-212" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-212" "Session Navigator provider-typed source mutation" docs/design/local-remote-capability-matrix.csv
+require_contract_marker "LR-212" "provider_session_discovery_roots" app/src/cli_agent_jsonl/roots.rs app/src/cli_agent_jsonl/discovery.rs
+require_contract_marker "LR-212" "is_authoritative_session_transcript" app/src/cli_agent_jsonl/roots.rs app/src/cli_agent_jsonl/mutation.rs
+require_contract_marker "LR-212" "mutate_cli_agent_session_source" app/src/cli_agent_jsonl/mutation.rs app/src/terminal/cli_agent_session_index.rs app/src/remote_server/cli_agent_sessions.rs
+require_contract_marker "LR-212" "external-store:" app/src/terminal/cli_agent_session_index.rs
+require_contract_marker "LR-212" '"app/src/cli_agent_jsonl/mutation.rs"' app/src/remote_server/dev_remote_install.rs script/deploy_remote_server
+require_contract_marker "LR-212" "string agent = 4;" crates/remote_server/proto/remote_server.proto
+require_rust_test_name "LR-212" "delete_antigravity_session_accepts_shared_discovery_root" app/src/terminal/cli_agent_session_index.rs
+require_rust_test_name "LR-212" "delete_opencode_sqlite_session_uses_provider_native_store_entry" app/src/terminal/cli_agent_session_index.rs
+require_rust_test_name "LR-212" "delete_cursor_store_entry_removes_only_exact_session_directory" app/src/terminal/cli_agent_session_index.rs
+require_rust_test_name "LR-212" "remote_mutation_deletes_antigravity_session_from_shared_discovery_root" app/src/remote_server/cli_agent_sessions.rs
+require_rust_test_name "LR-212" "remote_mutation_deletes_opencode_sqlite_session_entry" app/src/remote_server/cli_agent_sessions.rs
+require_rust_test_name "LR-212" "remote_mutation_deletes_cursor_store_directory" app/src/remote_server/cli_agent_sessions.rs
+require_rust_test_name "LR-212" "remote_mutation_rejects_provider_path_mismatch" app/src/remote_server/cli_agent_sessions.rs
+require_rust_test_name "LR-212" "remote_mutation_rejects_opencode_database_outside_target_data_root" app/src/remote_server/cli_agent_sessions.rs
+require_rust_test_name "LR-212" "remote_mutation_rejects_transcript_symlink_escape" app/src/remote_server/cli_agent_sessions.rs
+require_rust_test_name "LR-212" "mutate_cli_agent_session_round_trip_preserves_agent_identity" crates/remote_server/src/client_tests.rs
+if rg -q 'drop\(source_locator\)' app/src/workspace/view.rs; then
+    echo "[LR-212] typed local source locator Agent identity is still discarded" >&2
+    fail=1
+fi
+
+# LR-213: connect/disconnect are the only Environment product intents. Internal
+# transport retry may still use reconnect terminology, but WorkspaceAction and
+# Environment rail projection must not expose a second reconnect action.
+require_contract_marker "LR-213" "SN-ENVIRONMENT-EXPLICIT-CONNECT-81" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-213" "ENVIRONMENT-EXPLICIT-CONNECT-PARITY-89" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
+require_contract_marker "LR-213" "id: LR-213" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-213" "Environment explicit Connect/Disconnect intent" docs/design/local-remote-capability-matrix.csv
+require_contract_marker "LR-213" "ConnectEnvironment" app/src/workspace/action.rs app/src/workspace/view/vertical_tabs.rs app/src/workspace/view.rs
+require_rust_test_name "LR-213" "environment_rail_header_actions_are_authority_scoped_and_ordered" app/src/workspace/view/vertical_tabs_tests.rs
+require_rust_test_name "LR-213" "build_sections_keeps_refresh_and_connect_transport_semantics_disjoint" app/src/workspace/view/environment_rail.rs
+product_reconnect_inventory=$(rust_production_call_sites_without_inline_tests '\bReconnectEnvironment\b')
+if [[ -n "$product_reconnect_inventory" ]]; then
+    echo "[LR-213] product code restored ReconnectEnvironment instead of ConnectEnvironment:" >&2
+    printf '%s\n' "$product_reconnect_inventory" >&2
+    fail=1
+fi
+
+# LR-214: configured providers are scan intent, not proof that a physical
+# session source exists. Feedback scope is derived from Environment authority.
+require_contract_marker "LR-214" "SN-DISCOVERY-PHYSICAL-OBSERVATION-83" docs/SESSION_NAVIGATOR_SPEC.yaml
+require_contract_marker "LR-214" "AGENT-SESSION-PHYSICAL-OBSERVATION-PARITY-90" docs/LOCAL_REMOTE_PARITY_SPEC.yaml
+require_contract_marker "LR-214" "id: LR-214" docs/design/local-remote-parity-tracker.yaml
+require_contract_marker "LR-214" "Agent session physical-source observation and scoped feedback" docs/design/local-remote-capability-matrix.csv
+require_rust_test_name "LR-214" "discovery_plan_does_not_observe_unprovisioned_optional_provider" app/src/cli_agent_jsonl/tests.rs
+require_rust_test_name "LR-214" "environment_discovery_issue_tooltip_uses_authority_scope" app/src/workspace/view_test.rs
+require_contract_marker "LR-214" "ProviderScan::NotProvisioned" app/src/cli_agent_jsonl/discovery.rs
+require_contract_marker "LR-214" "ParsedEnvironmentAuthority::parse(authority)" app/src/workspace/view/session_navigator.rs
+require_contract_marker "LR-214" "REMOTE_SERVER_PROTOCOL_REVISION: u32 = 10" crates/remote_server/src/lib.rs
+if rg -n 'providers: self\.providers\.clone\(\)' app/src/cli_agent_jsonl/discovery.rs >/dev/null 2>&1; then
+    echo "[LR-214] configured providers were restored as physical observed sources" >&2
+    fail=1
+fi
+if rg -n '"远端 \{\} 会话来源' app/src/workspace/view/session_navigator.rs >/dev/null 2>&1; then
+    echo "[LR-214] discovery issue restored a hardcoded remote scope" >&2
+    fail=1
+fi
+
+if rg -n 'fn (mutate_file|mutate_index_entry)\b' \
+    app/src/terminal/cli_agent_session_index.rs \
+    app/src/remote_server/cli_agent_sessions.rs >/dev/null 2>&1; then
+    echo "[LR-212] local/helper adapters must not restore parallel physical mutation implementations" >&2
+    fail=1
+fi
+
+if ! python3 - <<'PY'
+from pathlib import Path
+
+marker = '"app/src/cli_agent_jsonl/mutation.rs"'
+install = Path("app/src/remote_server/dev_remote_install.rs").read_text()
+deploy = Path("script/deploy_remote_server").read_text()
+install_scopes = install.split("const DEV_REMOTE_BUILD_INPUT_SCOPES", 1)[1].split("];", 1)[0]
+deploy_scopes = deploy.split('scopes = [', 1)[1].split(']', 1)[0]
+if install_scopes.count(marker) != 1 or deploy_scopes.count(marker) != 1:
+    raise SystemExit("shared mutation source is missing from helper freshness inputs")
+negative_probe = install_scopes.replace(marker, "", 1)
+if marker in negative_probe:
+    raise SystemExit("helper freshness negative probe failed to remove mutation input")
+PY
+then
+    echo "[LR-212] helper freshness does not own the shared mutation source" >&2
+    fail=1
+fi
+
+mutation_primitive_inventory=$(rust_production_call_sites_without_inline_tests 'mutate_cli_agent_session_source\s*\(')
+printf '%s\n' "$mutation_primitive_inventory"
+mutation_primitive_owners=$(rust_production_callsite_owners 'mutate_cli_agent_session_source\s*\(' | sort -u)
+expected_mutation_primitive_owners=$'app/src/cli_agent_jsonl/mutation.rs:mutate_cli_agent_session_source\napp/src/remote_server/cli_agent_sessions.rs:mutate_session\napp/src/terminal/cli_agent_session_index.rs:delete_current_app_cli_agent_session_with_dirs'
+if [[ "$mutation_primitive_owners" != "$expected_mutation_primitive_owners" ]]; then
+    echo "[LR-212] provider mutation primitive owner set changed:" >&2
+    printf '%s\n' "$mutation_primitive_owners" >&2
+    fail=1
+fi
+
+if ! python3 - <<'PY'
+from pathlib import Path
+
+source = Path("app/src/terminal/cli_agent_session_index.rs").read_text()
+start = source.index("fn indexed_session_to_snapshot")
+end = source.index("\nfn ", start + 1)
+projection = source[start:end]
+
+def typed_locator_contract(text: str) -> bool:
+    return all(token in text for token in (
+        "AgentSessionDiscoverySource::CodexIndexEntry",
+        "external_index_session_snapshot_id",
+        "AgentSessionDiscoverySource::OpenCodeSqliteEntry",
+        "AgentSessionDiscoverySource::CursorCliStoreEntry",
+        "external_store_entry_session_snapshot_id",
+    ))
+
+if not typed_locator_contract(projection):
+    raise SystemExit("discovery projection lost distinct index/store locators")
+negative_probe = projection.replace(
+    "external_store_entry_session_snapshot_id",
+    "external_index_session_snapshot_id",
+)
+if typed_locator_contract(negative_probe):
+    raise SystemExit("typed locator contract failed to reject a synthetic store-to-index regression")
+PY
+then
+    echo "[LR-212] provider-native locator negative probe failed" >&2
     fail=1
 fi
 

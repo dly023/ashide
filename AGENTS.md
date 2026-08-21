@@ -415,6 +415,54 @@ Agent harness 只允许四层职责，禁止互相复制动态事实：
 
 项目 skill 的准入规则由 `.agents/skills/README.md` 定义，`script/check_agent_harness` 在 presubmit/CI 中 fail closed。新增 feature-specific skill、恢复已删除的 `ashide-session-bridge` / `ashide-shared-memory`，或缺少架构 workflow skill 都必须失败。
 
+### 5.16 工程架构原则（八荣八耻）
+
+#### 以模块内聚为荣，以无关耦合为耻
+
+- 会一起变化的东西放在一起，无关的东西保持可分离。
+- 修改或删除一个关注点，只应该动一个地方。
+
+#### 以层次分明为荣，以依赖混乱为耻
+
+- 业务逻辑不应直接依赖真实 I/O，用假数据在测试里也应该能跑。
+- 更换 backend 不能影响业务逻辑。
+- 每个 app 绝不能调用自己的 HTTP endpoint。
+- 对 managed remote Environment，目标 Host/daemon 是远端 machine tree、pane facts、provider 数据、会话用户状态、hooks 与其他 target-owned 状态的唯一事实源。
+- GUI 本地文件和内存镜像只能保存明确标注的客户端状态、缓存或待提交意图；它们不得在 hydrate、reconnect、refresh 或 source 失败时被隐式提升为远端事实，也不得用本地同名数据伪造远端成功。
+- 任何本地到远端的持久化都必须经过唯一的 HostOps/ControlRequest 正本，并带 workspace/pane/session 等身份与 ownership 前置条件；远端拒绝、身份未知或结果过期时必须 fail closed。
+- 远端事实缺失表示“未知/没有”，不表示可以从本地候选补齐；只有显式 typed provider/user 事件或带身份的结构化 seed 才能产生远端写入。
+
+#### 以能力复用为荣，以复制重造为耻
+
+- 每种能力只保留一个实现。
+- 新调用方应该接入已有接口，而不是复制一份。
+
+#### 以单元扩展为荣，以功能膨胀为耻
+
+- 新增一个 feature 应该只是“加几个文件，再加一行注册”。
+- 删除一个 feature 也不应该改动其他 feature。
+
+#### 以范式统一为荣，以各自为政为耻
+
+- 每件事只有一种既定做法。
+- 新人照着已有模式写即可，不需要重新选择方案。
+- 测试不应依赖 server 或 DB。
+
+#### 以及时删码为荣，以留存旧账为耻
+
+- 代码一旦没人使用，立即删除。
+- 没有调用方的代码不能上线；“以后也许有用”不构成保留理由，Git 会保存历史。
+
+#### 以架构简洁为荣，以过度防御为耻
+
+- 避免编写过度防御和无依据的兜底代码。
+
+#### 以规范驱动为荣，以先写代码为耻
+
+- 架构、产品和用户可观察行为变更必须依次完成 `SPEC → tracker → matrix → static CHECK → failing TEST → IMPLEMENTATION → VERIFY`。
+- 进入 IMPLEMENTATION 前必须逐条念出并对照本节八项原则；任何一项不满足时先修正设计，不得以已有半成品或时间压力跳过。
+- 参考项目能力迁移必须先审计当前规范、tracker、回归测试和修复提交，提取历史失败语义；禁止只复制最简单可见外壳。
+
 ---
 
 ## 6. 常用入口速查

@@ -118,7 +118,7 @@ pub(crate) struct EnvironmentEntry {
     pub(crate) synthetic_session_id: Option<SessionId>,
     pub(crate) host_id: Option<HostId>,
     pub(crate) control_path: Option<PathBuf>,
-    pub(crate) last_error: Option<String>,
+    pub(crate) last_failure: Option<EnvironmentRuntimeFailure>,
 
     // --- Transport generations (remote only; local is always 0) ---
     /// Monotonic heartbeat generation. Every reconnect increments so late
@@ -170,6 +170,24 @@ pub(crate) enum IndexedCliAgentSessionScanOutcome {
     Cancelled,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum EnvironmentSessionDiscoveryIssue {
+    SourceMissing(CLIAgent),
+    Failed(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EnvironmentRuntimeFailureRecovery {
+    Reconnect,
+    UpdateHelper,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EnvironmentRuntimeFailure {
+    pub(crate) message: String,
+    pub(crate) recovery: EnvironmentRuntimeFailureRecovery,
+}
+
 impl EnvironmentEntry {
     /// Create an entry whose lifecycle is derived from backend capability and
     /// the persisted failure boundary. Current-app/local is intrinsically
@@ -200,7 +218,7 @@ impl EnvironmentEntry {
             synthetic_session_id: None,
             host_id: None,
             control_path: None,
-            last_error: None,
+            last_failure: None,
             heartbeat_generation: 0,
             preparation_generation: 0,
             home_root: None,
@@ -250,6 +268,11 @@ pub(crate) struct EnvironmentTable {
     /// 成功观察过的 provider 归属 canonical collection owner。空 provider store
     /// 也必须记录，才能把下一代 source disappearance 与首次未 provision 区分。
     indexed_cli_agent_session_observed_agents_by_navigation_key: HashMap<String, HashSet<CLIAgent>>,
+    /// Discovery failure is canonical Environment projection state, not a
+    /// transient toast. It shares the navigation-key owner with scan tokens
+    /// and committed rows so stale completions cannot relabel a newer frame.
+    indexed_cli_agent_session_issue_by_navigation_key:
+        HashMap<String, EnvironmentSessionDiscoveryIssue>,
     /// Alias/Pin 是 canonical projection 的输入，也必须与 indexed sessions/model
     /// 原子地归属同一 navigation key，不能挂在可替换的 transport entry 上。
     cli_agent_session_user_state_by_navigation_key:
@@ -310,6 +333,14 @@ impl EnvironmentTable {
         let authority = self.active_authority.as_deref()?;
         self.session_navigator_model_by_navigation_key
             .get_mut(ParsedEnvironmentAuthority::parse(authority).navigation_key())
+    }
+
+    pub(crate) fn session_navigator_model_for_navigation_key(
+        &self,
+        navigation_key: &str,
+    ) -> Option<&SessionNavigatorModel> {
+        self.session_navigator_model_by_navigation_key
+            .get(navigation_key)
     }
 
     #[cfg(test)]
@@ -454,7 +485,7 @@ impl EnvironmentTable {
         entry.status = EnvironmentRuntimeStatus::Dormant;
         entry.host_id = None;
         entry.control_path = None;
-        entry.last_error = None;
+        entry.last_failure = None;
         entry.snapshot.lifecycle_state = EnvironmentLifecycleState::Dormant;
     }
 
@@ -522,7 +553,7 @@ impl EnvironmentTable {
                 synthetic_session_id: Some(session_id),
                 host_id: None,
                 control_path: Some(control_path),
-                last_error: None,
+                last_failure: None,
                 heartbeat_generation,
                 preparation_generation,
                 home_root,
@@ -551,31 +582,54 @@ impl EnvironmentTable {
         let entry = self.entries.get_mut(&authority)?;
         entry.status = EnvironmentRuntimeStatus::Connected;
         entry.host_id = Some(host_id);
-        entry.last_error = None;
+        entry.last_failure = None;
         entry.snapshot.lifecycle_state = EnvironmentLifecycleState::Connected;
         self.session_to_authority
             .insert(session_id, authority.clone());
         Some(authority)
     }
 
-    pub(crate) fn mark_error_for_session(
+    pub(crate) fn mark_failure_for_session(
         &mut self,
         session_id: SessionId,
-        error: String,
+        failure: EnvironmentRuntimeFailure,
     ) -> Option<String> {
         let authority = self.current_authority_for_session(session_id)?.to_owned();
-        self.mark_error_for_authority(&authority, error);
+        self.mark_failure_for_authority(&authority, failure);
         self.session_to_authority
             .insert(session_id, authority.clone());
         Some(authority)
     }
 
     pub(crate) fn mark_error_for_authority(&mut self, authority: &str, error: String) {
+        self.mark_failure_for_authority(
+            authority,
+            EnvironmentRuntimeFailure {
+                message: error,
+                recovery: EnvironmentRuntimeFailureRecovery::Reconnect,
+            },
+        );
+    }
+
+    pub(crate) fn mark_failure_for_authority(
+        &mut self,
+        authority: &str,
+        failure: EnvironmentRuntimeFailure,
+    ) {
         if let Some(entry) = self.entries.get_mut(authority) {
             entry.status = EnvironmentRuntimeStatus::Error;
-            entry.last_error = Some(error);
+            entry.last_failure = Some(failure);
             entry.snapshot.lifecycle_state = EnvironmentLifecycleState::Error;
         }
+    }
+
+    pub(crate) fn runtime_failure_for_authority(
+        &self,
+        authority: &str,
+    ) -> Option<&EnvironmentRuntimeFailure> {
+        self.entries
+            .get(authority)
+            .and_then(|entry| entry.last_failure.as_ref())
     }
 
     // --- Session ↔ authority ---
@@ -1040,6 +1094,14 @@ impl EnvironmentTable {
             .collect()
     }
 
+    pub(crate) fn indexed_cli_agent_session_discovery_issue(
+        &self,
+        authority: &str,
+    ) -> Option<&EnvironmentSessionDiscoveryIssue> {
+        self.indexed_cli_agent_session_issue_by_navigation_key
+            .get(&Self::projection_navigation_key(authority))
+    }
+
     #[cfg(test)]
     pub(crate) fn commit_indexed_cli_agent_sessions<E>(
         &mut self,
@@ -1049,6 +1111,8 @@ impl EnvironmentTable {
         let sessions = scan_result?;
         self.ensure_projection_partition(authority);
         let navigation_key = Self::projection_navigation_key(authority);
+        self.indexed_cli_agent_session_issue_by_navigation_key
+            .remove(&navigation_key);
         self.indexed_cli_agent_session_scan_by_navigation_key
             .remove(&navigation_key);
         self.indexed_cli_agent_sessions_by_navigation_key
@@ -1063,6 +1127,11 @@ impl EnvironmentTable {
     ) -> IndexedCliAgentSessionScanToken {
         self.ensure_projection_partition(authority);
         let navigation_key = Self::projection_navigation_key(authority);
+        // The retry itself is the explicit acknowledgement of the previous
+        // issue. The committed rows remain visible while the new generation
+        // runs; only a current completion may publish a new issue.
+        self.indexed_cli_agent_session_issue_by_navigation_key
+            .remove(&navigation_key);
         let generation = self
             .indexed_cli_agent_session_scan_by_navigation_key
             .get(&navigation_key)
@@ -1095,7 +1164,7 @@ impl EnvironmentTable {
             .contains_key(&Self::projection_navigation_key(authority))
     }
 
-    pub(crate) fn commit_indexed_cli_agent_session_discovery<E>(
+    pub(crate) fn commit_indexed_cli_agent_session_discovery<E: ToString>(
         &mut self,
         token: IndexedCliAgentSessionScanToken,
         scan_result: Result<IndexedCliAgentSessionScanOutcome, E>,
@@ -1110,6 +1179,11 @@ impl EnvironmentTable {
                 {
                     self.indexed_cli_agent_session_scan_by_navigation_key
                         .remove(&token.navigation_key);
+                    self.indexed_cli_agent_session_issue_by_navigation_key
+                        .insert(
+                            token.navigation_key.clone(),
+                            EnvironmentSessionDiscoveryIssue::Failed(error.to_string()),
+                        );
                 }
                 return Err(error);
             }
@@ -1127,6 +1201,8 @@ impl EnvironmentTable {
                 observed_agents,
                 sessions,
             } => {
+                self.indexed_cli_agent_session_issue_by_navigation_key
+                    .remove(&token.navigation_key);
                 self.indexed_cli_agent_sessions_by_navigation_key
                     .insert(token.navigation_key.clone(), sessions);
                 self.indexed_cli_agent_session_observed_agents_by_navigation_key
@@ -1137,12 +1213,21 @@ impl EnvironmentTable {
                     "CLI-agent discovery source temporarily missing for {}",
                     agent.command_prefix()
                 );
+                self.indexed_cli_agent_session_issue_by_navigation_key
+                    .insert(
+                        token.navigation_key.clone(),
+                        EnvironmentSessionDiscoveryIssue::SourceMissing(agent),
+                    );
                 // 当前 generation 不能观察到完整集合，保留全量 committed projection。
             }
             IndexedCliAgentSessionScanOutcome::Cancelled => {
+                self.indexed_cli_agent_session_issue_by_navigation_key
+                    .remove(&token.navigation_key);
                 // 当前 generation 不能观察到完整集合，保留全量 committed projection。
             }
             IndexedCliAgentSessionScanOutcome::PermanentlyDeleted(agent) => {
+                self.indexed_cli_agent_session_issue_by_navigation_key
+                    .remove(&token.navigation_key);
                 if let Some(sessions) = self
                     .indexed_cli_agent_sessions_by_navigation_key
                     .get_mut(&token.navigation_key)
@@ -1169,7 +1254,7 @@ impl EnvironmentTable {
     }
 
     #[cfg(test)]
-    pub(crate) fn commit_indexed_cli_agent_session_scan<E>(
+    pub(crate) fn commit_indexed_cli_agent_session_scan<E: ToString>(
         &mut self,
         token: IndexedCliAgentSessionScanToken,
         scan_result: Result<Vec<WorkspaceSessionSnapshot>, E>,
@@ -1195,6 +1280,8 @@ impl EnvironmentTable {
         self.indexed_cli_agent_session_scan_by_navigation_key
             .remove(&navigation_key);
         self.indexed_cli_agent_session_observed_agents_by_navigation_key
+            .remove(&navigation_key);
+        self.indexed_cli_agent_session_issue_by_navigation_key
             .remove(&navigation_key);
         if let Some(sessions) = self
             .indexed_cli_agent_sessions_by_navigation_key
@@ -1462,6 +1549,102 @@ mod tests {
     }
 
     #[test]
+    fn environment_discovery_issue_is_owned_with_committed_projection() {
+        let authority = "ssh:test";
+        let mut table = EnvironmentTable::default();
+        table.upsert(ssh_environment(authority));
+        let baseline = vec![
+            indexed_session_for_agent("claude", authority, CLIAgent::Claude),
+            indexed_session_for_agent("codex", authority, CLIAgent::Codex),
+            indexed_session_for_agent("omp", authority, CLIAgent::Omp),
+        ];
+        let token = table.begin_indexed_cli_agent_session_scan(authority, None);
+        assert!(table
+            .commit_indexed_cli_agent_session_discovery(
+                token,
+                Ok::<_, String>(IndexedCliAgentSessionScanOutcome::Complete {
+                    observed_agents: HashSet::from([
+                        CLIAgent::Claude,
+                        CLIAgent::Codex,
+                        CLIAgent::Omp,
+                    ]),
+                    sessions: baseline.clone(),
+                }),
+            )
+            .expect("baseline discovery commits"));
+
+        let failed = table.begin_indexed_cli_agent_session_scan(authority, None);
+        table
+            .commit_indexed_cli_agent_session_discovery(
+                failed,
+                Err::<IndexedCliAgentSessionScanOutcome, _>("scan transport failed".to_owned()),
+            )
+            .expect_err("current discovery failure is surfaced");
+        assert_eq!(
+            table.indexed_cli_agent_sessions_for_authority(authority),
+            baseline,
+            "failure must preserve the last complete collection"
+        );
+        assert_eq!(
+            table.indexed_cli_agent_session_discovery_issue(authority),
+            Some(&EnvironmentSessionDiscoveryIssue::Failed(
+                "scan transport failed".to_owned()
+            ))
+        );
+
+        let stale = table.begin_indexed_cli_agent_session_scan(authority, None);
+        let current = table.begin_indexed_cli_agent_session_scan(authority, None);
+        assert!(!table
+            .commit_indexed_cli_agent_session_discovery(
+                stale,
+                Ok::<_, String>(IndexedCliAgentSessionScanOutcome::SourceMissing(
+                    CLIAgent::Claude,
+                )),
+            )
+            .expect("stale source result is rejected"));
+        assert!(table
+            .indexed_cli_agent_session_discovery_issue(authority)
+            .is_none());
+
+        assert!(table
+            .commit_indexed_cli_agent_session_discovery(
+                current,
+                Ok::<_, String>(IndexedCliAgentSessionScanOutcome::SourceMissing(
+                    CLIAgent::Codex,
+                )),
+            )
+            .expect("current source result commits"));
+        assert_eq!(
+            table.indexed_cli_agent_session_discovery_issue(authority),
+            Some(&EnvironmentSessionDiscoveryIssue::SourceMissing(
+                CLIAgent::Codex
+            ))
+        );
+        assert_eq!(
+            table.indexed_cli_agent_sessions_for_authority(authority),
+            baseline
+        );
+
+        let recovered = table.begin_indexed_cli_agent_session_scan(authority, None);
+        assert!(table
+            .commit_indexed_cli_agent_session_discovery(
+                recovered,
+                Ok::<_, String>(IndexedCliAgentSessionScanOutcome::Complete {
+                    observed_agents: HashSet::from([CLIAgent::Claude]),
+                    sessions: vec![baseline[0].clone()],
+                }),
+            )
+            .expect("recovered complete discovery commits"));
+        assert!(table
+            .indexed_cli_agent_session_discovery_issue(authority)
+            .is_none());
+        assert_eq!(
+            table.indexed_cli_agent_sessions_for_authority(authority),
+            vec![baseline[0].clone()]
+        );
+    }
+
+    #[test]
     fn expanded_provider_failure_preserves_committed_collection() {
         let authority = "ssh:test";
         let mut table = EnvironmentTable::default();
@@ -1596,7 +1779,13 @@ mod tests {
             None
         );
         assert_eq!(
-            table.mark_error_for_session(first_session, "old failure".to_owned()),
+            table.mark_failure_for_session(
+                first_session,
+                EnvironmentRuntimeFailure {
+                    message: "old failure".to_owned(),
+                    recovery: EnvironmentRuntimeFailureRecovery::Reconnect,
+                },
+            ),
             None
         );
 

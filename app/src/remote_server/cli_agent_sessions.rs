@@ -14,16 +14,16 @@
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
 use crate::cli_agent_jsonl::{
-    canonical_codex_session_id, codex_session_metadata, is_omp_session_source,
+    canonical_codex_session_id, codex_session_metadata, mutate_cli_agent_session_source,
     read_jsonl_values_from_path, recent_jsonl_files, require_cli_agent_home, sha256_hex,
     AgentSessionDiscoveryPlan, AgentSessionDiscoveryTransition, CliAgentSessionScanError,
-    CliAgentStoreRoots,
+    CliAgentSessionSourceMutation, CliAgentStoreRoots,
 };
+use crate::terminal::CLIAgent;
 
 /// Default number of records the scan returns (mirrors the Python `LIMIT`).
 const DEFAULT_SCAN_LIMIT: usize = 40;
@@ -180,37 +180,21 @@ fn real_str(path: &str, home: &Path) -> PathBuf {
     real(&expand_user(path, home))
 }
 
-/// Append the platform path separator so prefix checks only match component
-/// boundaries (mirrors `path.startswith(root + os.sep)`).
-fn path_with_sep(path: &Path) -> PathBuf {
-    let mut s = path.as_os_str().to_os_string();
-    s.push(std::path::MAIN_SEPARATOR_STR);
-    PathBuf::from(s)
-}
-
 /// Validate that `path` is under a known agent session store. Mirrors the
 /// Python `ensure_allowed`. Returns the realpath'd allowed path.
 fn ensure_allowed(path: &str, roots: &CliAgentStoreRoots) -> Result<PathBuf, String> {
     let resolved = real_str(path, &roots.home_dir);
-    let allowed = [
-        real(&roots.claude_projects()),
-        real(&roots.codex_sessions()),
-    ];
     let allowed_index = real(&roots.codex_index());
     if resolved == allowed_index {
         return Ok(resolved);
     }
-    let omp_sessions = real(&roots.omp_sessions());
-    if is_omp_session_source(&omp_sessions, &resolved) {
+    if enum_iterator::all::<CLIAgent>()
+        .any(|agent| roots.is_authoritative_session_transcript(agent, &resolved))
+    {
         return Ok(resolved);
     }
-    for root in &allowed {
-        if resolved == *root || resolved.starts_with(path_with_sep(root)) {
-            return Ok(resolved);
-        }
-    }
     Err(format!(
-        "refusing to mutate path outside known agent session stores: {}",
+        "refusing to access a non-authoritative CLI-agent session source: {}",
         resolved.display()
     ))
 }
@@ -291,170 +275,19 @@ pub fn read_session(source: &str, roots: &CliAgentStoreRoots) -> Result<ReadSess
     })
 }
 
-// ── Mutate path ───────────────────────────────────────────────────
-
-/// Allocate a non-colliding path next to `path`. Mirrors `unique_path`.
-fn unique_path(path: &Path) -> Result<PathBuf, String> {
-    if !path.exists() {
-        return Ok(path.to_path_buf());
-    }
-    let parent = path.parent().unwrap_or_else(|| Path::new(""));
-    let file_name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let (stem, ext) = match file_name.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() => (stem.to_owned(), format!(".{ext}")),
-        _ => (file_name.clone(), String::new()),
-    };
-    for index in 1..1000 {
-        let candidate = parent.join(format!("{stem}-{index}{ext}"));
-        if !candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-    Err(format!(
-        "could not allocate archive path for {}",
-        path.display()
-    ))
-}
-
-fn archive_dir_for(path: &Path) -> PathBuf {
-    path.parent()
-        .unwrap_or_else(|| Path::new(""))
-        .join(".ashide-archive")
-}
-
-fn archive_path_for(path: &Path) -> Result<PathBuf, String> {
-    let archive_dir = archive_dir_for(path);
-    std::fs::create_dir_all(&archive_dir).map_err(|err| {
-        format!(
-            "failed to create archive dir {}: {err}",
-            archive_dir.display()
-        )
-    })?;
-    let file_name = path
-        .file_name()
-        .map(|n| n.to_os_string())
-        .unwrap_or_default();
-    unique_path(&archive_dir.join(file_name))
-}
-
-/// Rewrite the codex index jsonl removing the entry with `sid`, archiving the
-/// removed lines when `mutation == Archive`. Atomic via temp+rename. Mirrors
-/// `mutate_index_entry`.
-fn mutate_index_entry(
-    path: &str,
-    sid: &str,
-    mutation: Mutation,
-    roots: &CliAgentStoreRoots,
-) -> Result<(), String> {
-    let path = ensure_allowed(path, roots)?;
-    if !path.is_file() {
-        return Err(format!("index file does not exist: {}", path.display()));
-    }
-    let bytes = std::fs::read(&path)
-        .map_err(|err| format!("failed to read index {}: {err}", path.display()))?;
-    let text = String::from_utf8_lossy(&bytes);
-
-    let mut kept: Vec<String> = Vec::new();
-    let mut removed: Vec<String> = Vec::new();
-    // Preserve original line terminators by splitting inclusively.
-    for line in split_keep_newlines(&text) {
-        let trimmed = line.trim_end_matches(['\n', '\r']);
-        match serde_json::from_str::<Value>(trimmed) {
-            Ok(item) => {
-                if str_field(&item, "id") == Some(sid) {
-                    removed.push(line.to_owned());
-                } else {
-                    kept.push(line.to_owned());
-                }
-            }
-            Err(_) => kept.push(line.to_owned()),
-        }
-    }
-
-    if removed.is_empty() {
-        return Ok(());
-    }
-
-    if matches!(mutation, Mutation::Archive) {
-        let archive_dir = archive_dir_for(&path);
-        std::fs::create_dir_all(&archive_dir).map_err(|err| {
-            format!(
-                "failed to create archive dir {}: {err}",
-                archive_dir.display()
-            )
-        })?;
-        let archive_path = unique_path(&archive_dir.join(format!("session_index-{sid}.jsonl")))?;
-        std::fs::write(&archive_path, removed.concat())
-            .map_err(|err| format!("failed to write archive {}: {err}", archive_path.display()))?;
-    }
-
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let tmp = PathBuf::from(format!("{}.ashide.{now_ms}.tmp", path.display()));
-    std::fs::write(&tmp, kept.concat())
-        .map_err(|err| format!("failed to write temp index {}: {err}", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
-        .map_err(|err| format!("failed to replace index {}: {err}", path.display()))?;
-    Ok(())
-}
-
-/// Split text into lines while keeping the trailing newline on each line, so a
-/// rewrite round-trips the original bytes (minus removed lines).
-fn split_keep_newlines(text: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let bytes = text.as_bytes();
-    let mut start = 0;
-    for (idx, &b) in bytes.iter().enumerate() {
-        if b == b'\n' {
-            out.push(&text[start..=idx]);
-            start = idx + 1;
-        }
-    }
-    if start < text.len() {
-        out.push(&text[start..]);
-    }
-    out
-}
-
-/// Delete or archive a session file. Mirrors `mutate_file`.
-fn mutate_file(source: &str, mutation: Mutation, roots: &CliAgentStoreRoots) -> Result<(), String> {
-    let path = ensure_allowed(source, roots)?;
-    if !path.is_file() {
-        return Ok(());
-    }
-    match mutation {
-        Mutation::Delete => std::fs::remove_file(&path)
-            .map_err(|err| format!("failed to delete {}: {err}", path.display())),
-        Mutation::Archive => {
-            let dest = archive_path_for(&path)?;
-            std::fs::rename(&path, &dest).map_err(|err| {
-                format!(
-                    "failed to archive {} -> {}: {err}",
-                    path.display(),
-                    dest.display()
-                )
-            })
-        }
-    }
-}
-
 /// Archive or delete a session source (file or codex index entry). Mirrors the
 /// top-level dispatch of the Python mutate heredoc.
 pub fn mutate_session(
     source: &str,
+    agent: CLIAgent,
     mutation: Mutation,
     roots: &CliAgentStoreRoots,
 ) -> Result<(), String> {
-    if let Some((path, sid)) = split_index_source(source, roots) {
-        mutate_index_entry(&path, &sid, mutation, roots)
-    } else {
-        mutate_file(source, mutation, roots)
-    }
+    let mutation = match mutation {
+        Mutation::Archive => CliAgentSessionSourceMutation::Archive,
+        Mutation::Delete => CliAgentSessionSourceMutation::Delete,
+    };
+    mutate_cli_agent_session_source(source, agent, mutation, roots)
 }
 
 #[cfg(test)]
@@ -976,8 +809,13 @@ mod uireq014_first_message_tests {
             .expect("read transcript through explicit roots");
         assert!(String::from_utf8_lossy(&read.content).contains("explicit roots"));
 
-        mutate_session(&target_path.to_string_lossy(), Mutation::Delete, &roots)
-            .expect("delete transcript through explicit roots");
+        mutate_session(
+            &target_path.to_string_lossy(),
+            CLIAgent::Codex,
+            Mutation::Delete,
+            &roots,
+        )
+        .expect("delete transcript through explicit roots");
         assert!(!target_path.exists());
         assert!(
             default_codex_sessions
@@ -999,8 +837,35 @@ mod uireq014_first_message_tests {
             .expect("create Omp session store");
         std::fs::write(&path, "{}\n").expect("write Omp session");
 
-        mutate_session(&path.to_string_lossy(), Mutation::Delete, &roots)
-            .expect("delete authoritative Omp session");
+        mutate_session(
+            &path.to_string_lossy(),
+            CLIAgent::Omp,
+            Mutation::Delete,
+            &roots,
+        )
+        .expect("delete authoritative Omp session");
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn remote_mutation_deletes_antigravity_session_from_shared_discovery_root() {
+        let home = tempfile::tempdir().expect("create Antigravity target home");
+        let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+        let path = roots
+            .antigravity_brain()
+            .join("agy-session/.system_generated/logs/transcript.jsonl");
+        std::fs::create_dir_all(path.parent().expect("Antigravity transcript parent"))
+            .expect("create Antigravity transcript directory");
+        std::fs::write(&path, "{}\n").expect("write Antigravity transcript");
+
+        mutate_session(
+            &path.to_string_lossy(),
+            CLIAgent::Antigravity,
+            Mutation::Delete,
+            &roots,
+        )
+        .expect("delete Antigravity transcript through helper source authority");
 
         assert!(!path.exists());
     }
@@ -1017,14 +882,188 @@ mod uireq014_first_message_tests {
                 .expect("create non-authoritative fixture parent");
             std::fs::write(path, "{}\n").expect("write non-authoritative fixture");
 
-            let error = mutate_session(&path.to_string_lossy(), Mutation::Delete, &roots)
-                .expect_err("mutation must reject a non-authoritative CLI-agent source");
+            let error = mutate_session(
+                &path.to_string_lossy(),
+                CLIAgent::Omp,
+                Mutation::Delete,
+                &roots,
+            )
+            .expect_err("mutation must reject a non-authoritative CLI-agent source");
             assert!(
-                error.contains("refusing to mutate path outside known agent session stores"),
+                error.contains("refusing to mutate a non-authoritative Omp session transcript"),
                 "unexpected rejection: {error}"
             );
             assert!(path.exists(), "rejected source must remain untouched");
         }
+    }
+
+    #[test]
+    fn remote_mutation_rejects_provider_path_mismatch() {
+        let home = tempfile::tempdir().expect("create CLI-agent target home");
+        let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+        let antigravity_path = roots
+            .antigravity_brain()
+            .join("agy-session/.system_generated/logs/transcript.jsonl");
+        std::fs::create_dir_all(
+            antigravity_path
+                .parent()
+                .expect("Antigravity transcript parent"),
+        )
+        .expect("create Antigravity transcript directory");
+        std::fs::write(&antigravity_path, "{}\n").expect("write Antigravity transcript");
+
+        let error = mutate_session(
+            &antigravity_path.to_string_lossy(),
+            CLIAgent::Claude,
+            Mutation::Delete,
+            &roots,
+        )
+        .expect_err("provider/path mismatch must fail closed");
+
+        assert!(error.contains("non-authoritative Claude"), "{error}");
+        assert!(antigravity_path.exists());
+    }
+
+    #[test]
+    fn remote_mutation_deletes_opencode_sqlite_session_entry() {
+        use diesel::connection::SimpleConnection;
+        use diesel::prelude::*;
+        use diesel::sql_types::BigInt;
+
+        #[derive(QueryableByName)]
+        struct Count {
+            #[diesel(sql_type = BigInt)]
+            count: i64,
+        }
+
+        let home = tempfile::tempdir().expect("create OpenCode target home");
+        let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+        std::fs::create_dir_all(roots.opencode_databases_dir()).expect("create OpenCode data dir");
+        let database_path = roots.opencode_databases_dir().join("opencode.db");
+        let mut connection =
+            diesel::sqlite::SqliteConnection::establish(&database_path.to_string_lossy())
+                .expect("open OpenCode fixture database");
+        connection
+            .batch_execute(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT);
+                 INSERT INTO session VALUES ('target', NULL);
+                 INSERT INTO session VALUES ('child', 'target');
+                 INSERT INTO session VALUES ('unrelated', NULL);",
+            )
+            .expect("seed OpenCode fixture database");
+        drop(connection);
+
+        mutate_session(
+            &format!("{}#target", database_path.display()),
+            CLIAgent::OpenCode,
+            Mutation::Delete,
+            &roots,
+        )
+        .expect("delete OpenCode SQLite-backed session through helper");
+
+        let mut connection =
+            diesel::sqlite::SqliteConnection::establish(&database_path.to_string_lossy())
+                .expect("reopen OpenCode fixture database");
+        let remaining = diesel::sql_query(
+            "SELECT COUNT(*) AS count FROM session WHERE id IN ('target', 'child')",
+        )
+        .get_result::<Count>(&mut connection)
+        .expect("count deleted OpenCode sessions");
+        assert_eq!(remaining.count, 0);
+    }
+
+    #[test]
+    fn remote_mutation_rejects_opencode_database_outside_target_data_root() {
+        let home = tempfile::tempdir().expect("create OpenCode target home");
+        let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+        let outside = home.path().join("outside/opencode.db");
+        std::fs::create_dir_all(outside.parent().expect("outside database parent"))
+            .expect("create outside database directory");
+        std::fs::write(&outside, "not-a-provider-database").expect("write outside database");
+
+        let error = mutate_session(
+            &format!("{}#target", outside.display()),
+            CLIAgent::OpenCode,
+            Mutation::Delete,
+            &roots,
+        )
+        .expect_err("OpenCode database outside target data root must fail closed");
+
+        assert!(
+            error.contains("non-authoritative OpenCode database"),
+            "{error}"
+        );
+        assert!(outside.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_mutation_rejects_transcript_symlink_escape() {
+        let home = tempfile::tempdir().expect("create CLI-agent target home");
+        let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+        let outside = home.path().join("outside.jsonl");
+        std::fs::write(&outside, "{}\n").expect("write outside transcript");
+        let link = roots
+            .antigravity_brain()
+            .join("agy-session/.system_generated/logs/transcript.jsonl");
+        std::fs::create_dir_all(link.parent().expect("symlink parent"))
+            .expect("create symlink directory");
+        std::os::unix::fs::symlink(&outside, &link).expect("create transcript symlink");
+
+        let error = mutate_session(
+            &link.to_string_lossy(),
+            CLIAgent::Antigravity,
+            Mutation::Delete,
+            &roots,
+        )
+        .expect_err("transcript symlink escape must fail closed");
+
+        assert!(error.contains("non-authoritative Antigravity"), "{error}");
+        assert!(outside.exists());
+        assert!(link.exists());
+    }
+
+    #[test]
+    fn remote_mutation_deletes_cursor_store_directory() {
+        let home = tempfile::tempdir().expect("create Cursor target home");
+        let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+        let session_dir = roots.cursor_chats().join("project/cursor-session");
+        let store_path = session_dir.join("store.db");
+        std::fs::create_dir_all(&session_dir).expect("create Cursor session directory");
+        std::fs::write(&store_path, "store").expect("write Cursor store");
+        std::fs::write(session_dir.join("meta.json"), "{}").expect("write Cursor metadata");
+
+        mutate_session(
+            &format!("{}#cursor-session", store_path.display()),
+            CLIAgent::CursorCli,
+            Mutation::Delete,
+            &roots,
+        )
+        .expect("delete Cursor store through helper");
+
+        assert!(!session_dir.exists());
+    }
+
+    #[test]
+    fn remote_mutation_rejects_incomplete_cursor_store_directory() {
+        let home = tempfile::tempdir().expect("create Cursor target home");
+        let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+        let session_dir = roots.cursor_chats().join("project/cursor-session");
+        let store_path = session_dir.join("store.db");
+        std::fs::create_dir_all(&session_dir).expect("create Cursor session directory");
+        std::fs::write(&store_path, "store").expect("write Cursor store without metadata");
+
+        let error = mutate_session(
+            &format!("{}#cursor-session", store_path.display()),
+            CLIAgent::CursorCli,
+            Mutation::Delete,
+            &roots,
+        )
+        .expect_err("incomplete Cursor store must fail closed");
+
+        assert!(error.contains("incomplete Cursor session store"), "{error}");
+        assert!(session_dir.exists());
     }
 
     #[test]

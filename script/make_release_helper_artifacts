@@ -77,11 +77,11 @@ esac
 case "$RELEASE_CHANNEL" in
   local|dev)
     CARGO_PROFILE="release-cli-debug_assertions"
-    FEATURES="release_bundle,crash_reporting,standalone,agent_mode_debug"
+    FEATURES="release_bundle,standalone,agent_mode_debug"
     ;;
   stable|preview|oss)
     CARGO_PROFILE="release-cli"
-    FEATURES="release_bundle,crash_reporting,standalone"
+    FEATURES="release_bundle,standalone"
     ;;
   *)
     echo "error: unsupported channel $RELEASE_CHANNEL" >&2

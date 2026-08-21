@@ -62,6 +62,14 @@ impl CliAgentSessionScanError {
         }
     }
 
+    pub(super) fn parse(path: &Path, operation: &'static str, message: String) -> Self {
+        Self {
+            path: Some(path.to_path_buf()),
+            operation,
+            message,
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn operation(&self) -> &'static str {
         self.operation

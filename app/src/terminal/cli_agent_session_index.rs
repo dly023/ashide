@@ -8,17 +8,17 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
 use tempfile::NamedTempFile;
 
 use crate::app_state::{CliAgentSessionOrigin, WorkspaceSessionKind, WorkspaceSessionSnapshot};
+use crate::cli_agent_jsonl::{
+    mutate_cli_agent_session_source, resolve_current_process_cli_agent_store_roots,
+    AgentSessionDiscoveryPlan, AgentSessionDiscoveryRecord, AgentSessionDiscoverySource,
+    AgentSessionDiscoveryTransition, CliAgentSessionScanError, CliAgentSessionSourceMutation,
+    CliAgentStoreRoots,
+};
 #[cfg(test)]
 use crate::cli_agent_jsonl::{require_cli_agent_home, AgentSessionDiscoveryResult};
-use crate::cli_agent_jsonl::{
-    resolve_current_process_cli_agent_store_roots, AgentSessionDiscoveryPlan,
-    AgentSessionDiscoveryRecord, AgentSessionDiscoverySource, AgentSessionDiscoveryTransition,
-    CliAgentSessionScanError, CliAgentStoreRoots,
-};
 use crate::terminal::CLIAgent;
 use crate::workspace::environment_table::IndexedCliAgentSessionScanOutcome;
 
@@ -137,11 +137,15 @@ fn indexed_session_to_snapshot(session: AgentSessionDiscoveryRecord) -> Workspac
         AgentSessionDiscoverySource::CodexIndexEntry {
             provider_session_id,
             ..
-        }
-        | AgentSessionDiscoverySource::OpenCodeSqliteEntry {
-            provider_session_id,
-            ..
         } => external_index_session_snapshot_id(session.agent, provider_session_id),
+        AgentSessionDiscoverySource::OpenCodeSqliteEntry {
+            path,
+            provider_session_id,
+        }
+        | AgentSessionDiscoverySource::CursorCliStoreEntry {
+            path,
+            provider_session_id,
+        } => external_store_entry_session_snapshot_id(session.agent, path, provider_session_id),
     };
     WorkspaceSessionSnapshot {
         id,
@@ -184,8 +188,18 @@ fn delete_current_app_cli_agent_session_with_home(
 
 pub(crate) fn delete_current_app_cli_agent_session_with_roots(
     snapshot_id: &str,
+    expected_agent: CLIAgent,
     roots: &CliAgentStoreRoots,
 ) -> Result<(), String> {
+    let actual_agent = cli_agent_from_external_session_snapshot_id(snapshot_id)
+        .ok_or_else(|| format!("not an indexed CLI agent session id: {snapshot_id}"))?;
+    if actual_agent != expected_agent {
+        return Err(format!(
+            "session source agent {} does not match expected {}",
+            actual_agent.display_name(),
+            expected_agent.display_name()
+        ));
+    }
     let config_dir = warp_core::paths::warp_home_config_dir();
     delete_current_app_cli_agent_session_with_dirs(snapshot_id, roots, config_dir.as_deref())
 }
@@ -195,26 +209,14 @@ fn delete_current_app_cli_agent_session_with_dirs(
     roots: &CliAgentStoreRoots,
     config_dir: Option<&Path>,
 ) -> Result<(), String> {
-    if snapshot_id.starts_with("external-index:") {
-        return delete_codex_session_index_entry_with_dirs(snapshot_id, roots, config_dir);
-    }
-
-    let path = path_from_external_session_snapshot_id(snapshot_id)
-        .ok_or_else(|| format!("not an indexed CLI agent session id: {snapshot_id}"))?;
-    validate_mutable_session_path_location(&path, roots)?;
-    match fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            log::info!(
-                "CLI agent session file already absent during delete: {}",
-                path.display()
-            );
-        }
-        Err(error) => {
-            return Err(format!("failed to delete {}: {error}", path.display()));
-        }
-    }
-    if let Some(meta_path) = claude_subagent_meta_path_for_jsonl(&path) {
+    let (agent, source, transcript_path) =
+        mutation_source_from_external_session_snapshot_id(snapshot_id, roots)
+            .ok_or_else(|| format!("not an indexed CLI agent session id: {snapshot_id}"))?;
+    mutate_cli_agent_session_source(&source, agent, CliAgentSessionSourceMutation::Delete, roots)?;
+    if let Some(meta_path) = transcript_path
+        .as_deref()
+        .and_then(claude_subagent_meta_path_for_jsonl)
+    {
         if let Err(error) = fs::remove_file(&meta_path) {
             if error.kind() != io::ErrorKind::NotFound {
                 log::warn!(
@@ -236,8 +238,8 @@ fn delete_current_app_cli_agent_session_with_dirs(
 /// still exists. Non file-backed ids are treated as present so callers do not
 /// over-prune unrelated restored rows.
 pub(crate) fn external_jsonl_session_source_exists(snapshot_id: &str) -> bool {
-    match path_from_external_session_snapshot_id(snapshot_id) {
-        Some(path) => path.is_file(),
+    match agent_and_path_from_external_session_snapshot_id(snapshot_id) {
+        Some((_, path)) => path.is_file(),
         None => true,
     }
 }
@@ -280,25 +282,47 @@ pub(crate) fn current_app_cli_agent_session_source_target_from_id_with_roots(
     provider_session_id: Option<String>,
     roots: &CliAgentStoreRoots,
 ) -> Result<Option<CurrentAppCliAgentSessionSourceTarget>, String> {
-    if let Some(path) = path_from_external_session_snapshot_id(snapshot_id) {
-        let mut parts = snapshot_id.split(':');
-        let Some(_external) = parts.next() else {
-            return Ok(None);
-        };
-        let Some(encoded_agent) = parts.next() else {
-            return Ok(None);
-        };
-        let agent = cli_agent
+    if let Some((encoded_agent, path)) =
+        agent_and_path_from_external_session_snapshot_id(snapshot_id)
+    {
+        let metadata_agent = cli_agent
             .map(CLIAgent::from_serialized_name)
-            .filter(|agent| !matches!(agent, CLIAgent::Unknown))
-            .or_else(|| {
-                let agent = CLIAgent::from_serialized_name(encoded_agent);
-                (!matches!(agent, CLIAgent::Unknown)).then_some(agent)
-            });
+            .filter(|agent| !matches!(agent, CLIAgent::Unknown));
+        if metadata_agent.is_some_and(|agent| agent != encoded_agent) {
+            return Err(
+                "local CLI session source id agent does not match snapshot metadata".to_owned(),
+            );
+        }
         return Ok(Some(CurrentAppCliAgentSessionSourceTarget {
             source: path.display().to_string(),
-            agent,
+            agent: Some(encoded_agent),
             provider_session_id,
+        }));
+    }
+
+    if let Some((encoded_agent, path, encoded_session_id)) =
+        store_entry_from_external_session_snapshot_id(snapshot_id)
+    {
+        let metadata_agent = cli_agent
+            .map(CLIAgent::from_serialized_name)
+            .filter(|agent| !matches!(agent, CLIAgent::Unknown));
+        if metadata_agent.is_some_and(|agent| agent != encoded_agent) {
+            return Err(
+                "local CLI session source id agent does not match snapshot metadata".to_owned(),
+            );
+        }
+        if provider_session_id
+            .as_deref()
+            .is_some_and(|session_id| session_id != encoded_session_id)
+        {
+            return Err(
+                "local CLI session source id does not match provider session metadata".to_owned(),
+            );
+        }
+        return Ok(Some(CurrentAppCliAgentSessionSourceTarget {
+            source: format!("{}#{encoded_session_id}", path.display()),
+            agent: Some(encoded_agent),
+            provider_session_id: Some(encoded_session_id),
         }));
     }
 
@@ -306,6 +330,12 @@ pub(crate) fn current_app_cli_agent_session_source_target_from_id_with_roots(
     else {
         return Ok(None);
     };
+    if !matches!(agent, CLIAgent::Codex) {
+        return Err(format!(
+            "unsupported legacy indexed CLI agent source: {}",
+            agent.display_name()
+        ));
+    }
     Ok(Some(CurrentAppCliAgentSessionSourceTarget {
         source: format!("{}:{session_id}", roots.codex_index().display()),
         agent: Some(agent),
@@ -491,6 +521,19 @@ fn external_index_session_snapshot_id(agent: CLIAgent, session_id: &str) -> Stri
     )
 }
 
+fn external_store_entry_session_snapshot_id(
+    agent: CLIAgent,
+    path: &Path,
+    session_id: &str,
+) -> String {
+    format!(
+        "external-store:{}:{}:{}",
+        agent.to_serialized_name(),
+        hex_encode(path.to_string_lossy().as_bytes()),
+        hex_encode(session_id.as_bytes())
+    )
+}
+
 fn session_id_from_external_index_session_snapshot_id(
     snapshot_id: &str,
 ) -> Option<(CLIAgent, String)> {
@@ -503,143 +546,84 @@ fn session_id_from_external_index_session_snapshot_id(
         return None;
     }
     let encoded_id = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
     let bytes = hex_decode(encoded_id)?;
-    Some((agent, String::from_utf8(bytes).ok()?))
+    let session_id = String::from_utf8(bytes).ok()?;
+    (!session_id.is_empty()).then_some((agent, session_id))
 }
 
-fn path_from_external_session_snapshot_id(snapshot_id: &str) -> Option<PathBuf> {
+fn agent_and_path_from_external_session_snapshot_id(
+    snapshot_id: &str,
+) -> Option<(CLIAgent, PathBuf)> {
     let mut parts = snapshot_id.split(':');
     if parts.next()? != "external" {
         return None;
     }
-    let agent = parts.next()?;
-    if matches!(CLIAgent::from_serialized_name(agent), CLIAgent::Unknown) {
+    let agent = CLIAgent::from_serialized_name(parts.next()?);
+    if matches!(agent, CLIAgent::Unknown) {
         return None;
     }
     let encoded_path = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
     let bytes = hex_decode(encoded_path)?;
-    Some(PathBuf::from(String::from_utf8(bytes).ok()?))
+    let path = PathBuf::from(String::from_utf8(bytes).ok()?);
+    (!path.as_os_str().is_empty()).then_some((agent, path))
 }
 
-fn delete_codex_session_index_entry_with_dirs(
+fn store_entry_from_external_session_snapshot_id(
+    snapshot_id: &str,
+) -> Option<(CLIAgent, PathBuf, String)> {
+    let mut parts = snapshot_id.split(':');
+    if parts.next()? != "external-store" {
+        return None;
+    }
+    let agent = CLIAgent::from_serialized_name(parts.next()?);
+    if matches!(agent, CLIAgent::Unknown) {
+        return None;
+    }
+    let path = PathBuf::from(String::from_utf8(hex_decode(parts.next()?)?).ok()?);
+    let session_id = String::from_utf8(hex_decode(parts.next()?)?).ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    (!path.as_os_str().is_empty() && !session_id.is_empty()).then_some((agent, path, session_id))
+}
+
+fn mutation_source_from_external_session_snapshot_id(
     snapshot_id: &str,
     roots: &CliAgentStoreRoots,
-    config_dir: Option<&Path>,
-) -> Result<(), String> {
-    remove_codex_session_index_entry(snapshot_id, roots)?;
-    if let Err(error) = set_session_pinned_with_config(snapshot_id, false, config_dir) {
-        log::warn!(
-            "delete_codex_session_index_entry: failed to clear pinned state for {snapshot_id}: {error}"
-        );
+) -> Option<(CLIAgent, String, Option<PathBuf>)> {
+    if let Some((agent, path)) = agent_and_path_from_external_session_snapshot_id(snapshot_id) {
+        return Some((agent, path.to_string_lossy().into_owned(), Some(path)));
     }
-    Ok(())
-}
-
-fn remove_codex_session_index_entry(
-    snapshot_id: &str,
-    roots: &CliAgentStoreRoots,
-) -> Result<String, String> {
-    let (agent, session_id) = session_id_from_external_index_session_snapshot_id(snapshot_id)
-        .ok_or_else(|| format!("not an indexed CLI agent session id: {snapshot_id}"))?;
-    if !matches!(agent, CLIAgent::Codex) {
-        return Err(format!(
-            "unsupported indexed CLI agent: {}",
-            agent.display_name()
-        ));
-    }
-    let index_path = roots.codex_index();
-    let contents = match fs::read_to_string(&index_path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            log::info!(
-                "codex session index already absent during delete: {}",
-                index_path.display()
-            );
-            return Ok(String::new());
-        }
-        Err(error) => {
-            return Err(format!("failed to read {}: {error}", index_path.display()));
-        }
-    };
-    let mut removed_line = None;
-    let mut kept_lines = Vec::new();
-    for line in contents.lines() {
-        let line_id = serde_json::from_str::<Value>(line)
-            .ok()
-            .and_then(|value| value.get("id").and_then(Value::as_str).map(str::to_owned));
-        if line_id.as_deref() == Some(session_id.as_str()) {
-            removed_line = Some(line.to_owned());
-        } else {
-            kept_lines.push(line);
-        }
-    }
-    let Some(removed_line) = removed_line else {
-        log::info!(
-            "session {session_id} already absent in {} during delete",
-            index_path.display()
-        );
-        return Ok(String::new());
-    };
-    let mut rewritten = kept_lines.join("\n");
-    if !rewritten.is_empty() {
-        rewritten.push('\n');
-    }
-    fs::write(&index_path, rewritten)
-        .map_err(|error| format!("failed to write {}: {error}", index_path.display()))?;
-    Ok(removed_line)
-}
-
-fn validate_mutable_session_path_location(
-    path: &Path,
-    roots: &CliAgentStoreRoots,
-) -> Result<(), String> {
-    if path
-        .extension()
-        .is_none_or(|extension| extension != "jsonl")
+    if let Some((agent, path, session_id)) =
+        store_entry_from_external_session_snapshot_id(snapshot_id)
     {
-        return Err(format!(
-            "refusing to mutate non-jsonl session file: {}",
-            path.display()
-        ));
+        return Some((agent, format!("{}#{session_id}", path.display()), None));
     }
-
-    let canonical_path = canonical_cli_agent_session_path(path)?;
-    let allowed_roots = [
-        roots.claude_projects(),
-        roots.codex_sessions(),
-        roots.omp_sessions(),
-    ];
-
-    let is_under_allowed_root = allowed_roots.iter().any(|root| {
-        root.canonicalize()
-            .ok()
-            .is_some_and(|root| canonical_path.starts_with(&root))
-    });
-    if !is_under_allowed_root {
-        return Err(format!(
-            "refusing to mutate session outside CLI-agent history roots: {}",
-            canonical_path.display()
-        ));
-    }
-
-    Ok(())
+    let (agent, session_id) = session_id_from_external_index_session_snapshot_id(snapshot_id)?;
+    matches!(agent, CLIAgent::Codex).then(|| {
+        (
+            agent,
+            format!("{}:{session_id}", roots.codex_index().display()),
+            None,
+        )
+    })
 }
 
-fn canonical_cli_agent_session_path(path: &Path) -> Result<PathBuf, String> {
-    if let Ok(canonical_path) = path.canonicalize() {
-        return Ok(canonical_path);
-    }
-
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("session path has no parent: {}", path.display()))?;
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| format!("session path has no file name: {}", path.display()))?;
-    let canonical_parent = parent
-        .canonicalize()
-        .map_err(|error| format!("failed to resolve {}: {error}", path.display()))?;
-    Ok(canonical_parent.join(file_name))
+fn cli_agent_from_external_session_snapshot_id(snapshot_id: &str) -> Option<CLIAgent> {
+    agent_and_path_from_external_session_snapshot_id(snapshot_id)
+        .map(|(agent, _)| agent)
+        .or_else(|| {
+            session_id_from_external_index_session_snapshot_id(snapshot_id).map(|(agent, _)| agent)
+        })
+        .or_else(|| {
+            store_entry_from_external_session_snapshot_id(snapshot_id).map(|(agent, _, _)| agent)
+        })
 }
 
 fn claude_subagent_meta_path_for_jsonl(jsonl_path: &Path) -> Option<PathBuf> {
@@ -687,6 +671,9 @@ fn hex_value(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use diesel::connection::SimpleConnection;
+    use diesel::prelude::*;
+    use diesel::sql_types::BigInt;
     use std::fs::FileTimes;
     use std::io::Write;
     use std::time::{Duration, UNIX_EPOCH};
@@ -1265,6 +1252,157 @@ mod tests {
         .expect("delete custom-root Claude transcript");
 
         assert!(!session_path.exists());
+    }
+
+    #[test]
+    fn delete_antigravity_session_accepts_shared_discovery_root() {
+        let home = test_home();
+        let config_dir = TempDir::new().expect("create temp config");
+        let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+        let session_path = roots
+            .antigravity_brain()
+            .join("agy-session/.system_generated/logs/transcript.jsonl");
+        fs::create_dir_all(
+            session_path
+                .parent()
+                .expect("Antigravity transcript parent"),
+        )
+        .expect("create Antigravity transcript directory");
+        fs::write(&session_path, "{}\n").expect("write Antigravity transcript");
+        let snapshot_id =
+            external_session_snapshot_id_for_path(CLIAgent::Antigravity, &session_path);
+
+        delete_current_app_cli_agent_session_with_dirs(
+            &snapshot_id,
+            &roots,
+            Some(config_dir.path()),
+        )
+        .expect("delete Antigravity transcript from its discovery root");
+
+        assert!(!session_path.exists());
+    }
+
+    #[derive(QueryableByName)]
+    struct SqliteCount {
+        #[diesel(sql_type = BigInt)]
+        count: i64,
+    }
+
+    #[test]
+    fn delete_opencode_sqlite_session_uses_provider_native_store_entry() {
+        let home = test_home();
+        let config_dir = TempDir::new().expect("create temp config");
+        let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+        fs::create_dir_all(roots.opencode_databases_dir()).expect("create OpenCode data dir");
+        let database_path = roots.opencode_databases_dir().join("opencode.db");
+        let mut connection =
+            diesel::sqlite::SqliteConnection::establish(&database_path.to_string_lossy())
+                .expect("open OpenCode fixture database");
+        connection
+            .batch_execute(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE session (
+                   id TEXT PRIMARY KEY,
+                   parent_id TEXT,
+                   title TEXT,
+                   directory TEXT,
+                   time_created INTEGER NOT NULL,
+                   time_updated INTEGER NOT NULL,
+                   time_archived INTEGER
+                 );
+                 CREATE TABLE message (
+                   id TEXT PRIMARY KEY,
+                   session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE
+                 );
+                 INSERT INTO session VALUES ('target', NULL, 'target', '/work', 1, 2, NULL);
+                 INSERT INTO session VALUES ('child', 'target', 'child', '/work', 1, 2, NULL);
+                 INSERT INTO session VALUES ('unrelated', NULL, 'unrelated', '/work', 1, 2, NULL);
+                 INSERT INTO message VALUES ('target-message', 'target');
+                 INSERT INTO message VALUES ('child-message', 'child');
+                 INSERT INTO message VALUES ('unrelated-message', 'unrelated');",
+            )
+            .expect("seed OpenCode fixture database");
+        drop(connection);
+        let snapshot_id = scan_current_app_cli_agent_sessions_with_roots(10, &roots)
+            .expect("discover OpenCode SQLite-backed sessions")
+            .into_iter()
+            .find(|snapshot| snapshot.cli_agent_session_id.as_deref() == Some("target"))
+            .expect("project OpenCode target session")
+            .id;
+        assert!(snapshot_id.starts_with(&format!(
+            "external-store:{}:",
+            CLIAgent::OpenCode.to_serialized_name()
+        )));
+
+        delete_current_app_cli_agent_session_with_dirs(
+            &snapshot_id,
+            &roots,
+            Some(config_dir.path()),
+        )
+        .expect("delete OpenCode SQLite-backed session");
+
+        let mut connection =
+            diesel::sqlite::SqliteConnection::establish(&database_path.to_string_lossy())
+                .expect("reopen OpenCode fixture database");
+        let remaining = diesel::sql_query(
+            "SELECT COUNT(*) AS count FROM session WHERE id IN ('target', 'child')",
+        )
+        .get_result::<SqliteCount>(&mut connection)
+        .expect("count deleted OpenCode sessions");
+        let unrelated =
+            diesel::sql_query("SELECT COUNT(*) AS count FROM session WHERE id = 'unrelated'")
+                .get_result::<SqliteCount>(&mut connection)
+                .expect("count unrelated OpenCode session");
+        assert_eq!(remaining.count, 0);
+        assert_eq!(unrelated.count, 1);
+    }
+
+    #[test]
+    fn external_source_snapshot_ids_reject_trailing_or_empty_components() {
+        assert!(session_id_from_external_index_session_snapshot_id(
+            "external-index:codex:746172676574:unexpected"
+        )
+        .is_none());
+        assert!(agent_and_path_from_external_session_snapshot_id("external:claude:").is_none());
+        assert!(store_entry_from_external_session_snapshot_id(
+            "external-store:opencode:2f746d702f6f70656e636f64652e6462:"
+        )
+        .is_none());
+        assert!(store_entry_from_external_session_snapshot_id(
+            "external-store:opencode:2f746d702f6f70656e636f64652e6462:746172676574:unexpected"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn delete_cursor_store_entry_removes_only_exact_session_directory() {
+        let home = test_home();
+        let config_dir = TempDir::new().expect("create temp config");
+        let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+        let session_dir = roots.cursor_chats().join("project/cursor-session");
+        let store_path = session_dir.join("store.db");
+        fs::create_dir_all(&session_dir).expect("create Cursor session directory");
+        fs::write(&store_path, "store").expect("write Cursor store");
+        fs::write(session_dir.join("meta.json"), "{}").expect("write Cursor metadata");
+        let unrelated_dir = roots.cursor_chats().join("project/unrelated");
+        fs::create_dir_all(&unrelated_dir).expect("create unrelated Cursor session");
+        fs::write(unrelated_dir.join("store.db"), "store").expect("write unrelated store");
+        fs::write(unrelated_dir.join("meta.json"), "{}").expect("write unrelated metadata");
+        let snapshot_id = external_store_entry_session_snapshot_id(
+            CLIAgent::CursorCli,
+            &store_path,
+            "cursor-session",
+        );
+
+        delete_current_app_cli_agent_session_with_dirs(
+            &snapshot_id,
+            &roots,
+            Some(config_dir.path()),
+        )
+        .expect("delete canonical Cursor store entry");
+
+        assert!(!session_dir.exists());
+        assert!(unrelated_dir.exists());
     }
 
     #[test]

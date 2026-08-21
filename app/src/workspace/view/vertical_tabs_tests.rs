@@ -1323,12 +1323,138 @@ fn session_navigator_viewport_static_guard() {
         .split("fn render_tab_group_internal(")
         .next()
         .expect("vertical tabs panel must end before tab renderer");
+    let rail_panel = source
+        .split("fn render_environment_rail_panel(")
+        .nth(1)
+        .expect("environment rail panel must exist")
+        .split("fn render_vertical_tabs_panel(")
+        .next()
+        .expect("environment rail panel must end before vertical tabs panel");
 
     assert!(panel.contains("NewScrollable::vertical("));
     assert!(panel.contains("List::new("));
     assert!(panel.contains("state.sync_session_navigator_viewport"));
-    assert!(!panel.contains("ClippedScrollable::vertical("));
+    // Live navigator list stays NewScrollable+List；多环境轨外层/preview 用 ClippedScrollable。
+    assert!(rail_panel.contains("environment_rail_scroll_state"));
+    assert!(rail_panel.contains("ClippedScrollable::vertical("));
     assert!(source.contains("build_reorder_units"));
     assert!(source.contains("session_navigator_viewport_unit_identity(unit)"));
     assert!(source.contains("session_navigator_session_row_is_viewport_visible"));
+}
+
+#[test]
+fn environment_rail_outer_scroll_children_have_explicit_heights() {
+    let source = include_str!("vertical_tabs.rs");
+    let multi_environment_branch = source
+        .split("let (before, current, after) = split_rail_sections(sections);")
+        .nth(1)
+        .expect("multi-environment rail branch must exist")
+        .split("fn render_vertical_tabs_panel(")
+        .next()
+        .expect("multi-environment rail branch must end before vertical tabs panel");
+
+    assert!(multi_environment_branch.contains("ConstrainedBox::new(current_sessions)"));
+    assert!(!multi_environment_branch.contains("Shrinkable::new("));
+    assert!(!multi_environment_branch.contains("rail.add_child(current_sessions);"));
+}
+
+#[test]
+fn environment_rail_header_identity_owns_collapse() {
+    let source = include_str!("vertical_tabs.rs");
+    let header = source
+        .split("fn render_environment_rail_section_header(")
+        .nth(1)
+        .expect("environment rail header must exist")
+        .split("fn count_current_navigator_rows(")
+        .next()
+        .expect("environment rail header must end before row counter");
+
+    assert!(header.contains("WorkspaceAction::ToggleEnvironmentRailSection"));
+    assert!(!header.contains("WorkspaceAction::SwitchEnvironment"));
+    assert!(!header.contains("WarpIcon::ChevronDown"));
+    assert!(!header.contains("WarpIcon::ChevronRight"));
+}
+
+#[test]
+fn environment_rail_header_actions_are_isolated() {
+    let source = include_str!("vertical_tabs.rs");
+    let header = source
+        .split("fn render_environment_rail_section_header(")
+        .nth(1)
+        .expect("environment rail header must exist")
+        .split("fn count_current_navigator_rows(")
+        .next()
+        .expect("environment rail header must end before row counter");
+
+    assert!(header.contains("WorkspaceAction::DisconnectEnvironment"));
+    assert!(header.contains("WorkspaceAction::RefreshEnvironmentSessions"));
+    assert!(header.contains("WorkspaceAction::ConnectEnvironment"));
+    assert!(header.contains("WarpIcon::Link"));
+    assert!(header.contains("hover.is_hovered() || is_refreshing || supports_connect"));
+    assert!(header.contains("if supports_connect {"));
+    assert!(header.contains("DispatchEventResult::StopPropagation"));
+    assert!(header.contains("with_defer_events_to_children"));
+}
+
+#[test]
+fn environment_header_defers_handled_child_clicks_before_collapse() {
+    let source = include_str!("vertical_tabs.rs");
+    let header = source
+        .split("fn render_environment_rail_section_header(")
+        .nth(1)
+        .expect("environment rail header must exist")
+        .split("fn count_current_navigator_rows(")
+        .next()
+        .expect("environment rail header must end before row counter");
+    let defer = header
+        .find("with_defer_events_to_children")
+        .expect("outer header must defer handled child mouse-down/up events");
+    let collapse = header
+        .find("WorkspaceAction::ToggleEnvironmentRailSection")
+        .expect("identity header remains the collapse owner");
+
+    assert!(defer < collapse);
+}
+
+#[test]
+fn environment_rail_header_actions_are_authority_scoped_and_ordered() {
+    let source = include_str!("vertical_tabs.rs");
+    let header = source
+        .split("fn render_environment_rail_section_header(")
+        .nth(1)
+        .expect("environment rail header must exist")
+        .split("fn count_current_navigator_rows(")
+        .next()
+        .expect("environment rail header must end before row counter");
+
+    let refresh = header
+        .find("WorkspaceAction::RefreshEnvironmentSessions")
+        .expect("refresh action must live on the environment header");
+    let connect = header
+        .find("WorkspaceAction::ConnectEnvironment")
+        .expect("connect action must target the header environment");
+    let disconnect = header
+        .find("WorkspaceAction::DisconnectEnvironment")
+        .expect("disconnect action must target the header environment");
+
+    assert!(refresh < connect);
+    assert!(connect < disconnect);
+    assert!(header.contains("authority_key: authority_key.clone()"));
+    assert!(header.contains("metrics.content_pad_left"));
+    assert!(header.contains("metrics.content_pad_right"));
+}
+
+#[test]
+fn session_sidebar_control_bar_uses_shared_horizontal_insets() {
+    let source = include_str!("vertical_tabs.rs");
+    let control_bar = source
+        .split("fn render_control_bar(")
+        .nth(1)
+        .expect("control bar must exist")
+        .split("fn render_detail_kind_badge_icon(")
+        .next()
+        .expect("control bar must end before detail icon renderer");
+
+    assert!(control_bar.contains("metrics.content_pad_left"));
+    assert!(control_bar.contains("metrics.content_pad_right"));
 }

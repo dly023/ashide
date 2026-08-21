@@ -379,7 +379,7 @@ pub const DEV_AARCH64_MUSL_TARGET: &str = "aarch64-unknown-linux-musl";
 pub const DEV_REMOTE_PROFILE: &str = "dev-remote";
 
 /// 交叉编译启用的 features,与 `script/deploy_remote_server` 一致。
-pub const DEV_REMOTE_FEATURES: &str = "release_bundle,crash_reporting,standalone,agent_mode_debug";
+pub const DEV_REMOTE_FEATURES: &str = "release_bundle,standalone,agent_mode_debug";
 
 /// 判断当前是否处于「开发模式 remote-server 安装」路径。
 ///

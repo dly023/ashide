@@ -1719,7 +1719,8 @@ fn local_cli_agent_operation_reuses_one_store_root_snapshot_across_scan_read_mut
     assert!(fork_receipt.session_file.starts_with(&claude_config_dir));
     assert!(!home_dir.join(".claude").exists());
 
-    delete_current_app_cli_agent_session_with_roots(&source_snapshot.id, &roots).unwrap();
+    delete_current_app_cli_agent_session_with_roots(&source_snapshot.id, CLIAgent::Claude, &roots)
+        .unwrap();
     assert!(!source_receipt.session_file.exists());
     assert!(fork_receipt.session_file.exists());
 }

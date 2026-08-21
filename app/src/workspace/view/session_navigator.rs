@@ -35,11 +35,11 @@ use super::{
     AgentActionSidecarSource, AlertDialogWithCallbacks, Appearance, CLIAgentInputState,
     CLIAgentSession, CLIAgentSessionContext, CLIAgentSessionStatus, CLIAgentSessionsModel,
     CLIAgentSessionsModelEvent, ContextFlag, DismissibleToast, EditorEvent, EditorView,
-    EnvironmentCliAgentSessionSourceAction, MenuItem, MenuItemFields, ModalButton, PaneId,
-    PaneViewLocator, SessionBridgeActionSource, SingleLineEditorOptions, TabContextMenuAnchor,
-    TerminalView, TextOptions, Vector2F, Workspace, WorkspaceAction, WorkspaceRegistry,
-    WorkspaceRegistryEvent, WorkspaceSessionActionTarget, WorkspaceSessionKind,
-    WorkspaceSessionSnapshot,
+    EnvironmentCliAgentSessionSourceAction, MenuItem, MenuItemFields, ModalButton,
+    OpenDialogSource, PaneId, PaneViewLocator, SessionBridgeActionSource, SingleLineEditorOptions,
+    TabContextMenuAnchor, TerminalView, TextOptions, Vector2F, Workspace, WorkspaceAction,
+    WorkspaceRegistry, WorkspaceRegistryEvent, WorkspaceSessionActionTarget,
+    WorkspaceSessionAliasSubject, WorkspaceSessionKind, WorkspaceSessionSnapshot,
 };
 
 #[derive(Debug)]
@@ -57,6 +57,13 @@ pub(super) struct WorkspaceSessionDeletePlan {
 pub(super) struct SessionNavigatorRowIdentity {
     pub(super) row_id: String,
     pub(super) environment_navigation_key: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SessionNavigatorRenameState {
+    pub(super) identity: SessionNavigatorRowIdentity,
+    subject: WorkspaceSessionAliasSubject,
+    authority_key: String,
 }
 
 impl SessionNavigatorRowIdentity {
@@ -105,6 +112,16 @@ impl Workspace {
     /// RowId state from live/provider sources in the UI hot path.
     pub(super) fn committed_session_navigator_model(&self) -> Option<&SessionNavigatorModel> {
         self.environments.active_session_navigator_model()
+    }
+
+    pub(super) fn session_navigator_preview_sessions(
+        &self,
+        navigation_key: &str,
+    ) -> Vec<WorkspaceSessionSnapshot> {
+        self.environments
+            .session_navigator_model_for_navigation_key(navigation_key)
+            .map(|model| model.sessions.clone())
+            .unwrap_or_default()
     }
 
     pub(super) fn session_navigator_sessions(&self) -> Vec<WorkspaceSessionSnapshot> {
@@ -164,7 +181,7 @@ impl Workspace {
             });
         let mut merged = WorkspaceSessionSnapshot::merge_for_session_navigator(sources);
         self.filter_deleting_workspace_sessions(&mut merged);
-        self.apply_workspace_session_aliases(&mut merged, &user_state, ctx);
+        self.apply_workspace_session_aliases(&mut merged, &user_state);
 
         let pane_info = self.snapshot_pane_group_info(ctx);
         let model = self.snapshot_session_navigator_model();
@@ -456,62 +473,41 @@ impl Workspace {
     pub(super) fn workspace_session_alias_keys_for_session(
         session: &WorkspaceSessionSnapshot,
     ) -> Vec<String> {
-        session.stable_user_state_keys()
-    }
-
-    pub(super) fn workspace_session_alias_keys(
-        &self,
-        session: &WorkspaceSessionSnapshot,
-        ctx: &AppContext,
-    ) -> Vec<String> {
-        let mut keys = Self::workspace_session_alias_keys_for_session(session);
-        keys.extend(self.workspace_session_binding_source_identity_keys(session, ctx));
-        for backing_session in self.backing_sessions_for_workspace_session(session) {
-            keys.extend(Self::workspace_session_alias_keys_for_session(
-                &backing_session,
-            ));
-        }
-        keys.sort();
-        keys.dedup();
-        keys
+        session
+            .alias_subject()
+            .user_state_key()
+            .map(|key| vec![key.to_owned()])
+            .unwrap_or_default()
     }
 
     pub(super) fn workspace_session_alias(
         &self,
         session: &WorkspaceSessionSnapshot,
-        ctx: &AppContext,
     ) -> Option<String> {
         let authority =
             session_authority_or_terminal_bootstrap(session.environment_authority_key.as_deref());
         let user_state = self.workspace_session_user_state_for_authority(authority);
-        self.workspace_session_alias_with_state(session, &user_state, ctx)
+        self.workspace_session_alias_with_state(session, &user_state)
     }
 
     pub(super) fn workspace_session_alias_with_state(
         &self,
         session: &WorkspaceSessionSnapshot,
         user_state: &crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserState,
-        ctx: &AppContext,
     ) -> Option<String> {
-        if session.is_live_container() {
-            return None;
-        }
-        self.workspace_session_alias_keys(session, ctx)
-            .into_iter()
-            .find_map(|key| user_state.aliases.get(&key).cloned())
+        session
+            .alias_subject()
+            .user_state_key()
+            .and_then(|key| user_state.aliases.get(key).cloned())
     }
 
     pub(super) fn apply_workspace_session_aliases(
         &self,
         sessions: &mut [WorkspaceSessionSnapshot],
         user_state: &crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserState,
-        ctx: &AppContext,
     ) {
         for session in sessions {
-            if session.is_live_container() {
-                continue;
-            }
-            if let Some(alias) = self.workspace_session_alias_with_state(session, user_state, ctx) {
+            if let Some(alias) = self.workspace_session_alias_with_state(session, user_state) {
                 session.label = Some(alias);
             }
         }
@@ -779,7 +775,7 @@ impl Workspace {
         event: &EditorEvent,
         ctx: &mut ViewContext<Self>,
     ) {
-        if self.renaming_workspace_session_identity.is_some() {
+        if self.renaming_workspace_session.is_some() {
             match event {
                 EditorEvent::Blurred | EditorEvent::Enter => {
                     self.finish_workspace_session_rename(ctx);
@@ -808,11 +804,17 @@ impl Workspace {
         };
 
         let initial_alias = self
-            .workspace_session_alias(&session, ctx)
+            .workspace_session_alias(&session)
             .unwrap_or_else(|| Self::workspace_session_label(&session));
         let state = self.snapshot_session_navigator_state();
-        self.renaming_workspace_session_identity =
-            Some(SessionNavigatorRowIdentity::for_session(&session, &state));
+        self.renaming_workspace_session = Some(SessionNavigatorRenameState {
+            identity: SessionNavigatorRowIdentity::for_session(&session, &state),
+            subject: session.alias_subject(),
+            authority_key: session_authority_or_terminal_bootstrap(
+                session.environment_authority_key.as_deref(),
+            )
+            .to_owned(),
+        });
         self.workspace_session_title_editor
             .update(ctx, |editor, ctx| {
                 editor.clear_buffer_and_reset_undo_stack(ctx);
@@ -824,7 +826,7 @@ impl Workspace {
     }
 
     pub(super) fn finish_workspace_session_rename(&mut self, ctx: &mut ViewContext<Self>) {
-        let Some(identity) = self.renaming_workspace_session_identity.take() else {
+        let Some(rename) = self.renaming_workspace_session.take() else {
             return;
         };
         let alias = self
@@ -835,36 +837,39 @@ impl Workspace {
             .to_owned();
         self.clear_workspace_session_title_editor(ctx);
 
-        let Some(session) = self.workspace_session_for_row_identity(&identity) else {
+        let Some(session) = self.workspace_session_for_alias_subject(&rename.subject) else {
             log::warn!(
-                "finish_workspace_session_rename: missing row {} in {:?}",
-                identity.row_id,
-                identity.environment_navigation_key
+                "finish_workspace_session_rename: missing subject {} from row {} in {:?}",
+                rename.subject.key(),
+                rename.identity.row_id,
+                rename.identity.environment_navigation_key
             );
             self.sync_session_navigator_sessions(ctx);
             ctx.notify();
             return;
         };
-        if session.is_live_container() {
-            let Some(locator) = self.locator_for_workspace_session_snapshot(&session, ctx) else {
-                log::warn!(
-                    "finish_workspace_session_rename: live row {} has no current pane locator",
-                    identity.row_id
-                );
+        match &rename.subject {
+            WorkspaceSessionAliasSubject::Container(_) => {
+                let Some(locator) = self.locator_for_workspace_session_snapshot(&session, ctx)
+                else {
+                    log::warn!(
+                        "finish_workspace_session_rename: container {} has no current pane locator",
+                        rename.subject.key()
+                    );
+                    self.sync_session_navigator_sessions(ctx);
+                    ctx.notify();
+                    return;
+                };
+                self.set_custom_pane_name(locator, alias, ctx);
                 self.sync_session_navigator_sessions(ctx);
                 ctx.notify();
                 return;
-            };
-            self.set_custom_pane_name(locator, alias, ctx);
-            self.sync_session_navigator_sessions(ctx);
-            ctx.notify();
-            return;
+            }
+            WorkspaceSessionAliasSubject::DurableSession(_)
+            | WorkspaceSessionAliasSubject::VirtualSource(_) => {}
         }
 
-        let keys = self.workspace_session_alias_keys(&session, ctx);
-        let authority =
-            session_authority_or_terminal_bootstrap(session.environment_authority_key.as_deref())
-                .to_owned();
+        let keys = vec![rename.subject.key().to_owned()];
         let mutation = if alias.is_empty() {
             crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserStateMutation::ClearAlias
         } else {
@@ -874,7 +879,7 @@ impl Workspace {
         };
         let result = self
             .mutate_workspace_session_user_state_for_authority(
-                &authority,
+                &rename.authority_key,
                 &keys,
                 mutation,
                 if alias.is_empty() {
@@ -903,7 +908,7 @@ impl Workspace {
     }
 
     pub(super) fn cancel_workspace_session_rename(&mut self, ctx: &mut ViewContext<Self>) {
-        if self.renaming_workspace_session_identity.take().is_some() {
+        if self.renaming_workspace_session.take().is_some() {
             self.clear_workspace_session_title_editor(ctx);
             ctx.notify();
         }
@@ -931,18 +936,26 @@ impl Workspace {
             return;
         };
 
-        if session.is_live_container() {
-            let Some(locator) = self.locator_for_workspace_session_snapshot(&session, ctx) else {
-                log::warn!("reset_workspace_session_name: live row has no current pane locator");
+        let subject = session.alias_subject();
+        match &subject {
+            WorkspaceSessionAliasSubject::Container(_) => {
+                let Some(locator) = self.locator_for_workspace_session_snapshot(&session, ctx)
+                else {
+                    log::warn!(
+                        "reset_workspace_session_name: container has no current pane locator"
+                    );
+                    return;
+                };
+                self.clear_pane_name(locator, ctx);
+                self.sync_session_navigator_sessions(ctx);
+                ctx.notify();
                 return;
-            };
-            self.clear_pane_name(locator, ctx);
-            self.sync_session_navigator_sessions(ctx);
-            ctx.notify();
-            return;
+            }
+            WorkspaceSessionAliasSubject::DurableSession(_)
+            | WorkspaceSessionAliasSubject::VirtualSource(_) => {}
         }
 
-        let keys = self.workspace_session_alias_keys(&session, ctx);
+        let keys = vec![subject.key().to_owned()];
         let authority =
             session_authority_or_terminal_bootstrap(session.environment_authority_key.as_deref())
                 .to_owned();
@@ -962,9 +975,11 @@ impl Workspace {
         }
         let state = self.snapshot_session_navigator_state();
         if self
-            .renaming_workspace_session_identity
+            .renaming_workspace_session
             .as_ref()
-            .is_some_and(|renaming| renaming.matches_session(&session, &state))
+            .is_some_and(|rename| {
+                rename.identity.matches_session(&session, &state) || rename.subject == subject
+            })
         {
             self.cancel_workspace_session_rename(ctx);
         }
@@ -1185,15 +1200,20 @@ impl Workspace {
             .find(|session| Self::workspace_session_matches_action_target(session, target))
     }
 
-    pub(super) fn workspace_session_for_row_identity(
+    fn workspace_session_for_alias_subject(
         &self,
-        identity: &SessionNavigatorRowIdentity,
+        subject: &WorkspaceSessionAliasSubject,
     ) -> Option<WorkspaceSessionSnapshot> {
-        let model = self.session_navigator_model();
-        model
+        self.session_navigator_model()
             .sessions
             .into_iter()
-            .find(|session| identity.matches_session(session, &model.state))
+            .find(|session| match subject {
+                WorkspaceSessionAliasSubject::DurableSession(key) => {
+                    session.durable_identity_key().as_deref() == Some(key)
+                }
+                WorkspaceSessionAliasSubject::Container(key)
+                | WorkspaceSessionAliasSubject::VirtualSource(key) => session.logical_key() == *key,
+            })
     }
 
     // ── 实时会话快照（来自当前窗口各 tab 的 pane group）─────────────────────
@@ -1554,13 +1574,25 @@ impl Workspace {
             .set_cli_agent_session_user_state(authority.to_owned(), Default::default());
     }
 
-    // ── 刷新生命周期 · 当前 Navigator header 局部反馈 ─────────────────────
+    // ── 刷新生命周期 · 目标 Environment header 局部反馈 ──────────────────
 
-    pub(super) fn refresh_workspace_sessions(&mut self, ctx: &mut ViewContext<Self>) {
-        let refresh_generation = self.begin_workspace_sessions_refresh(ctx);
-        let current_authority = self.current_environment_authority_key(ctx);
+    pub(super) fn refresh_environment_sessions(
+        &mut self,
+        authority: &str,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match self.environment_session_refresh_availability(authority, ctx) {
+            crate::workspace::environment_backend::EnvironmentSessionRefreshAvailability::Ready => {}
+            crate::workspace::environment_backend::EnvironmentSessionRefreshAvailability::Unavailable => {
+                log::info!(
+                    "Ignoring unavailable Environment session refresh for {authority}; helper client is not connected"
+                );
+                return;
+            }
+        }
+        let refresh_generation = self.begin_environment_sessions_refresh(authority, ctx);
         match self.refresh_indexed_sessions_for_authority(
-            &current_authority,
+            authority,
             EnvironmentSessionRefreshIntent::UserInitiated {
                 generation: refresh_generation,
             },
@@ -1569,7 +1601,8 @@ impl Workspace {
             Ok(true) => return,
             Ok(false) => {}
             Err(error) => {
-                self.fail_workspace_sessions_refresh_if_current(
+                self.fail_environment_sessions_refresh_if_current(
+                    authority,
                     refresh_generation,
                     format!("刷新会话列表失败，已保留上次结果：{error}"),
                     ctx,
@@ -1581,7 +1614,7 @@ impl Workspace {
         self.prune_restored_workspace_sessions_with_missing_cli_sources();
         self.open_vertical_tabs_panel_for_recoverable_sessions(ctx);
         self.sync_session_navigator_sessions(ctx);
-        self.finish_workspace_sessions_refresh_if_current(refresh_generation, ctx);
+        self.finish_environment_sessions_refresh_if_current(authority, refresh_generation, ctx);
     }
 
     pub(super) fn refresh_workspace_sessions_passively(&mut self, ctx: &mut ViewContext<Self>) {
@@ -1656,12 +1689,10 @@ impl Workspace {
 
         let identity_keys = Self::workspace_session_identity_keys_for_sessions(&cache_sessions);
 
-        let mut alias_keys = self.workspace_session_alias_keys(&session, ctx);
-        alias_keys.extend(
-            cache_sessions
-                .iter()
-                .flat_map(Self::workspace_session_alias_keys_for_session),
-        );
+        let mut alias_keys = cache_sessions
+            .iter()
+            .flat_map(Self::workspace_session_alias_keys_for_session)
+            .collect::<Vec<_>>();
         alias_keys.sort();
         alias_keys.dedup();
 
@@ -1787,59 +1818,201 @@ impl Workspace {
         });
     }
 
-    pub(super) fn is_workspace_sessions_refreshing(&self) -> bool {
-        self.workspace_sessions_refresh_state.is_refreshing
+    fn environment_sessions_refresh_navigation_key(authority: &str) -> String {
+        ParsedEnvironmentAuthority::parse(authority)
+            .navigation_key()
+            .to_owned()
     }
 
-    pub(super) fn workspace_sessions_refresh_tooltip(&self) -> String {
-        if self.workspace_sessions_refresh_state.is_refreshing {
+    pub(super) fn is_environment_sessions_refreshing(&self, authority: &str) -> bool {
+        let navigation_key = Self::environment_sessions_refresh_navigation_key(authority);
+        self.environment_sessions_refresh_state
+            .refresh_generation_by_navigation_key
+            .contains_key(&navigation_key)
+    }
+
+    pub(super) fn environment_sessions_refresh_tooltip(&self, authority: &str) -> String {
+        if self.is_environment_sessions_refreshing(authority) {
             "正在刷新会话列表…".to_owned()
+        } else if let Some(issue) = self.environment_rail_issue(authority) {
+            match issue.kind {
+                super::environment_rail::EnvironmentRailIssueKind::DiscoveryFailed
+                | super::environment_rail::EnvironmentRailIssueKind::DiscoverySourceMissing => {
+                    format!("{}\n点击重试发现", issue.message)
+                }
+                super::environment_rail::EnvironmentRailIssueKind::HelperUpdateRequired
+                | super::environment_rail::EnvironmentRailIssueKind::ConnectionFailed => {
+                    "刷新会话列表".to_owned()
+                }
+            }
         } else {
             "刷新会话列表".to_owned()
         }
     }
 
-    pub(super) fn begin_workspace_sessions_refresh(&mut self, ctx: &mut ViewContext<Self>) -> u64 {
-        self.workspace_sessions_refresh_state.generation = self
-            .workspace_sessions_refresh_state
-            .generation
-            .saturating_add(1);
-        self.workspace_sessions_refresh_state.is_refreshing = true;
-        ctx.notify();
-        self.workspace_sessions_refresh_state.generation
+    pub(super) fn environment_connect_tooltip(&self, authority: &str) -> String {
+        match self.environment_rail_issue(authority) {
+            Some(issue)
+                if matches!(
+                    issue.kind,
+                    super::environment_rail::EnvironmentRailIssueKind::HelperUpdateRequired
+                ) =>
+            {
+                format!("更新远端 Helper 后连接\n{}", issue.message)
+            }
+            Some(issue)
+                if matches!(
+                    issue.kind,
+                    super::environment_rail::EnvironmentRailIssueKind::ConnectionFailed
+                ) =>
+            {
+                format!("连接环境\n{}", issue.message)
+            }
+            Some(_) | None => "连接环境".to_owned(),
+        }
     }
 
-    pub(super) fn finish_workspace_sessions_refresh_if_current(
+    pub(super) fn environment_rail_issue(
+        &self,
+        authority: &str,
+    ) -> Option<super::environment_rail::EnvironmentRailIssue> {
+        if let Some(failure) = self.environments.runtime_failure_for_authority(authority) {
+            let (kind, label) = match failure.recovery {
+                crate::workspace::environment_table::EnvironmentRuntimeFailureRecovery::Reconnect => (
+                    super::environment_rail::EnvironmentRailIssueKind::ConnectionFailed,
+                    "连接失败",
+                ),
+                crate::workspace::environment_table::EnvironmentRuntimeFailureRecovery::UpdateHelper => (
+                    super::environment_rail::EnvironmentRailIssueKind::HelperUpdateRequired,
+                    "Helper 需更新",
+                ),
+            };
+            return Some(super::environment_rail::EnvironmentRailIssue {
+                kind,
+                label: label.to_owned(),
+                message: failure.message.clone(),
+            });
+        }
+
+        self.environments
+            .indexed_cli_agent_session_discovery_issue(authority)
+            .map(|issue| match issue {
+                crate::workspace::environment_table::EnvironmentSessionDiscoveryIssue::Failed(
+                    message,
+                ) => super::environment_rail::EnvironmentRailIssue {
+                    kind: super::environment_rail::EnvironmentRailIssueKind::DiscoveryFailed,
+                    label: "发现失败".to_owned(),
+                    message: message.clone(),
+                },
+                crate::workspace::environment_table::EnvironmentSessionDiscoveryIssue::SourceMissing(
+                    agent,
+                ) => {
+                    let scope = if ParsedEnvironmentAuthority::parse(authority)
+                        .uses_terminal_bootstrap()
+                    {
+                        "本机"
+                    } else {
+                        "远端"
+                    };
+                    super::environment_rail::EnvironmentRailIssue {
+                        kind:
+                            super::environment_rail::EnvironmentRailIssueKind::DiscoverySourceMissing,
+                        label: "来源不可用".to_owned(),
+                        message: format!(
+                            "{scope} {} 会话来源本轮不可用；已保留上次成功发现的会话。",
+                            agent.display_name()
+                        ),
+                    }
+                }
+            })
+    }
+
+    pub(super) fn begin_environment_sessions_refresh(
         &mut self,
+        authority: &str,
+        ctx: &mut ViewContext<Self>,
+    ) -> u64 {
+        let navigation_key = Self::environment_sessions_refresh_navigation_key(authority);
+        self.environment_sessions_refresh_state.next_generation = self
+            .environment_sessions_refresh_state
+            .next_generation
+            .saturating_add(1);
+        let generation = self.environment_sessions_refresh_state.next_generation;
+        self.environment_sessions_refresh_state
+            .refresh_generation_by_navigation_key
+            .insert(navigation_key, generation);
+        ctx.notify();
+        generation
+    }
+
+    pub(super) fn finish_environment_sessions_refresh_if_current(
+        &mut self,
+        authority: &str,
         generation: u64,
         ctx: &mut ViewContext<Self>,
     ) {
-        if self.workspace_sessions_refresh_state.generation != generation {
+        let navigation_key = Self::environment_sessions_refresh_navigation_key(authority);
+        if self
+            .environment_sessions_refresh_state
+            .refresh_generation_by_navigation_key
+            .get(&navigation_key)
+            .copied()
+            != Some(generation)
+        {
             return;
         }
-        self.workspace_sessions_refresh_state.is_refreshing = false;
+        self.environment_sessions_refresh_state
+            .refresh_generation_by_navigation_key
+            .remove(&navigation_key);
         ctx.notify();
     }
 
-    pub(super) fn fail_workspace_sessions_refresh_if_current(
+    pub(super) fn fail_environment_sessions_refresh_if_current(
         &mut self,
+        authority: &str,
         generation: u64,
         message: String,
         ctx: &mut ViewContext<Self>,
     ) {
-        if self.workspace_sessions_refresh_state.generation != generation {
+        let navigation_key = Self::environment_sessions_refresh_navigation_key(authority);
+        if self
+            .environment_sessions_refresh_state
+            .refresh_generation_by_navigation_key
+            .get(&navigation_key)
+            .copied()
+            != Some(generation)
+        {
             return;
         }
-        self.workspace_sessions_refresh_state.is_refreshing = false;
+        self.environment_sessions_refresh_state
+            .refresh_generation_by_navigation_key
+            .remove(&navigation_key);
+        let operation_key = format!("{WORKSPACE_SESSIONS_REFRESH_OPERATION_KEY}:{navigation_key}");
         self.toast_stack.update(ctx, |toast_stack, ctx| {
             toast_stack.add_operation_toast(
                 DismissibleToast::error(message),
                 "session-navigator",
-                WORKSPACE_SESSIONS_REFRESH_OPERATION_KEY,
+                &operation_key,
                 ctx,
             );
         });
         ctx.notify();
+    }
+
+    pub(super) fn cancel_environment_sessions_refresh(
+        &mut self,
+        authority: &str,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let navigation_key = Self::environment_sessions_refresh_navigation_key(authority);
+        if self
+            .environment_sessions_refresh_state
+            .refresh_generation_by_navigation_key
+            .remove(&navigation_key)
+            .is_some()
+        {
+            ctx.notify();
+        }
     }
 
     pub(super) fn show_workspace_session_success_toast(
@@ -2185,6 +2358,45 @@ impl Workspace {
     }
 
     // ── 删除 / 删除后重选 ────────────────────────────────────────────
+
+    pub(super) fn request_close_workspace_session(
+        &mut self,
+        target: &WorkspaceSessionActionTarget,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(session) = self.workspace_session_for_action_target(target, ctx) else {
+            log::warn!(
+                "request_close_workspace_session: missing session {} in {:?}",
+                target.session_id,
+                target.environment_authority_key
+            );
+            self.show_workspace_session_error_toast("会话不存在，已刷新后请重试".to_owned(), ctx);
+            return;
+        };
+
+        if self.is_restoring_workspace_session(&session) {
+            return;
+        }
+
+        let Some(locator) = self.locator_for_workspace_session_snapshot(&session, ctx) else {
+            log::warn!(
+                "request_close_workspace_session: missing live locator for session {}",
+                session.id
+            );
+            self.show_workspace_session_error_toast("当前窗口中找不到该会话的面板".to_owned(), ctx);
+            return;
+        };
+
+        let source = OpenDialogSource::ClosePane {
+            pane_group_id: locator.pane_group_id,
+            pane_id: locator.pane_id,
+        };
+        if self.should_confirm_close_session(ctx) {
+            self.show_close_session_confirmation_dialog(source, ctx);
+        } else {
+            self.close_pane(locator.pane_group_id, locator.pane_id, ctx);
+        }
+    }
 
     pub(super) fn request_delete_workspace_session(
         &mut self,
@@ -2980,8 +3192,7 @@ impl Workspace {
         let catalog = crate::ssh_manager::SshTargetCatalog::handle(ctx);
         let environment_host_key =
             Self::workspace_session_environment_host_key(session, catalog.as_ref(ctx));
-        let fallback_title =
-            session.title_fallback_label(self.workspace_session_alias(session, ctx));
+        let fallback_title = session.title_fallback_label(self.workspace_session_alias(session));
         CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
             sessions.set_session(
                 terminal_view_id,
@@ -3185,7 +3396,12 @@ impl Workspace {
             );
         }
 
-        menu_items.extend([MenuItemFields::new(if session.is_live_container() {
+        let alias_subject = session.alias_subject();
+        let uses_container_override = matches!(
+            alias_subject,
+            crate::app_state::WorkspaceSessionAliasSubject::Container(_)
+        );
+        menu_items.extend([MenuItemFields::new(if uses_container_override {
             crate::t!("workspace-session-navigator-menu-rename-pane")
         } else {
             crate::t!("workspace-session-navigator-menu-rename-alias")
@@ -3195,7 +3411,7 @@ impl Workspace {
         })
         .into_item()]);
 
-        let has_clearable_title = if session.is_live_container() {
+        let has_clearable_title = if uses_container_override {
             self.locator_for_workspace_session_snapshot(&session, ctx)
                 .and_then(|locator| {
                     self.get_pane_group_view_with_id(locator.pane_group_id)
@@ -3209,11 +3425,11 @@ impl Workspace {
                 })
                 .unwrap_or(false)
         } else {
-            self.workspace_session_alias(&session, ctx).is_some()
+            self.workspace_session_alias(&session).is_some()
         };
         if has_clearable_title {
             menu_items.push(
-                MenuItemFields::new(if session.is_live_container() {
+                MenuItemFields::new(if uses_container_override {
                     crate::t!("workspace-session-navigator-menu-reset-pane-name")
                 } else {
                     crate::t!("workspace-session-navigator-menu-clear-alias")
@@ -3233,23 +3449,39 @@ impl Workspace {
                 })
                 .into_item(),
         );
-
-        if !is_restoring {
+        if cfg!(debug_assertions) {
             menu_items.push(
-                MenuItemFields::new(if is_live_in_current_environment {
-                    "退出并删除…"
-                } else {
-                    "永久删除…"
-                })
-                .with_on_select_action(WorkspaceAction::RequestDeleteWorkspaceSession {
-                    target: session_target,
+                MenuItemFields::new("复制关系 X-Ray JSON")
+                    .with_on_select_action(WorkspaceAction::CopyWorkspaceSessionXRay {
+                        target: session_target.clone(),
+                    })
+                    .into_item(),
+            );
+        }
+
+        if is_live_in_current_environment && !is_restoring {
+            menu_items.push(
+                MenuItemFields::new(crate::t!(
+                    "workspace-session-navigator-menu-close-conversation"
+                ))
+                .with_on_select_action(WorkspaceAction::RequestCloseWorkspaceSession {
+                    target: session_target.clone(),
                 })
                 .into_item(),
             );
-        } else {
-            menu_items.push(MenuItem::Separator);
+        }
+
+        if !is_restoring {
             menu_items.push(
-                MenuItemFields::new("永久删除…")
+                MenuItemFields::new(crate::t!("workspace-session-navigator-menu-delete"))
+                    .with_on_select_action(WorkspaceAction::RequestDeleteWorkspaceSession {
+                        target: session_target,
+                    })
+                    .into_item(),
+            );
+        } else {
+            menu_items.push(
+                MenuItemFields::new(crate::t!("workspace-session-navigator-menu-delete"))
                     .with_disabled(true)
                     .into_item(),
             );

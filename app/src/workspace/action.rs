@@ -192,15 +192,22 @@ pub enum WorkspaceAction {
         target: EnvironmentProviderTarget,
     },
     /// 将 provider target 打开为 Ashide Environment；不立即拨号，先进入 dormant
-    /// 环境状态，等待用户显式 reconnect / connect。
+    /// 环境状态，等待用户显式 Connect。
     OpenEnvironmentRuntime {
         target: EnvironmentProviderTarget,
     },
-    /// 对当前 Environment 执行显式 reconnect。底层 transport 由 provider 决定。
-    ReconnectCurrentEnvironment,
+    /// 对指定 Environment 执行显式 Connect。若该 authority 曾连接过，底层
+    /// transport 可复用为 reconnect，但产品 action 不区分首次与再次连接。
+    ConnectEnvironment {
+        authority_key: String,
+    },
     /// 切换到当前窗口内已打开的 Environment。
     SwitchEnvironment {
         authority_key: String,
+    },
+    /// 折叠或展开左栏 Environment rail section 的会话 viewport。
+    ToggleEnvironmentRailSection {
+        navigation_key: String,
     },
     /// 显式断开并释放当前窗口内的 Environment 标签。
     DisconnectEnvironment {
@@ -214,8 +221,8 @@ pub enum WorkspaceAction {
     ActivateRestoredWorkspaceSession {
         target: WorkspaceSessionActionTarget,
     },
-    /// User requested to rename a Session Navigator row. Live rows edit their
-    /// pane-container title; virtual rows edit their durable session alias.
+    /// User requested to rename the row's typed alias subject. A durable session
+    /// keeps the alias across carriers; only an unbound live pane edits its container.
     RequestRenameWorkspaceSession {
         target: WorkspaceSessionActionTarget,
     },
@@ -226,6 +233,14 @@ pub enum WorkspaceAction {
     /// User requested to copy the session's stable identifier to the clipboard
     /// (SSTAB-007 discoverability: short id / cwd / authority cues).
     CopyWorkspaceSessionId {
+        target: WorkspaceSessionActionTarget,
+    },
+    /// Copies the debug relationship projection for Environment/container/session/runtime.
+    CopyWorkspaceSessionXRay {
+        target: WorkspaceSessionActionTarget,
+    },
+    /// Close a live session's pane or tab without deleting Navigator history.
+    RequestCloseWorkspaceSession {
         target: WorkspaceSessionActionTarget,
     },
     /// User requested permanent deletion; must show confirmation before deleting files.
@@ -369,8 +384,10 @@ pub enum WorkspaceAction {
     OpenCodeReviewPanel(PaneViewLocator),
     /// Toggles the vertical tabs panel. This happens as an explicit action from the user.
     ToggleVerticalTabsPanel,
-    /// Re-scan current-app and Environment CLI-agent session history and refresh the Session Navigator.
-    RefreshWorkspaceSessions,
+    /// Re-scan the exact Environment CLI-agent session history shown under its rail header.
+    RefreshEnvironmentSessions {
+        authority_key: String,
+    },
     ToggleWorkspaceSessionPinned {
         target: WorkspaceSessionActionTarget,
         pinned: bool,
@@ -771,8 +788,9 @@ impl WorkspaceAction {
             | AddTerminalPane(_)
             | OpenEnvironmentRuntimeTerminal { .. }
             | OpenEnvironmentRuntime { .. }
-            | ReconnectCurrentEnvironment
+            | ConnectEnvironment { .. }
             | SwitchEnvironment { .. }
+            | ToggleEnvironmentRailSection { .. }
             | DisconnectEnvironment { .. }
             | SetEnvironmentProviderPickerOpen { .. }
             | OpenEnvironmentProviderCandidate { .. }
@@ -945,7 +963,7 @@ impl WorkspaceAction {
             | DismissSessionConfigTabConfigChip
             | SetWorkspaceSessionRestorePopoverOpen { .. }
             | RefreshEnvironmentSshTargets
-            | RefreshWorkspaceSessions
+            | RefreshEnvironmentSessions { .. }
             | ToggleWorkspaceSessionPinned { .. }
             | ReorderWorkspaceSessionUnit { .. }
             | ActivateRestoredWorkspaceSession { .. }
@@ -955,6 +973,8 @@ impl WorkspaceAction {
             | RequestRenameWorkspaceSession { .. }
             | ResetWorkspaceSessionName { .. }
             | CopyWorkspaceSessionId { .. }
+            | CopyWorkspaceSessionXRay { .. }
+            | RequestCloseWorkspaceSession { .. }
             | RequestDeleteWorkspaceSession { .. }
             | DeleteWorkspaceSession { .. }
             | SaveCurrentTabAsNewConfig(_)

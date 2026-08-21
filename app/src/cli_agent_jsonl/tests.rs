@@ -77,6 +77,41 @@ fn discovery_plan_distinguishes_source_missing_from_successful_empty_store() {
 
 #[cfg(feature = "local_fs")]
 #[test]
+fn discovery_plan_does_not_observe_unprovisioned_optional_provider() {
+    let home = tempfile::tempdir().expect("create discovery home");
+    let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+    fs::create_dir_all(roots.omp_sessions()).expect("provision empty Omp store");
+    let plan = AgentSessionDiscoveryPlan::for_test(
+        vec![
+            AgentSessionDiscoveryProvider::Omp,
+            AgentSessionDiscoveryProvider::Droid,
+        ],
+        40,
+    );
+
+    let first_observed = match plan.execute(&roots, &HashSet::new()) {
+        AgentSessionDiscoveryResult::Complete { providers, records } => {
+            assert!(records.is_empty());
+            providers
+        }
+        result => panic!("first discovery must complete, got {result:?}"),
+    };
+    assert_eq!(
+        first_observed,
+        [AgentSessionDiscoveryProvider::Omp],
+        "configured but never-provisioned Droid is not a physical observation",
+    );
+
+    let second_observed = first_observed.iter().copied().collect::<HashSet<_>>();
+    assert!(matches!(
+        plan.execute(&roots, &second_observed),
+        AgentSessionDiscoveryResult::Complete { providers, records }
+            if providers == [AgentSessionDiscoveryProvider::Omp] && records.is_empty()
+    ));
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
 fn discovery_plan_uses_only_enabled_unique_file_backed_agents() {
     let plan = AgentSessionDiscoveryPlan::from_enabled_agents(
         [CLIAgent::Unknown, CLIAgent::Omp, CLIAgent::Claude],
@@ -847,7 +882,9 @@ fn expanded_provider_parsers_extract_native_identity_title_and_cwd() {
         ),
         (
             AgentSessionDiscoveryProvider::Cursor,
-            roots.cursor_projects().join("repo/agent-transcripts/cursor.jsonl"),
+            roots
+                .cursor_projects()
+                .join("repo/agent-transcripts/cursor.jsonl"),
             serde_json::json!({"sessionId":"cursor-1","role":"user","message":{"content":"Cursor task"},"cwd":project}).to_string(),
             "cursor-1",
             "Cursor task",
@@ -861,6 +898,76 @@ fn expanded_provider_parsers_extract_native_identity_title_and_cwd() {
         assert_eq!(records[0].provider_session_id, expected_id);
         assert_eq!(records[0].label.as_deref(), Some(expected_title));
     }
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn generic_provider_native_title_can_arrive_after_first_user_message() {
+    let home = tempfile::tempdir().expect("create provider home");
+    let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+    let path = roots.copilot_sessions().join("late-native-title.jsonl");
+    fs::create_dir_all(path.parent().expect("fixture parent")).expect("create provider store");
+    fs::write(
+        &path,
+        format!(
+            "{}\n{}\n{}",
+            serde_json::json!({"type":"session.start","data":{"sessionId":"copilot-late-title"}}),
+            serde_json::json!({"type":"user.message","data":{"content":"First user fallback"}}),
+            serde_json::json!({"title":"Agent native title"}),
+        ),
+    )
+    .expect("write provider session");
+
+    let records = scan_agent_session_provider(AgentSessionDiscoveryProvider::Copilot, &roots, 10)
+        .expect("scan provider");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].label.as_deref(), Some("Agent native title"));
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn cursor_cli_chats_store_discovery_prefers_store_db_over_jsonl_fallback() {
+    let home = tempfile::tempdir().expect("create Cursor home");
+    let project = home.path().join("project");
+    fs::create_dir(&project).expect("create project");
+    let roots = CliAgentStoreRoots::for_home(home.path().to_path_buf());
+    let session_id = "4e717298-8592-4772-a3b8-60ba7266a102";
+    let chats_session_dir = roots
+        .cursor_chats()
+        .join("8044610af463b29ce45dfbcab6c2eb0e")
+        .join(session_id);
+    fs::create_dir_all(&chats_session_dir).expect("create chats session dir");
+    fs::write(
+        chats_session_dir.join("meta.json"),
+        serde_json::json!({
+            "schemaVersion": 1,
+            "title": "SSH Config Check",
+            "cwd": project,
+            "updatedAtMs": 1_787_263_102_725_i64,
+        })
+        .to_string(),
+    )
+    .expect("write meta");
+    fs::write(chats_session_dir.join("store.db"), b"sqlite-placeholder").expect("write store.db");
+    let jsonl = roots
+        .cursor_projects()
+        .join("repo/agent-transcripts/cursor-fallback.jsonl");
+    fs::create_dir_all(jsonl.parent().expect("jsonl parent")).expect("create jsonl dir");
+    fs::write(
+        &jsonl,
+        serde_json::json!({"sessionId": session_id, "role":"user","message":{"content":"Fallback"}}).to_string(),
+    )
+    .expect("write jsonl fallback");
+
+    let records = scan_agent_session_provider(AgentSessionDiscoveryProvider::Cursor, &roots, 10)
+        .expect("scan Cursor");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].provider_session_id, session_id);
+    assert_eq!(records[0].label.as_deref(), Some("SSH Config Check"));
+    assert!(matches!(
+        records[0].source,
+        AgentSessionDiscoverySource::CursorCliStoreEntry { .. }
+    ));
 }
 
 #[cfg(feature = "local_fs")]

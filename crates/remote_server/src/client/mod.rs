@@ -11,8 +11,8 @@ use warpui::r#async::{executor, FutureExt as _};
 
 use crate::proto::{
     client_message, server_message, Abort, AbortFileTransfer, AbortFileTransferResponse,
-    AppendFile, AppendFileResponse, Authenticate, BeginFileTransfer, BeginFileTransferResponse,
-    BufferEdit, CliAgentSessionStoreRoots, ClientMessage, CloseBuffer, ClosePty, CreateDirectory,
+    AppendFile, AppendFileResponse, BeginFileTransfer, BeginFileTransferResponse, BufferEdit,
+    CliAgentSessionStoreRoots, ClientMessage, CloseBuffer, ClosePty, CreateDirectory,
     CreateDirectoryResponse, CreatePty, CreatePtyResponse, DeleteDirectory,
     DeleteDirectoryIdentity, DeleteFile, ErrorCode, ExactRename, FileTransferHandle,
     FinishFileTransfer, FinishFileTransferResponse, GetCliAgentSessionUserState,
@@ -22,10 +22,11 @@ use crate::proto::{
     MutateCliAgentSessionUserStateResponse, NavigatedToDirectoryResponse, OpenBuffer,
     OpenBufferResponse, PromoteFiles, PromoteFilesResponse, PromotionTarget, ReadCliAgentSession,
     ReadCliAgentSessionResponse, ReadFileChunk, ReadFileChunkResponse, ReadFileContextRequest,
-    ReadFileContextResponse, ResizePty, ResolveConflict, ResolveConflictResponse, ResolvePath,
-    ResolvePathResponse, RunCommandRequest, RunCommandResponse, SaveBuffer, SaveBufferResponse,
-    ScanCliAgentSessions, ScanCliAgentSessionsResponse, ServerMessage, SessionBootstrapped,
-    SessionExecutionContextDeregistered, TextEdit, WriteFile, WriteFileChunk,
+    ReadFileContextResponse, ResizePty, ResolveCliAgentSessionStoreRoots,
+    ResolveCliAgentSessionStoreRootsResponse, ResolveConflict, ResolveConflictResponse,
+    ResolvePath, ResolvePathResponse, RunCommandRequest, RunCommandResponse, SaveBuffer,
+    SaveBufferResponse, ScanCliAgentSessions, ScanCliAgentSessionsResponse, ServerMessage,
+    SessionBootstrapped, SessionExecutionContextDeregistered, TextEdit, WriteFile, WriteFileChunk,
     WriteFileChunkResponse, WritePty,
 };
 
@@ -63,6 +64,25 @@ pub enum ClientError {
 
     #[error("File operation failed: {0}")]
     FileOperationFailed(String),
+}
+
+impl ClientError {
+    /// Whether recovery requires replacing the target helper binary rather
+    /// than retrying the same transport. Older helpers report the initialize
+    /// mismatch as a generic server error, so that stable protocol message is
+    /// classified here at the client boundary instead of by product UI code.
+    pub fn requires_helper_update(&self) -> bool {
+        match self {
+            Self::ProtocolRevisionMismatch { .. } => true,
+            Self::ServerError { message, .. } => message.contains("protocol revision mismatch"),
+            Self::Disconnected
+            | Self::Protocol(_)
+            | Self::ResponseChannelClosed
+            | Self::UnexpectedResponse
+            | Self::Timeout(_)
+            | Self::FileOperationFailed(_) => false,
+        }
+    }
 }
 
 /// Events received from the remote server, delivered through the event
@@ -116,6 +136,7 @@ const REQUIRED_RESULT_RESPONSE_NAMES: &[&str] = &[
     "FinishFileTransferResponse",
     "PromoteFilesResponse",
     "ResolveConflictResponse",
+    "ResolveCliAgentSessionStoreRootsResponse",
     "ResolvePathResponse",
     "RunCommandResponse",
     "SaveBufferResponse",
@@ -162,6 +183,9 @@ fn validate_required_response_result(response: &ServerMessage) -> Result<(), Cli
         }
         Some(server_message::Message::PromoteFilesResponse(response)) => response.result.is_none(),
         Some(server_message::Message::ResolveConflictResponse(response)) => {
+            response.result.is_none()
+        }
+        Some(server_message::Message::ResolveCliAgentSessionStoreRootsResponse(response)) => {
             response.result.is_none()
         }
         Some(server_message::Message::ResolvePathResponse(response)) => response.result.is_none(),
@@ -314,15 +338,11 @@ impl RemoteServerClient {
     }
 
     /// Sends an `Initialize` request and awaits the `InitializeResponse`.
-    pub async fn initialize(
-        &self,
-        auth_token: Option<&str>,
-    ) -> Result<InitializeResponse, ClientError> {
+    pub async fn initialize(&self) -> Result<InitializeResponse, ClientError> {
         let request_id = RequestId::new();
         let msg = ClientMessage {
             request_id: request_id.to_string(),
             message: Some(client_message::Message::Initialize(Initialize {
-                auth_token: auth_token.unwrap_or_default().to_owned(),
                 protocol_revision: crate::REMOTE_SERVER_PROTOCOL_REVISION,
             })),
         };
@@ -345,18 +365,6 @@ impl RemoteServerClient {
                 Err(ClientError::UnexpectedResponse)
             }
         }
-    }
-
-    /// Sends an `Authenticate` notification to rotate the daemon-wide
-    /// credential after initialization.
-    pub fn authenticate(&self, auth_token: &str) {
-        let msg = ClientMessage {
-            request_id: String::new(),
-            message: Some(client_message::Message::Authenticate(Authenticate {
-                auth_token: auth_token.to_owned(),
-            })),
-        };
-        self.send_notification(msg);
     }
 
     /// Sends a `SessionBootstrapped` notification (fire-and-forget) so the
@@ -647,6 +655,33 @@ impl RemoteServerClient {
         }
     }
 
+    /// Resolves CLI-agent store roots from the target user's passwd/login-shell
+    /// configuration. This host-scoped request does not require a bootstrapped
+    /// terminal session or a per-session command executor.
+    pub async fn resolve_cli_agent_session_store_roots(
+        &self,
+    ) -> Result<ResolveCliAgentSessionStoreRootsResponse, ClientError> {
+        let request_id = RequestId::new();
+        let msg = ClientMessage {
+            request_id: request_id.to_string(),
+            message: Some(client_message::Message::ResolveCliAgentSessionStoreRoots(
+                ResolveCliAgentSessionStoreRoots {},
+            )),
+        };
+        let response = self.send_request(request_id, msg).await?;
+        match response.message {
+            Some(server_message::Message::ResolveCliAgentSessionStoreRootsResponse(response)) => {
+                Ok(response)
+            }
+            other => {
+                log::error!(
+                    "Unexpected response variant for ResolveCliAgentSessionStoreRoots: {other:?}"
+                );
+                Err(ClientError::UnexpectedResponse)
+            }
+        }
+    }
+
     /// Resolves a session source (including a codex `<index_path>:<id>` source)
     /// to a transcript on the remote host and reads its bytes. The daemon
     /// performs the resolution + read natively in a single round trip.
@@ -682,6 +717,7 @@ impl RemoteServerClient {
     pub async fn mutate_cli_agent_session(
         &self,
         source: String,
+        agent: String,
         mutation: i32,
         roots: CliAgentSessionStoreRoots,
     ) -> Result<MutateCliAgentSessionResponse, ClientError> {
@@ -693,6 +729,7 @@ impl RemoteServerClient {
                     source,
                     mutation,
                     roots: Some(roots),
+                    agent,
                 },
             )),
         };

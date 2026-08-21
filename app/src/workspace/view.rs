@@ -1,7 +1,9 @@
+mod agent_icon;
 pub(crate) mod ashide_launch_modal;
 pub(crate) mod codex_modal;
 #[cfg(enable_crash_recovery)]
 mod crash_recovery;
+mod environment_rail;
 pub mod global_search;
 pub(crate) mod left_panel;
 pub(crate) mod onboarding;
@@ -9,6 +11,8 @@ pub(crate) mod right_panel;
 pub(crate) mod server_file_browser;
 mod session_navigator;
 pub(super) mod session_navigator_reducer;
+mod session_navigator_xray;
+mod session_sidebar_metrics;
 mod startup_directory;
 #[cfg(test)]
 #[path = "view_test.rs"]
@@ -23,8 +27,9 @@ use crate::workspace::cross_window_tab_drag::{
 };
 use crate::workspace::environment_provider;
 use crate::workspace::environment_table::{
-    MaterializationCompletion, MaterializationError, MaterializationOutcome,
-    PendingMaterialization, PendingMaterializationStage,
+    EnvironmentRuntimeFailure, EnvironmentRuntimeFailureRecovery, MaterializationCompletion,
+    MaterializationError, MaterializationOutcome, PendingMaterialization,
+    PendingMaterializationStage,
 };
 pub(crate) use onboarding::OnboardingTutorial;
 
@@ -57,8 +62,8 @@ use crate::app_state::{
     BranchSnapshot, CliAgentSessionOrigin, EnvironmentLifecycleState, EnvironmentSnapshot,
     LeafContents, LeafSnapshot, LeftPanelDisplayedTab, LeftPanelSnapshot, NotebookPaneSnapshot,
     PaneNodeSnapshot, PaneUuid, RightPanelSnapshot, SettingsPaneSnapshot, TabSnapshot,
-    TerminalPaneSnapshot, WindowSnapshot, WorkflowPaneSnapshot, WorkspaceSessionKind,
-    WorkspaceSessionSnapshot,
+    TerminalPaneSnapshot, WindowSnapshot, WorkflowPaneSnapshot, WorkspaceSessionAliasSubject,
+    WorkspaceSessionKind, WorkspaceSessionSnapshot,
 };
 use crate::code_review::diff_state::{DiffStateModel, GitDeltaPreference};
 use crate::code_review::GlobalCodeReviewModel;
@@ -258,11 +263,13 @@ use crate::search::command_search::searcher::{
 use crate::search::command_search::view::{CommandSearchEvent, CommandSearchView};
 use crate::server_time::ServerTime;
 use crate::session_management::{SessionNavigationData, SessionSource};
+#[cfg(feature = "crash_reporting")]
+use crate::settings::PrivacySettings;
 use crate::settings::{
     active_theme_kind, respect_system_theme, AccessibilitySettings, AliasExpansionSettings,
     AppEditorSettings, BlockVisibilitySettings, CursorBlink, DebugSettings, FontSettings,
-    GPUSettings, InputSettings, MonospaceFontSize, PaneSettings, PrivacySettings,
-    SelectionSettings, SshSettings, ThemeSettings,
+    GPUSettings, InputSettings, MonospaceFontSize, PaneSettings, SelectionSettings, SshSettings,
+    ThemeSettings,
 };
 use crate::settings_view::flags;
 use crate::settings_view::keybindings::{KeybindingChangedEvent, KeybindingChangedNotifier};
@@ -427,9 +434,9 @@ use crate::tab_configs::{
 };
 use crate::workspace::environment_backend::{
     AgentTabEntry, EnvironmentBackend, EnvironmentBackendKind, EnvironmentEntryIntent,
-    EnvironmentNavigationActivationIntent, EnvironmentSessionRefreshIntent, ForkEntry,
-    PlainTerminalEntry, RuntimeEnvironmentBackend, SessionRestoreEntry,
-    SessionUserStateMutationDelivery, TerminalBootstrapEnvironmentBackend,
+    EnvironmentNavigationActivationIntent, EnvironmentSessionRefreshAvailability,
+    EnvironmentSessionRefreshIntent, ForkEntry, PlainTerminalEntry, RuntimeEnvironmentBackend,
+    SessionRestoreEntry, SessionUserStateMutationDelivery, TerminalBootstrapEnvironmentBackend,
 };
 #[cfg(feature = "local_fs")]
 use crate::workspace::environment_runtime::EnvironmentRuntimeTransportEvent;
@@ -1271,7 +1278,6 @@ impl SessionBridgeEnvironment {
             } => {
                 let roots = crate::workspace::environment_runtime::resolve_environment_cli_agent_store_roots(
                     &client,
-                    session_id,
                 )
                 .await
                 .map_err(|error| {
@@ -1495,12 +1501,15 @@ impl ResolvedSessionBridgeEnvironment {
                 ResolvedSessionBridgeEnvironment::Local { roots },
                 CliAgentSourceLocator::CurrentApp(source_locator),
             ) => {
-                drop(source_locator);
+                let agent = source_locator.agent.ok_or_else(|| {
+                    "local CLI session source is missing Agent identity".to_owned()
+                })?;
                 let roots = roots.clone();
                 tokio::task::spawn_blocking(move || match action {
                     EnvironmentCliAgentSessionSourceAction::Delete => {
                         crate::terminal::cli_agent_session_index::delete_current_app_cli_agent_session_with_roots(
                             &source_id,
+                            agent,
                             &roots,
                         )
                     }
@@ -1850,9 +1859,9 @@ struct PendingEnvironmentRuntimeEntryPlan {
 }
 
 #[derive(Default)]
-struct WorkspaceSessionsRefreshState {
-    is_refreshing: bool,
-    generation: u64,
+struct EnvironmentSessionsRefreshState {
+    next_generation: u64,
+    refresh_generation_by_navigation_key: HashMap<String, u64>,
 }
 
 struct EnvironmentRuntimeTerminalOpenResult {
@@ -1872,7 +1881,7 @@ pub struct Workspace {
     tab_rename_editor: ViewHandle<EditorView>,
     pane_rename_editor: ViewHandle<EditorView>,
     workspace_session_title_editor: ViewHandle<EditorView>,
-    renaming_workspace_session_identity: Option<session_navigator::SessionNavigatorRowIdentity>,
+    renaming_workspace_session: Option<session_navigator::SessionNavigatorRenameState>,
     vertical_tabs_search_input: ViewHandle<EditorView>,
     tips_completed: ModelHandle<TipsCompleted>,
     user_default_shell_unsupported_banner_model_handle: ModelHandle<BannerState>,
@@ -2001,7 +2010,7 @@ pub struct Workspace {
     /// automatically resumed. This lets Codex/Claude/agy sessions become
     /// explicit recovery affordances without binding their resume protocols yet.
     restored_workspace_sessions: Vec<WorkspaceSessionSnapshot>,
-    workspace_sessions_refresh_state: WorkspaceSessionsRefreshState,
+    environment_sessions_refresh_state: EnvironmentSessionsRefreshState,
     /// When true, `on_window_closed` skips detaching panes, so pane groups
     /// transferred to another window aren't torn down when this window closes
     /// via `TerminationMode::ContentTransferred`.
@@ -4134,9 +4143,15 @@ impl Workspace {
                         EnvironmentRuntimeTransportEvent::SessionConnectionFailed {
                             session_id,
                             error,
+                            remediation,
                             ..
                         } => {
-                            me.handle_environment_runtime_failed(*session_id, error.clone(), ctx);
+                            me.handle_environment_runtime_connection_failed(
+                                *session_id,
+                                error.clone(),
+                                *remediation,
+                                ctx,
+                            );
                         }
                         EnvironmentRuntimeTransportEvent::SessionDisconnected {
                             session_id,
@@ -4438,7 +4453,7 @@ impl Workspace {
             tab_rename_editor: Self::tab_rename_editor(ctx),
             pane_rename_editor: Self::pane_rename_editor(ctx),
             workspace_session_title_editor: Self::workspace_session_title_editor(ctx),
-            renaming_workspace_session_identity: None,
+            renaming_workspace_session: None,
             vertical_tabs_search_input: Self::vertical_tabs_search_input(ctx),
             tips_completed,
             user_default_shell_unsupported_banner_model_handle,
@@ -4538,7 +4553,7 @@ impl Workspace {
             environments: crate::workspace::environment_table::EnvironmentTable::default(),
             is_allocating_environment_runtime_placeholder: false,
             restored_workspace_sessions: Vec::new(),
-            workspace_sessions_refresh_state: WorkspaceSessionsRefreshState::default(),
+            environment_sessions_refresh_state: EnvironmentSessionsRefreshState::default(),
             suppress_detach_panes_on_window_close: false,
             is_tab_drag_preview: false,
             new_session_sidecar_menu,
@@ -7192,6 +7207,30 @@ impl Workspace {
         crate::workspace::environment_runtime::client_for_session(target.session_id, ctx).is_some()
     }
 
+    fn environment_session_refresh_availability(
+        &self,
+        authority: &str,
+        ctx: &AppContext,
+    ) -> EnvironmentSessionRefreshAvailability {
+        if ParsedEnvironmentAuthority::parse(authority).uses_terminal_bootstrap() {
+            return EnvironmentSessionRefreshAvailability::Ready;
+        }
+        if self.environment_runtime_lifecycle_for_authority(authority)
+            != Some(EnvironmentLifecycleState::Connected)
+        {
+            return EnvironmentSessionRefreshAvailability::Unavailable;
+        }
+        let Some(target) = self.environment_runtime_target_for_authority(authority) else {
+            return EnvironmentSessionRefreshAvailability::Unavailable;
+        };
+        if crate::workspace::environment_runtime::client_for_session(target.session_id, ctx)
+            .is_none()
+        {
+            return EnvironmentSessionRefreshAvailability::Unavailable;
+        }
+        EnvironmentSessionRefreshAvailability::Ready
+    }
+
     fn refresh_environment_runtime_left_panel_roots_for_authority(
         &mut self,
         authority: &str,
@@ -7455,14 +7494,14 @@ impl Workspace {
         Some(authority)
     }
 
-    fn mark_environment_runtime_error_for_session(
+    fn mark_environment_runtime_failure_for_session(
         &mut self,
         session_id: SessionId,
-        error: String,
+        failure: EnvironmentRuntimeFailure,
     ) -> Option<String> {
         let authority = self
             .environments
-            .mark_error_for_session(session_id, error)?;
+            .mark_failure_for_session(session_id, failure)?;
         self.set_environment_lifecycle_for_authority(&authority, EnvironmentLifecycleState::Error);
         self.environments.clear_preparation_generation(&authority);
         Some(authority)
@@ -7761,13 +7800,10 @@ impl Workspace {
             return;
         };
 
-        let title = pending_restore
-            .session
-            .title_fallback_label(self.workspace_session_alias(&pending_restore.session, ctx));
         let intent = EnvironmentEntryIntent::SessionRestore(pending_restore);
         let materialization_pane_id = self.allocate_environment_runtime_placeholder_tab(
             environment,
-            title,
+            None,
             intent.pane_session_binding(),
             ctx,
         );
@@ -9657,11 +9693,9 @@ impl Workspace {
             false,
         );
         let environment = self.current_environment_for_strip(ctx);
-        let initial_pane_title =
-            session.title_fallback_label(self.workspace_session_alias(session, ctx));
         self.open_terminal_bootstrap_tab_in_environment(
             spawn,
-            initial_pane_title,
+            None,
             environment,
             initial_session_binding,
             ctx,
@@ -10352,15 +10386,13 @@ impl Workspace {
             crate::workspace::environment_runtime::client_for_session(session_id, ctx)
         else {
             log::warn!(
-                "scan_environment_runtime_agent_sessions: no environment runtime client for {session_id:?}; reconnecting {authority}"
+                "scan_environment_runtime_agent_sessions: no environment runtime client for {session_id:?}; preserving {authority} projection"
             );
-            if self.environment_runtime_session_matches_authority(&authority, session_id) {
-                self.reconnect_environment_runtime_authority_if_transport_inactive(&authority, ctx);
-            }
             if let Some(refresh_generation) = refresh_generation {
-                self.fail_workspace_sessions_refresh_if_current(
+                self.fail_environment_sessions_refresh_if_current(
+                    &authority,
                     refresh_generation,
-                    "远程运行时未就绪，已尝试重连；连接后再刷新".to_owned(),
+                    "远程运行时未就绪；请先重新连接环境".to_owned(),
                     ctx,
                 );
             }
@@ -10377,12 +10409,12 @@ impl Workspace {
             .map(PathBuf::from)
             .into_iter()
             .collect::<Vec<_>>();
+        let refresh_authority = authority.clone();
         ctx.spawn(
             async move {
                 let records =
                     crate::workspace::environment_runtime::scan_environment_cli_agent_sessions(
                         client.clone(),
-                        session_id,
                         &enabled_agents,
                         &previously_observed_agents,
                         &scope_paths,
@@ -10419,11 +10451,14 @@ impl Workspace {
                         log::warn!("Environment Session Navigator scan failed: {error}");
                         debug_assert_eq!(preserved, error);
                         if let Some(refresh_generation) = refresh_generation {
-                            workspace.fail_workspace_sessions_refresh_if_current(
+                            workspace.fail_environment_sessions_refresh_if_current(
+                                &refresh_authority,
                                 refresh_generation,
                                 format!("刷新会话列表失败：{error}"),
                                 ctx,
                             );
+                        } else {
+                            ctx.notify();
                         }
                         return;
                     }
@@ -10434,7 +10469,11 @@ impl Workspace {
                         "Environment Session Navigator scan ignored stale result for {authority}/{session_id:?}"
                     );
                     if let Some(refresh_generation) = refresh_generation {
-                        workspace.finish_workspace_sessions_refresh_if_current(refresh_generation, ctx);
+                        workspace.finish_environment_sessions_refresh_if_current(
+                            &authority,
+                            refresh_generation,
+                            ctx,
+                        );
                     }
                     return;
                 }
@@ -10471,18 +10510,26 @@ impl Workspace {
                         "Environment Session Navigator scan ignored stale generation for {authority}/{session_id:?}"
                     );
                     if let Some(refresh_generation) = refresh_generation {
-                        workspace.finish_workspace_sessions_refresh_if_current(refresh_generation, ctx);
+                        workspace.finish_environment_sessions_refresh_if_current(
+                            &authority,
+                            refresh_generation,
+                            ctx,
+                        );
                     }
                     return;
                 }
                 if let Some(user_state) = user_state {
                     workspace.remember_indexed_environment_cli_agent_session_user_state(
-                        authority, user_state,
+                        authority.clone(), user_state,
                     );
                 }
                 workspace.sync_session_navigator_sessions(ctx);
                 if let Some(refresh_generation) = refresh_generation {
-                    workspace.finish_workspace_sessions_refresh_if_current(refresh_generation, ctx);
+                    workspace.finish_environment_sessions_refresh_if_current(
+                        &authority,
+                        refresh_generation,
+                        ctx,
+                    );
                     return;
                 }
                 ctx.notify();
@@ -11805,8 +11852,53 @@ impl Workspace {
         error: String,
         ctx: &mut ViewContext<Self>,
     ) {
+        self.handle_environment_runtime_failure(
+            session_id,
+            EnvironmentRuntimeFailure {
+                message: error,
+                recovery: EnvironmentRuntimeFailureRecovery::Reconnect,
+            },
+            false,
+            ctx,
+        );
+    }
+
+    fn handle_environment_runtime_connection_failed(
+        &mut self,
+        session_id: SessionId,
+        error: String,
+        remediation: crate::workspace::environment_runtime::EnvironmentRuntimeFailureRemediation,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let recovery = match remediation {
+            crate::workspace::environment_runtime::EnvironmentRuntimeFailureRemediation::Reconnect => {
+                EnvironmentRuntimeFailureRecovery::Reconnect
+            }
+            crate::workspace::environment_runtime::EnvironmentRuntimeFailureRemediation::UpdateHelper => {
+                EnvironmentRuntimeFailureRecovery::UpdateHelper
+            }
+        };
+        self.handle_environment_runtime_failure(
+            session_id,
+            EnvironmentRuntimeFailure {
+                message: error,
+                recovery,
+            },
+            matches!(recovery, EnvironmentRuntimeFailureRecovery::UpdateHelper),
+            ctx,
+        );
+    }
+
+    fn handle_environment_runtime_failure(
+        &mut self,
+        session_id: SessionId,
+        failure: EnvironmentRuntimeFailure,
+        show_helper_update_prompt: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let error = failure.message.clone();
         let Some(authority) =
-            self.mark_environment_runtime_error_for_session(session_id, error.clone())
+            self.mark_environment_runtime_failure_for_session(session_id, failure)
         else {
             log::warn!("Environment runtime failed for untracked session {session_id:?}: {error}");
             ctx.notify();
@@ -11822,6 +11914,33 @@ impl Workspace {
                 format!("远程运行时启动失败：{error}"),
                 ctx,
             );
+        }
+        if show_helper_update_prompt {
+            let environment_label = self
+                .environment_runtime_snapshot_for_authority(&authority)
+                .map(|environment| environment.label)
+                .unwrap_or_else(|| authority.clone());
+            let reconnect_authority = authority.clone();
+            let dialog = AlertDialogWithCallbacks::for_view(
+                "远端 Helper 需要更新".to_owned(),
+                format!(
+                    "环境“{environment_label}”上的 Helper 与当前 Ashide 不兼容。更新只会替换远端 Helper，不会删除环境或已发现的会话。\n\n{error}"
+                ),
+                vec![
+                    ModalButton::for_view(
+                        "更新 Helper".to_owned(),
+                        move |workspace: &mut Workspace, ctx| {
+                            workspace.reconnect_environment_runtime_authority(
+                                &reconnect_authority,
+                                ctx,
+                            );
+                        },
+                    ),
+                    ModalButton::for_view("稍后".to_owned(), |_: &mut Workspace, _| {}),
+                ],
+                |_, _| {},
+            );
+            ctx.show_native_platform_modal(dialog);
         }
         ctx.dispatch_global_action("workspace:save_app", ());
         ctx.notify();
@@ -12107,18 +12226,6 @@ impl Workspace {
         self.sync_session_navigator_sessions(ctx);
         ctx.notify();
         true
-    }
-
-    pub fn reconnect_current_environment(&mut self, ctx: &mut ViewContext<Self>) {
-        let Some(authority) = self
-            .current_environment()
-            .as_ref()
-            .map(|environment| environment.authority_key.clone())
-        else {
-            log::warn!("reconnect_current_environment: no current environment");
-            return;
-        };
-        self.reconnect_environment_runtime_authority(&authority, ctx);
     }
 
     /// 在中央区域打开给定 Environment provider 节点的文件浏览器 pane。
@@ -19370,7 +19477,7 @@ impl Workspace {
         });
 
         let title = self
-            .workspace_session_alias(&session, ctx)
+            .workspace_session_alias(&session)
             .or(session.label.clone())
             .or(source_session.label.clone());
         let cwd = session
@@ -19511,7 +19618,7 @@ impl Workspace {
         };
 
         let title = self
-            .workspace_session_alias(&session, ctx)
+            .workspace_session_alias(&session)
             .or(session.label.clone())
             .or(source_session.label.clone());
         let cwd = session
@@ -19860,7 +19967,7 @@ impl Workspace {
         };
 
         let title = self
-            .workspace_session_alias(&session, ctx)
+            .workspace_session_alias(&session)
             .or(session.label.clone())
             .or(source_session.label.clone());
         let cwd = session
@@ -25049,7 +25156,7 @@ impl Workspace {
         self.tab_index_for_environment_authority(authority_key)
     }
 
-    fn open_environment_snapshots(&self, ctx: &AppContext) -> Vec<EnvironmentSnapshot> {
+    pub(super) fn open_environment_snapshots(&self, ctx: &AppContext) -> Vec<EnvironmentSnapshot> {
         let mut environments = Vec::new();
         let mut seen_authorities = HashSet::new();
 
@@ -25184,6 +25291,7 @@ impl Workspace {
         authority_key: &str,
         ctx: &mut ViewContext<Self>,
     ) {
+        self.cancel_environment_sessions_refresh(authority_key, ctx);
         let navigation_key = ParsedEnvironmentAuthority::parse(authority_key)
             .navigation_key()
             .to_owned();
@@ -25292,6 +25400,62 @@ impl Workspace {
             EnvironmentDisplayIconKind::Server => icons::Icon::Server01,
             EnvironmentDisplayIconKind::Terminal => icons::Icon::Terminal,
         }
+    }
+
+    fn render_environment_indicator(
+        &self,
+        appearance: &Appearance,
+        ctx: &AppContext,
+    ) -> Box<dyn Element> {
+        let environment = self.current_environment_for_strip(ctx);
+        let display =
+            crate::workspace::environment_runtime::environment_display_info_for_environment(
+                &environment,
+            );
+        let kind_icon = Self::environment_display_icon(display.icon_kind);
+        let is_open = self
+            .current_workspace_state
+            .is_environment_provider_picker_open;
+        let state_color =
+            Self::environment_lifecycle_color(appearance, &environment.lifecycle_state);
+        let tooltip_label = display.tooltip_label.clone();
+
+        // 顶栏只保留环境入口图标；文案留给左栏 section header / picker 列表。
+        let button = self
+            .render_tab_bar_icon_button(
+                appearance,
+                kind_icon,
+                &self.mouse_states.environment_indicator,
+                WorkspaceAction::SetEnvironmentProviderPickerOpen { open: !is_open },
+                tooltip_label,
+                None,
+                is_open,
+                false,
+            )
+            .finish();
+
+        let status_dot = ConstrainedBox::new(
+            Rect::new()
+                .with_background(state_color)
+                .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
+                .finish(),
+        )
+        .with_width(6.)
+        .with_height(6.)
+        .finish();
+
+        let mut stack = Stack::new();
+        stack.add_child(button);
+        stack.add_positioned_child(
+            status_dot,
+            OffsetPositioning::offset_from_parent(
+                vec2f(-1., -1.),
+                ParentOffsetBounds::ParentBySize,
+                ParentAnchor::BottomRight,
+                ChildAnchor::BottomRight,
+            ),
+        );
+        SavePosition::new(stack.finish(), ENVIRONMENT_PROVIDER_PICKER_POSITION_ID).finish()
     }
 
     fn render_environment_strip_chip(
@@ -25432,13 +25596,6 @@ impl Workspace {
                     } else {
                         theme.background()
                     })
-                    .with_border(Border::all(1.).with_border_fill(if is_active {
-                        internal_colors::fg_overlay_3(theme).into()
-                    } else if hovered {
-                        theme.outline().into()
-                    } else {
-                        ElementFill::None
-                    }))
                     .with_corner_radius(CornerRadius::with_all(Radius::Pixels(7.)))
                     .with_padding_left(if has_runtime_controls { 9. } else { 8. })
                     .with_padding_right(if has_runtime_controls { 5. } else { 8. })
@@ -25474,7 +25631,7 @@ impl Workspace {
             stack.finish()
         });
 
-        let reconnectable = display.supports_reconnect;
+        let connectable = display.supports_connect;
 
         let chip = hoverable.with_cursor(Cursor::PointingHand).finish();
         if !is_active {
@@ -25489,10 +25646,12 @@ impl Workspace {
                     DispatchEventResult::StopPropagation
                 })
                 .finish()
-        } else if reconnectable {
+        } else if connectable {
             EventHandler::new(chip)
-                .on_left_mouse_down(|ctx, _, _| {
-                    ctx.dispatch_typed_action(WorkspaceAction::ReconnectCurrentEnvironment);
+                .on_left_mouse_down(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(WorkspaceAction::ConnectEnvironment {
+                        authority_key: authority_key.clone(),
+                    });
                     DispatchEventResult::StopPropagation
                 })
                 .finish()
@@ -25843,19 +26002,18 @@ impl Workspace {
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
-        let anchor_hit_target = ConstrainedBox::new(Rect::new().finish())
-            .with_width(ENVIRONMENT_STRIP_ADD_PROVIDER_CHIP_WIDTH)
-            .with_height(ENVIRONMENT_STRIP_CHIP_HEIGHT)
-            .finish();
-
-        let mut dismiss_target = Stack::new().with_child(anchor_hit_target);
+        // 锚点尺寸由 SavePosition 元素（Indicator / add-chip）自身决定；
+        // 这里只挂 dismiss 命中区 + 下拉 popover。
+        let mut dismiss_target = Stack::new().with_child(
+            ConstrainedBox::new(Rect::new().finish())
+                .with_width(1.)
+                .with_height(1.)
+                .finish(),
+        );
         dismiss_target.add_positioned_child(
             self.render_environment_provider_picker_popover(appearance, app),
             OffsetPositioning::offset_from_parent(
-                vec2f(
-                    0.,
-                    ENVIRONMENT_STRIP_CHIP_HEIGHT + ENVIRONMENT_PROVIDER_PICKER_ANCHOR_GAP,
-                ),
+                vec2f(0., ENVIRONMENT_PROVIDER_PICKER_ANCHOR_GAP),
                 ParentOffsetBounds::Unbounded,
                 ParentAnchor::TopLeft,
                 ChildAnchor::TopLeft,
@@ -26053,25 +26211,27 @@ impl Workspace {
         let active_environment = self.current_environment_for_strip(ctx);
         let active_environment_navigation_key =
             ParsedEnvironmentAuthority::parse(&active_environment.authority_key).navigation_key();
-        for environment in self.open_environment_snapshots(ctx) {
-            let is_active = ParsedEnvironmentAuthority::parse(&environment.authority_key)
-                .navigation_key()
-                == active_environment_navigation_key;
+        if !vertical_tabs_active {
+            for environment in self.open_environment_snapshots(ctx) {
+                let is_active = ParsedEnvironmentAuthority::parse(&environment.authority_key)
+                    .navigation_key()
+                    == active_environment_navigation_key;
+                tab_bar.add_child(
+                    Container::new(self.render_environment_strip_chip(
+                        environment,
+                        is_active,
+                        appearance,
+                    ))
+                    .with_margin_right(8.)
+                    .finish(),
+                );
+            }
             tab_bar.add_child(
-                Container::new(self.render_environment_strip_chip(
-                    environment,
-                    is_active,
-                    appearance,
-                ))
-                .with_margin_right(8.)
-                .finish(),
+                Container::new(self.render_environment_strip_add_provider_chip(appearance))
+                    .with_margin_right(8.)
+                    .finish(),
             );
         }
-        tab_bar.add_child(
-            Container::new(self.render_environment_strip_add_provider_chip(appearance))
-                .with_margin_right(8.)
-                .finish(),
-        );
 
         if vertical_tabs_active {
             let mut right_controls = Flex::row()
@@ -26257,6 +26417,9 @@ impl Workspace {
             FeatureFlag::VerticalTabs.is_enabled() && *TabSettings::as_ref(ctx).use_vertical_tabs;
         let inner = match item {
             HeaderToolbarItemKind::TabsPanel => self.render_left_toggle_button(appearance, ctx),
+            HeaderToolbarItemKind::EnvironmentIndicator => {
+                self.render_environment_indicator(appearance, ctx)
+            }
             HeaderToolbarItemKind::ToolsPanel => {
                 if self.left_panel_views.is_empty() {
                     return None;
@@ -27823,6 +27986,7 @@ impl Workspace {
                 Some(ChildView::new(&self.right_panel_view).finish())
             }
             HeaderToolbarItemKind::NotificationsMailbox => None,
+            HeaderToolbarItemKind::EnvironmentIndicator => None,
         }
     }
 
@@ -27899,7 +28063,6 @@ impl Workspace {
     }
 
     fn add_toggle_setting_context_flags(&self, app: &AppContext, context: &mut Context) {
-        let privacy_settings = PrivacySettings::as_ref(app);
         let editor_settings = AppEditorSettings::as_ref(app);
         let semantic_selection_settings = SemanticSelection::as_ref(app);
         let selection_settings = SelectionSettings::as_ref(app);
@@ -28039,8 +28202,12 @@ impl Workspace {
             context.set.insert(flags::SAFE_MODE_FLAG);
         }
 
-        if privacy_settings.is_crash_reporting_enabled {
-            context.set.insert(flags::CRASH_REPORTING_FLAG);
+        #[cfg(feature = "crash_reporting")]
+        {
+            let privacy_settings = PrivacySettings::as_ref(app);
+            if privacy_settings.is_crash_reporting_enabled {
+                context.set.insert(flags::CRASH_REPORTING_FLAG);
+            }
         }
 
         if editor_settings.cursor_blink.value() == &CursorBlink::Enabled {
@@ -28686,11 +28853,16 @@ impl TypedActionView for Workspace {
             OpenEnvironmentRuntime { target } => {
                 self.open_environment_runtime_from_provider(target.clone(), ctx);
             }
-            ReconnectCurrentEnvironment => {
-                self.reconnect_current_environment(ctx);
+            ConnectEnvironment { authority_key } => {
+                self.reconnect_environment_runtime_authority(authority_key, ctx);
             }
             SwitchEnvironment { authority_key } => {
                 self.switch_to_environment_authority(authority_key, ctx);
+            }
+            ToggleEnvironmentRailSection { navigation_key } => {
+                self.vertical_tabs_panel
+                    .toggle_environment_rail_section(navigation_key);
+                ctx.notify();
             }
             DisconnectEnvironment { authority_key } => {
                 self.disconnect_environment_authority(authority_key, ctx);
@@ -28743,6 +28915,12 @@ impl TypedActionView for Workspace {
             }
             CopyWorkspaceSessionId { target } => {
                 self.copy_workspace_session_id(target, ctx);
+            }
+            CopyWorkspaceSessionXRay { target } => {
+                self.copy_workspace_session_xray(target, ctx);
+            }
+            RequestCloseWorkspaceSession { target } => {
+                self.request_close_workspace_session(target, ctx);
             }
             RequestDeleteWorkspaceSession { target } => {
                 self.request_delete_workspace_session(target, ctx);
@@ -29170,8 +29348,8 @@ impl TypedActionView for Workspace {
             ToggleVerticalTabsPanel => {
                 self.toggle_vertical_tabs_panel(ctx);
             }
-            RefreshWorkspaceSessions => {
-                self.refresh_workspace_sessions(ctx);
+            RefreshEnvironmentSessions { authority_key } => {
+                self.refresh_environment_sessions(authority_key, ctx);
             }
             ToggleWorkspaceSessionPinned { target, pinned } => {
                 self.toggle_workspace_session_pinned(target, *pinned, ctx);
@@ -30676,9 +30854,9 @@ impl View for Workspace {
                 .finish(),
                 OffsetPositioning::offset_from_save_position_element(
                     ENVIRONMENT_PROVIDER_PICKER_POSITION_ID,
-                    Vector2F::zero(),
+                    vec2f(0., ENVIRONMENT_PROVIDER_PICKER_ANCHOR_GAP),
                     PositionedElementOffsetBounds::WindowByPosition,
-                    PositionedElementAnchor::TopLeft,
+                    PositionedElementAnchor::BottomLeft,
                     ChildAnchor::TopLeft,
                 ),
             );
@@ -32501,11 +32679,14 @@ impl Workspace {
                 log::warn!("Local Session Navigator scan failed: {error}");
                 debug_assert_eq!(preserved, error);
                 if let Some(refresh_generation) = refresh_generation {
-                    self.fail_workspace_sessions_refresh_if_current(
+                    self.fail_environment_sessions_refresh_if_current(
+                        &authority,
                         refresh_generation,
                         format!("刷新会话列表失败：{error}"),
                         ctx,
                     );
+                } else {
+                    ctx.notify();
                 }
                 return;
             }
@@ -32525,11 +32706,18 @@ impl Workspace {
         if !committed {
             log::info!("Local Session Navigator scan ignored stale generation");
             if let Some(refresh_generation) = refresh_generation {
-                self.finish_workspace_sessions_refresh_if_current(refresh_generation, ctx);
+                self.finish_environment_sessions_refresh_if_current(
+                    &authority,
+                    refresh_generation,
+                    ctx,
+                );
             }
             return;
         }
-        self.remember_indexed_environment_cli_agent_session_user_state(authority, user_state);
+        self.remember_indexed_environment_cli_agent_session_user_state(
+            authority.clone(),
+            user_state,
+        );
         if let Some(session_count) = discovered_session_count {
             log::info!("Local Session Navigator scan committed {session_count} sessions");
         }
@@ -32538,7 +32726,11 @@ impl Workspace {
         }
         self.sync_session_navigator_sessions(ctx);
         if let Some(refresh_generation) = refresh_generation {
-            self.finish_workspace_sessions_refresh_if_current(refresh_generation, ctx);
+            self.finish_environment_sessions_refresh_if_current(
+                &authority,
+                refresh_generation,
+                ctx,
+            );
             return;
         }
         ctx.notify();
@@ -33088,34 +33280,20 @@ impl EnvironmentBackend for RuntimeEnvironmentBackend {
 
         #[cfg(not(target_family = "wasm"))]
         {
-            let Some(target) = ws.environment_runtime_target_for_authority(authority) else {
-                return match intent {
-                    EnvironmentSessionRefreshIntent::PassiveProjection => Ok(false),
-                    EnvironmentSessionRefreshIntent::UserInitiated { .. } => {
-                        ws.reconnect_environment_runtime_authority_if_transport_inactive(
-                            authority, ctx,
-                        );
-                        Err(format!(
-                            "environment runtime is not connected; reconnecting: {authority}"
-                        ))
-                    }
-                };
-            };
-            if crate::workspace::environment_runtime::client_for_session(target.session_id, ctx)
-                .is_none()
-            {
-                return match intent {
-                    EnvironmentSessionRefreshIntent::PassiveProjection => Ok(false),
-                    EnvironmentSessionRefreshIntent::UserInitiated { .. } => {
-                        ws.reconnect_environment_runtime_authority_if_transport_inactive(
-                            authority, ctx,
-                        );
-                        Err(format!(
-                            "environment runtime client is not connected; reconnecting: {authority}"
-                        ))
-                    }
-                };
+            match ws.environment_session_refresh_availability(authority, ctx) {
+                EnvironmentSessionRefreshAvailability::Ready => {}
+                EnvironmentSessionRefreshAvailability::Unavailable => {
+                    return match intent {
+                        EnvironmentSessionRefreshIntent::PassiveProjection => Ok(false),
+                        EnvironmentSessionRefreshIntent::UserInitiated { .. } => Err(format!(
+                            "environment runtime is not connected; reconnect it before refreshing: {authority}"
+                        )),
+                    };
+                }
             }
+            let target = ws
+                .environment_runtime_target_for_authority(authority)
+                .expect("ready Environment refresh availability requires a current runtime owner");
             let refresh_generation = match intent {
                 EnvironmentSessionRefreshIntent::PassiveProjection => None,
                 EnvironmentSessionRefreshIntent::UserInitiated { generation } => Some(generation),

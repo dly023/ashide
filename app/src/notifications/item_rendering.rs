@@ -401,6 +401,7 @@ const NOTIFICATION_AVATAR_SIZING: IconWithStatusSizing = IconWithStatusSizing {
     badge_icon_size: 12.,
     badge_padding: 2.,
     overall_size_override: None,
+    plate_corner_radius: None,
     badge_offset: (6., 6.),
 };
 

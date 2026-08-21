@@ -46,11 +46,42 @@ fn version_compat_client_tagged_server_untagged() {
 #[test]
 fn version_compat_client_untagged_server_tagged() {
     // **关键场景**:Ashide 客户端无 tag(cargo build),
-    // 服务器是从官方 CDN 下来的 release(带 tag)。原 helper 判定
-    // 不兼容,会触发 `remove_remote_server_binary` → 死循环。
+    // helper 来自 GitHub release(带 tag)。若仍做严格版本比对,
+    // 会触发 `remove_remote_server_binary` → 死循环。
     // 这个 test 仅记录 `version_is_compatible` 自身的行为不变,
     // 真正"跳过校验"由 [`should_enforce_remote_version_check`] 负责。
     assert!(!version_is_compatible(None, "v0.2026.05.10.stable"));
+}
+
+#[test]
+fn helper_compatibility_failure_selects_update_remediation() {
+    let expected = crate::REMOTE_SERVER_PROTOCOL_REVISION;
+    let protocol = ConnectAndHandshakeError::Initialize(
+        crate::client::ClientError::ProtocolRevisionMismatch {
+            expected,
+            received: expected.saturating_sub(1),
+        },
+    );
+    assert_eq!(
+        protocol.remediation(),
+        RemoteServerFailureRemediation::UpdateHelper
+    );
+
+    let release = ConnectAndHandshakeError::HelperVersionMismatch {
+        client_version: Some("client".to_owned()),
+        server_version: "helper".to_owned(),
+    };
+    assert_eq!(
+        release.remediation(),
+        RemoteServerFailureRemediation::UpdateHelper
+    );
+
+    let disconnected =
+        ConnectAndHandshakeError::Initialize(crate::client::ClientError::Disconnected);
+    assert_eq!(
+        disconnected.remediation(),
+        RemoteServerFailureRemediation::Reconnect
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -59,14 +90,14 @@ fn version_compat_client_untagged_server_tagged() {
 
 #[test]
 fn enforce_version_check_skipped_on_oss() {
-    // Ashide 临时复用官方 release 二进制时,客户端与服务端版本
-    // 永远不一致,必须跳过严格校验。
+    // `Channel::Oss`(Ashide) 下 client 没有 `GIT_RELEASE_TAG`,与 helper
+    // release version 字符串可能不一致,故跳过严格校验。
     assert!(!should_enforce_remote_version_check(Channel::Oss));
 }
 
 #[test]
 fn enforce_version_check_kept_on_official_channels() {
-    // 官方 channel 上客户端和服务端要么都来自同一次 release CI,
+    // release channel 上 client 与 helper 要么都来自同一次 release CI,
     // 要么都来自 `script/deploy_remote_server` 的本地部署,严格
     // 校验仍然必要 —— 保留原有 stale binary 自愈路径。
     for channel in [

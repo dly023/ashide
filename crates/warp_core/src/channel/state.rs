@@ -145,10 +145,6 @@ impl ChannelState {
         CHANNEL_STATE.lock().config.logfile_name.clone()
     }
 
-    pub fn is_crash_reporting_available() -> bool {
-        false
-    }
-
     pub fn releases_base_url() -> Cow<'static, str> {
         CHANNEL_STATE
             .lock()

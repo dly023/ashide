@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 #[cfg(feature = "local_fs")]
 use super::error::CliAgentSessionScanError;
+use crate::terminal::CLIAgent;
 
 #[cfg(feature = "local_fs")]
 pub(crate) fn require_cli_agent_home(
@@ -176,8 +177,107 @@ impl CliAgentStoreRoots {
         self.home_dir.join(".cursor/projects")
     }
 
+    pub(crate) fn cursor_chats(&self) -> PathBuf {
+        self.home_dir.join(".cursor/chats")
+    }
+
     pub(crate) fn antigravity_brain(&self) -> PathBuf {
         self.home_dir.join(".gemini/antigravity-cli/brain")
+    }
+
+    /// 单个 provider 在目标 installation 下可参与会话发现的物理根。
+    /// discovery、read 与 mutation 必须从这里派生，禁止各自维护 provider 子集。
+    pub(crate) fn provider_session_discovery_roots(&self, agent: CLIAgent) -> Vec<PathBuf> {
+        match agent {
+            CLIAgent::Claude => vec![self.claude_projects()],
+            CLIAgent::Codex => vec![self.codex_sessions(), self.codex_index()],
+            CLIAgent::Droid => vec![self.droid_sessions(), self.droid_projects()],
+            CLIAgent::OpenCode => vec![
+                self.opencode_legacy_sessions(),
+                self.opencode_databases_dir(),
+            ],
+            CLIAgent::Copilot => vec![self.copilot_sessions()],
+            CLIAgent::Pi => vec![self.pi_sessions()],
+            CLIAgent::CursorCli => vec![self.cursor_chats(), self.cursor_projects()],
+            CLIAgent::Antigravity => vec![self.antigravity_brain()],
+            CLIAgent::Omp => vec![self.omp_sessions()],
+            CLIAgent::Amp
+            | CLIAgent::Auggie
+            | CLIAgent::Goose
+            | CLIAgent::DeepSeek
+            | CLIAgent::Unknown => Vec::new(),
+        }
+    }
+
+    /// 普通文件 mutation 可触达的 transcript 根。数据库/index entry 不在此列，
+    /// 它们必须走 provider-native mutation，不能被当成整个文件删除。
+    pub(crate) fn provider_session_transcript_roots(&self, agent: CLIAgent) -> Vec<PathBuf> {
+        match agent {
+            CLIAgent::Codex => vec![self.codex_sessions()],
+            CLIAgent::OpenCode => vec![self.opencode_legacy_sessions()],
+            CLIAgent::CursorCli => vec![self.cursor_projects()],
+            CLIAgent::Claude
+            | CLIAgent::Droid
+            | CLIAgent::Copilot
+            | CLIAgent::Pi
+            | CLIAgent::Antigravity
+            | CLIAgent::Omp => self.provider_session_discovery_roots(agent),
+            CLIAgent::Amp
+            | CLIAgent::Auggie
+            | CLIAgent::Goose
+            | CLIAgent::DeepSeek
+            | CLIAgent::Unknown => Vec::new(),
+        }
+    }
+
+    #[cfg(feature = "local_fs")]
+    pub(crate) fn is_authoritative_session_transcript(
+        &self,
+        agent: CLIAgent,
+        resolved_path: &Path,
+    ) -> bool {
+        let expected_extension = match agent {
+            CLIAgent::OpenCode => "json",
+            CLIAgent::Claude
+            | CLIAgent::Codex
+            | CLIAgent::Droid
+            | CLIAgent::Copilot
+            | CLIAgent::Pi
+            | CLIAgent::CursorCli
+            | CLIAgent::Antigravity
+            | CLIAgent::Omp => "jsonl",
+            CLIAgent::Amp
+            | CLIAgent::Auggie
+            | CLIAgent::Goose
+            | CLIAgent::DeepSeek
+            | CLIAgent::Unknown => return false,
+        };
+        if resolved_path.extension().and_then(|value| value.to_str()) != Some(expected_extension) {
+            return false;
+        }
+
+        self.provider_session_transcript_roots(agent)
+            .into_iter()
+            .map(|root| fs::canonicalize(&root).unwrap_or(root))
+            .any(|root| {
+                if matches!(agent, CLIAgent::Omp) {
+                    is_omp_session_source(&root, resolved_path)
+                } else if matches!(agent, CLIAgent::Antigravity) {
+                    resolved_path.starts_with(root)
+                        && resolved_path.file_name().and_then(|name| name.to_str())
+                            == Some("transcript.jsonl")
+                } else if matches!(agent, CLIAgent::CursorCli) {
+                    resolved_path.starts_with(root)
+                        && resolved_path
+                            .components()
+                            .any(|component| component.as_os_str() == "agent-transcripts")
+                        && !resolved_path
+                            .components()
+                            .any(|component| component.as_os_str() == "subagents")
+                } else {
+                    resolved_path.starts_with(root)
+                }
+            })
     }
 }
 
@@ -234,20 +334,11 @@ pub(crate) fn normalize_cli_agent_session_cwd(
     }
 
     let real_value = fs::canonicalize(&expanded).ok()?;
-    for store in [
-        roots.claude_config_dir.clone(),
-        roots.codex_sessions(),
-        roots.codex_index(),
-        roots.omp_sessions(),
-        roots.droid_sessions(),
-        roots.droid_projects(),
-        roots.opencode_legacy_sessions(),
-        roots.opencode_databases_dir(),
-        roots.copilot_sessions(),
-        roots.pi_sessions(),
-        roots.cursor_projects(),
-        roots.antigravity_brain(),
-    ] {
+    let mut stores = enum_iterator::all::<CLIAgent>()
+        .flat_map(|agent| roots.provider_session_discovery_roots(agent))
+        .collect::<Vec<_>>();
+    stores.push(roots.claude_config_dir.clone());
+    for store in stores {
         let Ok(real_store) = fs::canonicalize(&store) else {
             continue;
         };

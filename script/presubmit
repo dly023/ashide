@@ -26,6 +26,10 @@ echo "Running agent harness checks..."
 ./script/check_agent_harness
 echo "Agent harness checks succeeded..."
 
+echo "Running environment rail static checks..."
+./script/check_environment_rail
+echo "Environment rail static checks succeeded..."
+
 echo "Running local/remote parity static checks..."
 ./script/check_local_remote_parity
 echo "Local/remote parity static checks succeeded..."

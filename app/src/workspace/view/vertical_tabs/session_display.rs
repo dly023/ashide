@@ -140,7 +140,12 @@ pub(crate) fn restored_session_label(session: &WorkspaceSessionSnapshot) -> Stri
     //      historical_ashide_conversation_sessions / cli_agent_session_index);
     //   2. agent 名(Codex / Claude Code)兜底;
     //   3. 会话 kind 兜底。
-    if let Some(label) = session.label.as_deref().filter(|label| !label.is_empty()) {
+    if let Some(label) = session
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+    {
         return label.to_string();
     }
 
@@ -320,6 +325,12 @@ mod tests {
         let session = agent_session(CLIAgent::Claude, None);
 
         assert_eq!(restored_session_label(&session), "Claude Code");
+    }
+
+    #[test]
+    fn restored_session_label_trims_whitespace_only_labels() {
+        let session = agent_session(CLIAgent::Codex, Some("   \n\t  "));
+        assert_eq!(restored_session_label(&session), "Codex");
     }
 
     #[test]

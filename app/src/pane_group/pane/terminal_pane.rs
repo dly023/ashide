@@ -122,7 +122,7 @@ impl TerminalPane {
             .or(cli_agent_session_resume_session_id)
             .or(detected_cli_agent_resume_session_id);
         let previous_binding = self.pane_configuration.as_ref(app).session_binding();
-        let mut current_binding = PaneSessionBinding {
+        let current_binding = PaneSessionBinding {
             agent: current_cli_agent,
             command: current_cli_command,
             origin: current_cli_agent_origin,
@@ -133,17 +133,8 @@ impl TerminalPane {
         if current_binding.agent.is_none() {
             return;
         }
-        if let Some(previous) = previous_binding.as_ref().filter(|previous| {
-            previous.agent == current_binding.agent && previous.command == current_binding.command
-        }) {
-            // The same semantic session can be observed before its remote cwd is
-            // queryable. Missing enrichment never revokes already committed owner
-            // state; source identities likewise survive carrier replacement.
-            if current_binding.cwd.is_none() {
-                current_binding.cwd = previous.cwd.clone();
-            }
-            current_binding.source_identity_keys = previous.source_identity_keys.clone();
-        }
+        let current_binding =
+            reconcile_pane_session_binding(previous_binding.as_ref(), current_binding);
         self.pane_configuration
             .as_ref(app)
             .restore_session_binding(Some(current_binding));
@@ -244,6 +235,81 @@ impl TerminalPane {
         self.id()
             .as_terminal_pane_id()
             .expect("Should be able to derive a TerminalPaneId from TerminalPane")
+    }
+}
+
+/// Reconcile one observation into the pane-owned binding edge.
+///
+/// Only an exact native session can inherit source identities. A temporarily
+/// missing session id preserves the last committed edge; a different id is a
+/// real rebind and starts with no identities from the previous session.
+fn reconcile_pane_session_binding(
+    previous: Option<&PaneSessionBinding>,
+    mut observed: PaneSessionBinding,
+) -> PaneSessionBinding {
+    let Some(previous) = previous.filter(|previous| {
+        previous.agent == observed.agent && previous.command == observed.command
+    }) else {
+        return observed;
+    };
+
+    if observed.cwd.is_none() {
+        observed.cwd = previous.cwd.clone();
+    }
+
+    match (
+        observed.session_id.as_deref(),
+        previous.session_id.as_deref(),
+    ) {
+        (None, Some(_)) => {
+            observed.session_id = previous.session_id.clone();
+            observed.source_identity_keys = previous.source_identity_keys.clone();
+        }
+        (current, prior) if current == prior => {
+            observed.source_identity_keys = previous.source_identity_keys.clone();
+        }
+        (Some(_), Some(_)) | (Some(_), None) => {}
+        (None, None) => unreachable!("equal missing session ids handled above"),
+    }
+    observed
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+
+    fn binding(provider_key: Option<&str>, source_identity_keys: &[&str]) -> PaneSessionBinding {
+        PaneSessionBinding {
+            agent: Some("Codex".to_owned()),
+            command: Some("codex".to_owned()),
+            origin: Some(CliAgentSessionOrigin::PluginObserved),
+            session_id: provider_key.map(str::to_owned),
+            cwd: Some("/repo".to_owned()),
+            source_identity_keys: source_identity_keys
+                .iter()
+                .map(|key| (*key).to_owned())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn pane_session_binding_replaces_source_keys_only_for_exact_new_session() {
+        let previous = binding(Some("session-s"), &["durable-s", "source-s"]);
+
+        let same = reconcile_pane_session_binding(Some(&previous), binding(Some("session-s"), &[]));
+        assert_eq!(same.source_identity_keys, previous.source_identity_keys);
+
+        let next = reconcile_pane_session_binding(Some(&previous), binding(Some("session-t"), &[]));
+        assert!(next.source_identity_keys.is_empty());
+        assert_eq!(next.session_id.as_deref(), Some("session-t"));
+
+        let temporarily_unknown =
+            reconcile_pane_session_binding(Some(&previous), binding(None, &[]));
+        assert_eq!(temporarily_unknown.session_id, previous.session_id);
+        assert_eq!(
+            temporarily_unknown.source_identity_keys,
+            previous.source_identity_keys
+        );
     }
 }
 

@@ -158,7 +158,7 @@ case "$PROFILE_MODE" in
     ;;
 esac
 
-FEATURES="release_bundle,crash_reporting,standalone,agent_mode_debug"
+FEATURES="release_bundle,standalone,agent_mode_debug"
 ASHIDE_BIN="${ASHIDE_REMOTE_HELPER_BIN:-ashide}"
 BINARY_NAME="${ASHIDE_REMOTE_HELPER_REMOTE_NAME:-ashide-dev-pty-v1}"
 REMOTE_DIR="${ASHIDE_REMOTE_HELPER_REMOTE_DIR:-.ashide-dev/remote-server}"
@@ -211,6 +211,7 @@ scopes = [
     "app/src/cli_agent_jsonl/discovery.rs",
     "app/src/cli_agent_jsonl/error.rs",
     "app/src/cli_agent_jsonl/mod.rs",
+    "app/src/cli_agent_jsonl/mutation.rs",
     "app/src/cli_agent_jsonl/parse.rs",
     "app/src/cli_agent_jsonl/roots.rs",
     "app/src/remote_server/mod.rs",

@@ -437,18 +437,6 @@ impl LaunchMode {
         }
     }
 
-    /// 是否需要在 `init_common` 初始化本地 crash reporting。
-    #[cfg_attr(not(feature = "crash_reporting"), allow(dead_code))]
-    fn needs_crash_reporting(&self) -> bool {
-        match self {
-            LaunchMode::App { .. }
-            | LaunchMode::CommandLine { .. }
-            | LaunchMode::Test { .. }
-            | LaunchMode::EnvironmentRuntimeDaemon
-            | LaunchMode::EnvironmentRuntimeProxy => true,
-        }
-    }
-
     /// Whether profiling and tracing should be initialized in `init_common`.
     fn needs_profiling(&self) -> bool {
         match self {
@@ -1173,8 +1161,8 @@ fn initialize_app(
     #[cfg(feature = "crash_reporting")]
     {
         crash_reporting::init(ctx);
+        timer.mark_interval_end("INIT_CRASH_REPORTING");
     }
-    timer.mark_interval_end("INIT_CRASH_REPORTING");
 
     if let LaunchMode::App { .. } = launch_mode {
         autoupdate::check_and_report_update_errors(ctx);
@@ -1225,8 +1213,6 @@ fn initialize_app(
     ctx.add_singleton_model(|_ctx| SyncedInputState::new());
 
     ctx.add_singleton_model(workspace::environment_runtime::new_transport_manager);
-    // Ashide Wave 6-1:`environment runtime auth token rotation(ctx)` 调用随
-    // server API token rotation 事件 + `wire_auth_token_rotation` 函数本体一同物理删。
 
     log::info!(
         "Starting warp with channel state {} and version {:?}",

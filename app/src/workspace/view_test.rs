@@ -3115,7 +3115,7 @@ fn test_workspace_session_context_menu_exposes_session_bridge_actions_for_ai_ses
                     crate::t!("workspace-session-navigator-menu-rename-alias"),
                     "---".to_string(),
                     crate::t!("workspace-session-navigator-menu-copy-id"),
-                    "永久删除…".to_string(),
+                    crate::t!("workspace-session-navigator-menu-delete"),
                 ]
             );
 
@@ -4470,7 +4470,7 @@ fn test_cross_window_pending_restore_reserves_durable_session_owner() {
 }
 
 #[test]
-fn test_resume_seeds_pane_container_title_not_tab_group_title() {
+fn resume_does_not_persist_automatic_title_as_container_override() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
 
@@ -4486,6 +4486,7 @@ fn test_resume_seeds_pane_container_title_not_tab_group_title() {
         let authority = environment.authority_key.clone();
         let mut pending_restore = test_pending_environment_runtime_session_restore(&authority);
         pending_restore.session.label = Some("扫描到的会话标题".to_string());
+        let expected_provider_session_id = pending_restore.session.cli_agent_session_id.clone();
 
         workspace.update(&mut app, |workspace, ctx| {
             workspace.set_active_tab_environment(environment);
@@ -4505,9 +4506,8 @@ fn test_resume_seeds_pane_container_title_not_tab_group_title() {
             });
 
             assert_eq!(
-                pane_title.as_deref(),
-                Some("扫描到的会话标题"),
-                "Resume must seed PaneConfiguration.custom_vertical_tabs_title from the scanned title"
+                pane_title, None,
+                "Resume must keep an automatic/provider title as a binding projection"
             );
             assert!(
                 group_title.is_none(),
@@ -4520,9 +4520,9 @@ fn test_resume_seeds_pane_container_title_not_tab_group_title() {
                 .find(|session| session.is_live_container)
                 .expect("resume placeholder must project a live navigator row");
             assert_eq!(
-                live.label.as_deref(),
-                Some("扫描到的会话标题"),
-                "Navigator live projection must read the pane container title, not tab/env fallbacks"
+                live.cli_agent_session_id,
+                expected_provider_session_id,
+                "Resume must preserve the durable session binding without converting its title into container state"
             );
         });
     });
@@ -5184,7 +5184,7 @@ fn test_session_navigator_external_user_alias_is_projected_before_resume() {
         initialize_app(&mut app);
         let workspace = mock_workspace(&mut app);
 
-        workspace.update(&mut app, |workspace, ctx| {
+        workspace.update(&mut app, |workspace, _| {
             let provider_session_id = "codex-external-alias-before-resume";
             let rollout_id = "external:Codex:rollout-before-resume".to_string();
             let rollout = WorkspaceSessionSnapshot {
@@ -5215,15 +5215,15 @@ fn test_session_navigator_external_user_alias_is_projected_before_resume() {
             let mut merged =
                 WorkspaceSessionSnapshot::merge_for_session_navigator(indexed_sessions);
             assert_eq!(merged.len(), 1);
+            let alias_subject_key = merged[0].alias_subject().key().to_owned();
             workspace.apply_workspace_session_aliases(
                 &mut merged,
                 &crate::workspace::environment_runtime::EnvironmentCliAgentSessionUserState {
-                    // 故意只写 rollout backing source key，验证 projection 在
-                    // Resume/materialize 前即可沿 backing source 找到外置别名。
-                    aliases: HashMap::from([(rollout_id, "外置配置别名".to_string())]),
+                    // Alias 只属于当前 typed durable subject，不再 fanout 到
+                    // rollout/index 等 backing source key。
+                    aliases: HashMap::from([(alias_subject_key, "外置配置别名".to_string())]),
                     pinned: HashSet::new(),
                 },
-                ctx,
             );
 
             assert_eq!(merged[0].label.as_deref(), Some("外置配置别名"));
@@ -5233,12 +5233,12 @@ fn test_session_navigator_external_user_alias_is_projected_before_resume() {
 }
 
 #[test]
-fn test_session_navigator_durable_alias_never_overrides_live_container_title() {
+fn test_session_navigator_durable_alias_follows_session_into_live_container() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
         let workspace = mock_workspace(&mut app);
 
-        workspace.update(&mut app, |workspace, ctx| {
+        workspace.update(&mut app, |workspace, _| {
             let mut session =
                 test_session_navigator_order_session("tab:0:leaf:0", "Container Title", 20);
             session.container_uuid = Some(vec![7; 16]);
@@ -5255,12 +5255,12 @@ fn test_session_navigator_durable_alias_never_overrides_live_container_title() {
                 };
             let mut sessions = vec![session];
 
-            workspace.apply_workspace_session_aliases(&mut sessions, &user_state, ctx);
+            workspace.apply_workspace_session_aliases(&mut sessions, &user_state);
 
-            assert_eq!(sessions[0].label.as_deref(), Some("Container Title"));
+            assert_eq!(sessions[0].label.as_deref(), Some("Stale Durable Alias"));
             assert_eq!(
-                workspace.workspace_session_alias_with_state(&sessions[0], &user_state, ctx),
-                None
+                workspace.workspace_session_alias_with_state(&sessions[0], &user_state),
+                Some("Stale Durable Alias".to_owned())
             );
         });
     })
@@ -8452,9 +8452,10 @@ fn test_workspace_sessions_refresh_state_reports_local_progress_and_keyed_failur
         let workspace = mock_workspace(&mut app);
 
         workspace.update(&mut app, |workspace, ctx| {
-            assert!(!workspace.is_workspace_sessions_refreshing());
+            let authority = "local";
+            assert!(!workspace.is_environment_sessions_refreshing(authority));
             assert_eq!(
-                workspace.workspace_sessions_refresh_tooltip(),
+                workspace.environment_sessions_refresh_tooltip(authority),
                 "刷新会话列表"
             );
             assert!(
@@ -8464,10 +8465,10 @@ fn test_workspace_sessions_refresh_state_reports_local_progress_and_keyed_failur
                 "initial Navigator refresh feedback must not occupy the global toast stack"
             );
 
-            let first_generation = workspace.begin_workspace_sessions_refresh(ctx);
-            assert!(workspace.is_workspace_sessions_refreshing());
+            let first_generation = workspace.begin_environment_sessions_refresh(authority, ctx);
+            assert!(workspace.is_environment_sessions_refreshing(authority));
             assert_eq!(
-                workspace.workspace_sessions_refresh_tooltip(),
+                workspace.environment_sessions_refresh_tooltip(authority),
                 "正在刷新会话列表…"
             );
             assert!(
@@ -8477,10 +8478,14 @@ fn test_workspace_sessions_refresh_state_reports_local_progress_and_keyed_failur
                 "start progress belongs only to the Navigator header"
             );
 
-            workspace.finish_workspace_sessions_refresh_if_current(first_generation, ctx);
-            assert!(!workspace.is_workspace_sessions_refreshing());
+            workspace.finish_environment_sessions_refresh_if_current(
+                authority,
+                first_generation,
+                ctx,
+            );
+            assert!(!workspace.is_environment_sessions_refreshing(authority));
             assert_eq!(
-                workspace.workspace_sessions_refresh_tooltip(),
+                workspace.environment_sessions_refresh_tooltip(authority),
                 "刷新会话列表"
             );
             assert!(
@@ -8490,15 +8495,16 @@ fn test_workspace_sessions_refresh_state_reports_local_progress_and_keyed_failur
                 "complete refresh must be silent"
             );
 
-            let second_generation = workspace.begin_workspace_sessions_refresh(ctx);
-            workspace.fail_workspace_sessions_refresh_if_current(
+            let second_generation = workspace.begin_environment_sessions_refresh(authority, ctx);
+            workspace.fail_environment_sessions_refresh_if_current(
+                authority,
                 second_generation,
                 "刷新会话列表失败：runtime unavailable；已保留上次结果".to_owned(),
                 ctx,
             );
-            assert!(!workspace.is_workspace_sessions_refreshing());
+            assert!(!workspace.is_environment_sessions_refreshing(authority));
             assert_eq!(
-                workspace.workspace_sessions_refresh_tooltip(),
+                workspace.environment_sessions_refresh_tooltip(authority),
                 "刷新会话列表"
             );
             assert!(
@@ -8508,14 +8514,59 @@ fn test_workspace_sessions_refresh_state_reports_local_progress_and_keyed_failur
                 "only the explicit refresh failure may reach the global toast stack"
             );
 
-            workspace.finish_workspace_sessions_refresh_if_current(
+            workspace.finish_environment_sessions_refresh_if_current(
+                authority,
                 second_generation.saturating_sub(1),
                 ctx,
             );
             assert_eq!(
-                workspace.workspace_sessions_refresh_tooltip(),
+                workspace.environment_sessions_refresh_tooltip(authority),
                 "刷新会话列表"
             );
+        });
+    });
+}
+
+#[test]
+fn environment_discovery_issue_tooltip_uses_authority_scope() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, _ctx| {
+            let local = "local";
+            let local_token =
+                workspace.begin_indexed_environment_cli_agent_session_scan(local, None);
+            assert!(workspace
+                .commit_indexed_environment_cli_agent_session_discovery(
+                    local_token,
+                    Ok::<_, String>(
+                        crate::workspace::environment_table::IndexedCliAgentSessionScanOutcome::SourceMissing(
+                            CLIAgent::Droid,
+                        ),
+                    ),
+                )
+                .expect("commit local source issue"));
+            let local_tooltip = workspace.environment_sessions_refresh_tooltip(local);
+            assert!(local_tooltip.contains("本机 Droid 会话来源"));
+            assert!(!local_tooltip.contains("远端 Droid 会话来源"));
+
+            let remote = "ssh:ssh-config:remote-fixture-scope";
+            let remote_token =
+                workspace.begin_indexed_environment_cli_agent_session_scan(remote, None);
+            assert!(workspace
+                .commit_indexed_environment_cli_agent_session_discovery(
+                    remote_token,
+                    Ok::<_, String>(
+                        crate::workspace::environment_table::IndexedCliAgentSessionScanOutcome::SourceMissing(
+                            CLIAgent::Droid,
+                        ),
+                    ),
+                )
+                .expect("commit remote source issue"));
+            let remote_tooltip = workspace.environment_sessions_refresh_tooltip(remote);
+            assert!(remote_tooltip.contains("远端 Droid 会话来源"));
+            assert!(!remote_tooltip.contains("本机 Droid 会话来源"));
         });
     });
 }
@@ -8527,16 +8578,56 @@ fn passive_refresh_does_not_mutate_user_refresh_generation() {
         let workspace = mock_workspace(&mut app);
 
         workspace.update(&mut app, |workspace, ctx| {
-            let user_generation = workspace.begin_workspace_sessions_refresh(ctx);
+            let authority = "local";
+            let user_generation = workspace.begin_environment_sessions_refresh(authority, ctx);
             workspace.refresh_workspace_sessions_passively(ctx);
 
-            assert!(workspace.is_workspace_sessions_refreshing());
+            assert!(workspace.is_environment_sessions_refreshing(authority));
             assert_eq!(
-                workspace.workspace_sessions_refresh_tooltip(),
+                workspace.environment_sessions_refresh_tooltip(authority),
                 "正在刷新会话列表…"
             );
-            workspace.finish_workspace_sessions_refresh_if_current(user_generation, ctx);
-            assert!(!workspace.is_workspace_sessions_refreshing());
+            workspace.finish_environment_sessions_refresh_if_current(
+                authority,
+                user_generation,
+                ctx,
+            );
+            assert!(!workspace.is_environment_sessions_refreshing(authority));
+        });
+    });
+}
+
+#[test]
+fn environment_refresh_feedback_is_partitioned_by_navigation_key() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let local = "local";
+            let remote = "ssh:remote-fixture-primary";
+            let local_generation = workspace.begin_environment_sessions_refresh(local, ctx);
+            let remote_generation = workspace.begin_environment_sessions_refresh(remote, ctx);
+
+            assert!(workspace.is_environment_sessions_refreshing(local));
+            assert!(workspace.is_environment_sessions_refreshing(remote));
+
+            workspace.finish_environment_sessions_refresh_if_current(local, local_generation, ctx);
+            assert!(!workspace.is_environment_sessions_refreshing(local));
+            assert!(workspace.is_environment_sessions_refreshing(remote));
+
+            workspace.finish_environment_sessions_refresh_if_current(remote, local_generation, ctx);
+            assert!(workspace.is_environment_sessions_refreshing(remote));
+
+            workspace.cancel_environment_sessions_refresh(remote, ctx);
+            assert!(!workspace.is_environment_sessions_refreshing(remote));
+
+            workspace.finish_environment_sessions_refresh_if_current(
+                remote,
+                remote_generation,
+                ctx,
+            );
+            assert!(!workspace.is_environment_sessions_refreshing(remote));
         });
     });
 }
@@ -8548,7 +8639,8 @@ fn session_navigator_refresh_feedback_static_guard() {
 
     assert!(!navigator.contains("show_workspace_sessions_refresh_toast"));
     assert!(!navigator.contains("WORKSPACE_SESSIONS_REFRESH_TOAST_ID"));
-    assert!(!view.contains("me.refresh_workspace_sessions(ctx);"));
+    assert!(view.contains("RefreshEnvironmentSessions { authority_key }"));
+    assert!(navigator.contains("refresh_generation_by_navigation_key"));
     assert!(navigator.contains("add_operation_toast"));
 }
 
@@ -9918,7 +10010,7 @@ fn test_environment_runtime_pane_state_save_reconciles_pending_owners_first() {
 }
 
 #[test]
-fn test_environment_runtime_scan_without_client_reconnects() {
+fn test_environment_runtime_scan_without_client_preserves_owner_and_lifecycle() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
 
@@ -9954,14 +10046,15 @@ fn test_environment_runtime_scan_without_client_reconnects() {
 
             let owner_session_id = workspace
                 .environment_runtime_session_for_authority(&authority)
-                .expect("scan without a runtime client should trigger reconnect");
+                .expect("scan without a runtime client must preserve the current owner");
             assert_eq!(
                 owner_session_id, stale_session_id,
-                "agent-session scan must not silently return when a Connected runtime has no client"
+                "agent-session scan must not replace its Environment owner"
             );
             assert_eq!(
                 workspace.environment_runtime_lifecycle_for_authority(&authority),
-                Some(EnvironmentLifecycleState::Connecting)
+                Some(EnvironmentLifecycleState::Connected),
+                "session Refresh must not disguise missing readiness as a transport reconnect"
             );
         });
     });
@@ -11526,10 +11619,7 @@ fn environment_native_fork_remote_symlink_real_cli_resume_bootstrap() {
         let claude_config_dir = format!("{home_root}/.claude");
         let codex_home = format!("{home_root}/.codex");
 
-        let auth_context = Arc::new(RemoteServerAuthContext::new(
-            || Box::pin(async { None }),
-            move || identity_key.clone(),
-        ));
+        let auth_context = Arc::new(RemoteServerAuthContext::new(move || identity_key.clone()));
         let transport =
             EnvironmentRuntimeTransport::new_with_target(control_path, target, auth_context);
         let connection = transport
@@ -11543,7 +11633,7 @@ fn environment_native_fork_remote_symlink_real_cli_resume_bootstrap() {
             control_path: _connected_control_path,
         } = connection;
         client
-            .initialize(None)
+            .initialize()
             .await
             .expect("remote runtime protocol must initialize");
         let client = Arc::new(client);
@@ -11830,6 +11920,84 @@ fn heartbeat_waits_for_bootstrapped_execution_carrier() {
         heartbeat_scheduler.contains("environment_runtime_execution_carrier_gate"),
         "every initial or recursive heartbeat schedule must revalidate the canonical execution carrier"
     );
+}
+
+#[test]
+fn remote_discovery_does_not_require_terminal_execution_carrier() {
+    const VIEW_RS: &str = include_str!("view.rs");
+    const SESSION_NAVIGATOR_RS: &str = include_str!("view/session_navigator.rs");
+
+    let availability = VIEW_RS
+        .split_once("fn environment_session_refresh_availability(")
+        .expect("Workspace must own one shared Environment refresh availability")
+        .1
+        .split_once("\n    fn ")
+        .expect("refresh availability helper must have a bounded implementation")
+        .0;
+    assert!(!availability.contains("environment_runtime_execution_carrier_gate"));
+    assert!(availability.contains("client_for_session"));
+    assert!(availability.contains("EnvironmentSessionRefreshAvailability::Ready"));
+
+    let action = SESSION_NAVIGATOR_RS
+        .split_once("pub(super) fn refresh_environment_sessions(")
+        .expect("targeted Environment refresh action must exist")
+        .1
+        .split_once("pub(super) fn refresh_workspace_sessions_passively(")
+        .expect("targeted Environment refresh action must be bounded")
+        .0;
+    let readiness = action
+        .find("environment_session_refresh_availability")
+        .expect("the action boundary must reject a disabled/stale Refresh");
+    let generation = action
+        .find("begin_environment_sessions_refresh")
+        .expect("a ready refresh must still create authority-scoped feedback");
+    assert!(readiness < generation);
+}
+
+#[test]
+fn runtime_refresh_backend_requires_connected_helper_before_scan() {
+    const VIEW_RS: &str = include_str!("view.rs");
+
+    let backend = VIEW_RS
+        .split_once("impl EnvironmentBackend for RuntimeEnvironmentBackend")
+        .expect("runtime Environment backend must exist")
+        .1;
+    let refresh = backend
+        .split_once("fn refresh_indexed_sessions(")
+        .expect("runtime backend must own indexed-session refresh")
+        .1;
+    let availability = refresh
+        .find("environment_session_refresh_availability")
+        .expect("runtime refresh must reuse the UI refresh availability gate");
+    let scan = refresh
+        .find("scan_environment_runtime_agent_sessions_with_refresh_generation")
+        .expect("runtime refresh must retain the canonical scan delivery");
+    assert!(availability < scan);
+    assert!(!refresh[..scan].contains("WaitingForExecutionCarrier"));
+}
+
+#[test]
+fn environment_rail_header_actions_are_right_aligned() {
+    const VERTICAL_TABS_RS: &str = include_str!("view/vertical_tabs.rs");
+
+    let header = VERTICAL_TABS_RS
+        .split_once("fn render_environment_rail_section_header(")
+        .expect("Environment rail header renderer must exist")
+        .1
+        .split_once("fn count_current_navigator_rows(")
+        .expect("Environment rail header renderer must be bounded")
+        .0;
+    assert!(header.contains("identity_cluster"));
+    assert!(header.contains("accessory_cluster"));
+    assert!(header.contains("MainAxisAlignment::SpaceBetween"));
+    assert!(header.contains("on_left_mouse_down(|_, _, _| DispatchEventResult::StopPropagation)"));
+    let count = header
+        .find("trailing.clone()")
+        .expect("session count must remain a trailing accessory");
+    let refresh = header
+        .find("WorkspaceAction::RefreshEnvironmentSessions")
+        .expect("refresh action must remain in the Environment header");
+    assert!(count < refresh);
 }
 
 #[test]
@@ -15354,6 +15522,25 @@ fn test_restored_error_window_snapshot_does_not_implicitly_connect() {
                 "restoring an Error window must not create a transport generation"
             );
         });
+        restored.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::RefreshEnvironmentSessions {
+                    authority_key: authority.clone(),
+                },
+                ctx,
+            );
+            assert_eq!(
+                workspace.environment_runtime_lifecycle_for_authority(&authority),
+                Some(EnvironmentLifecycleState::Error),
+                "session refresh must not reclassify itself as transport reconnect"
+            );
+            assert_eq!(
+                workspace.environment_runtime_session_for_authority(&authority),
+                None,
+                "session refresh must not allocate a transport generation"
+            );
+            assert!(!workspace.is_environment_sessions_refreshing(&authority));
+        });
     });
 }
 
@@ -16317,7 +16504,7 @@ fn test_remote_runtime_agent_row_stays_live_when_active_block_is_non_runtime_sub
 }
 
 #[test]
-fn test_environment_runtime_live_placeholder_does_not_apply_durable_alias() {
+fn test_environment_runtime_live_placeholder_applies_durable_alias() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
 
@@ -16388,10 +16575,10 @@ fn test_environment_runtime_live_placeholder_does_not_apply_durable_alias() {
                 .find(|session| session.environment_authority_key.as_deref() == Some(authority.as_str()))
                 .expect("expected merged remote live session");
 
-            assert_ne!(
+            assert_eq!(
                 session.label.as_deref(),
                 Some("固定远程名"),
-                "live rows own their title in PaneConfiguration and must ignore virtual durable aliases"
+                "durable aliases must follow the session into its live carrier"
             );
             assert_ne!(
                 session.label.as_deref(),
@@ -17750,6 +17937,8 @@ fn test_disconnect_environment_closes_all_authority_tabs_and_restores_local() {
                     .len(),
                 2
             );
+            workspace.begin_environment_sessions_refresh(&authority, ctx);
+            assert!(workspace.is_environment_sessions_refreshing(&authority));
 
             workspace.handle_action(
                 &WorkspaceAction::DisconnectEnvironment {
@@ -17766,6 +17955,7 @@ fn test_disconnect_environment_closes_all_authority_tabs_and_restores_local() {
             assert_eq!(workspace.active_tab_pane_group().id(), remembered_local_tab_id);
             assert_eq!(workspace.environments.last_active_tab(&authority), None);
             assert!(workspace.environments.entry_for_authority(&authority).is_none());
+            assert!(!workspace.is_environment_sessions_refreshing(&authority));
             assert_eq!(
                 workspace.current_environment_snapshot()
                     .as_ref()
@@ -18543,7 +18733,7 @@ fn test_runtime_materialization_call_sites_establish_owner_before_transport() {
         ),
         (
             "fn reconnect_environment_runtime_authority(",
-            "pub fn reconnect_current_environment(",
+            "pub fn open_environment_file_browser(",
         ),
     ] {
         let caller = section(VIEW_RS, start, end);
@@ -18898,8 +19088,8 @@ fn local_cli_agent_session_refresh_runs_blocking_scan_off_ui_thread() {
         .expect("local recipient helper must end before the local backend")
         .0;
     assert!(finish_helper.contains("commit_indexed_environment_cli_agent_session_discovery"));
-    assert!(finish_helper.contains("finish_workspace_sessions_refresh_if_current"));
-    assert!(finish_helper.contains("fail_workspace_sessions_refresh_if_current"));
+    assert!(finish_helper.contains("finish_environment_sessions_refresh_if_current"));
+    assert!(finish_helper.contains("fail_environment_sessions_refresh_if_current"));
     assert!(finish_helper.contains("if refresh_generation.is_some() {\n            self.prune_restored_workspace_sessions_with_missing_cli_sources();\n        }"));
     assert!(refresh.contains("Ok(true)"));
     assert!(

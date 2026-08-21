@@ -84,10 +84,9 @@ async fn verify_installed_binary(socket_path: &Path, ssh_target: &str) -> Result
     ))
 }
 
-async fn stop_remote_environment_daemons(socket_path: &Path, ssh_target: &str) -> Result<()> {
-    let remote_server_dir = runtime_paths::remote_server_dir();
-    let quoted_dir = shell_words::quote(&remote_server_dir);
-    let command = format!(
+fn remote_environment_daemon_stop_command(remote_server_dir: &str) -> String {
+    let shell_dir = quote_remote_shell_path(remote_server_dir);
+    format!(
         r#"dir={quoted_dir}
 if [ -d "$dir" ]; then
   for pid_file in "$dir"/*/server.pid; do
@@ -97,6 +96,11 @@ if [ -d "$dir" ]; then
       ''|*[!0-9]*) rm -f "$(dirname "$pid_file")/server.sock" "$pid_file"; continue ;;
     esac
     if kill -0 "$pid" 2>/dev/null; then
+      exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
+      case "$exe" in
+        "$dir"/*) ;;
+        *) echo "refusing to stop unrelated pid $pid from $pid_file: $exe" >&2; exit 1 ;;
+      esac
       kill "$pid" 2>/dev/null || true
       i=0
       while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 10 ]; do
@@ -104,11 +108,25 @@ if [ -d "$dir" ]; then
         sleep 0.2
       done
       kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+      i=0
+      while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 10 ]; do
+        i=$((i + 1))
+        sleep 0.2
+      done
+      if kill -0 "$pid" 2>/dev/null; then
+        echo "failed to stop remote environment daemon pid $pid from $pid_file" >&2
+        exit 1
+      fi
     fi
     rm -f "$(dirname "$pid_file")/server.sock" "$pid_file"
   done
-fi"#
-    );
+fi"#,
+        quoted_dir = shell_dir,
+    )
+}
+
+async fn stop_remote_environment_daemons(socket_path: &Path, ssh_target: &str) -> Result<()> {
+    let command = remote_environment_daemon_stop_command(&runtime_paths::remote_server_dir());
 
     let output = remote_server::ssh::run_ssh_command_for_target(
         socket_path,
@@ -178,6 +196,7 @@ const DEV_REMOTE_BUILD_INPUT_SCOPES: &[&str] = &[
     "app/src/cli_agent_jsonl/discovery.rs",
     "app/src/cli_agent_jsonl/error.rs",
     "app/src/cli_agent_jsonl/mod.rs",
+    "app/src/cli_agent_jsonl/mutation.rs",
     "app/src/cli_agent_jsonl/parse.rs",
     "app/src/cli_agent_jsonl/roots.rs",
     "app/src/remote_server/mod.rs",
@@ -1555,6 +1574,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn remote_daemon_stop_command_expands_channel_home_directory() {
+        let command = remote_environment_daemon_stop_command("~/.ashide-dev/remote-server");
+
+        assert!(command.contains("dir=\"$HOME\"/.ashide-dev/remote-server"));
+        assert!(!command.contains("dir='~/.ashide-dev/remote-server'"));
+        assert!(command.contains("readlink \"/proc/$pid/exe\""));
+        assert!(command.contains("refusing to stop unrelated pid"));
+    }
+
+    #[test]
     fn dev_remote_install_is_process_single_flight() {
         let source = include_str!("dev_remote_install.rs");
         let install = source
@@ -1649,8 +1678,8 @@ mod tests {
     #[test]
     fn dev_remote_installed_stamp_path_sits_next_to_remote_binary() {
         assert_eq!(
-            dev_remote_installed_stamp_path("~/.ashide-dev/remote-server/ashide-dev-pty-v7"),
-            "~/.ashide-dev/remote-server/ashide-dev-pty-v7.stamp"
+            dev_remote_installed_stamp_path("~/.ashide-dev/remote-server/ashide-dev-pty-v10"),
+            "~/.ashide-dev/remote-server/ashide-dev-pty-v10.stamp"
         );
     }
 
@@ -1734,6 +1763,7 @@ mod tests {
             "app/src/cli_agent_jsonl/discovery.rs",
             "app/src/cli_agent_jsonl/error.rs",
             "app/src/cli_agent_jsonl/mod.rs",
+            "app/src/cli_agent_jsonl/mutation.rs",
             "app/src/cli_agent_jsonl/parse.rs",
             "app/src/cli_agent_jsonl/roots.rs",
         ] {

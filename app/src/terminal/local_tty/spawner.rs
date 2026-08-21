@@ -77,22 +77,16 @@ impl PtyHandle for DirectPtyHandle {
         Ok(())
     }
 }
-/// Invokes the provided callback function without crash reporting enabled.
-fn invoke_without_crash_reporting<T>(
-    is_crash_reporting_enabled: bool,
-    func: impl FnOnce() -> T,
-) -> T {
-    // 子进程派生前暂停本地 crash reporting 状态,避免把信号/异常处理状态泄漏到 shell。
+/// Invokes the provided callback while temporarily suspending crash reporting
+/// around child process spawn.
+fn invoke_without_crash_reporting<T>(func: impl FnOnce() -> T) -> T {
     #[cfg(feature = "crash_reporting")]
     crate::crash_reporting::suspend_crash_reporting_for_child_spawn();
 
     let retval = func();
 
-    // 子进程完成派生后恢复本地 crash reporting 状态。
-    if is_crash_reporting_enabled {
-        #[cfg(feature = "crash_reporting")]
-        crate::crash_reporting::resume_crash_reporting_after_child_spawn();
-    }
+    #[cfg(feature = "crash_reporting")]
+    crate::crash_reporting::resume_crash_reporting_after_child_spawn();
 
     retval
 }
@@ -167,7 +161,6 @@ impl PtySpawner {
     pub(super) fn spawn_pty(
         &self,
         options: PtyOptions,
-        is_crash_reporting_enabled: bool,
         #[cfg(windows)] event_loop_tx: super::mio_channel::Sender<
             crate::terminal::writeable_pty::Message,
         >,
@@ -188,7 +181,6 @@ impl PtySpawner {
             options,
             #[cfg(windows)]
             event_loop_tx,
-            is_crash_reporting_enabled,
         )
     }
 
@@ -197,16 +189,14 @@ impl PtySpawner {
         #[cfg(windows)] event_loop_tx: super::mio_channel::Sender<
             crate::terminal::writeable_pty::Message,
         >,
-        is_crash_reporting_enabled: bool,
     ) -> Result<(PtySpawnResult, Box<dyn PtyHandle>)> {
-        let pty_spawn_info =
-            invoke_without_crash_reporting(is_crash_reporting_enabled, move || {
-                local_tty::spawn(
-                    options,
-                    #[cfg(windows)]
-                    event_loop_tx,
-                )
-            })?;
+        let pty_spawn_info = invoke_without_crash_reporting(move || {
+            local_tty::spawn(
+                options,
+                #[cfg(windows)]
+                event_loop_tx,
+            )
+        })?;
         let direct_pty_handle = Box::new(DirectPtyHandle {
             child: pty_spawn_info.child,
         });

@@ -206,7 +206,7 @@ impl CLIAgent {
 
     fn command_prefix_aliases(&self) -> &'static [&'static str] {
         match self {
-            CLIAgent::CursorCli => &["cursor-agent"],
+            CLIAgent::CursorCli => &["cursor-agent", "cursor-cli"],
             CLIAgent::DeepSeek => &["deepseek-tui"],
             _ => &[],
         }
@@ -625,6 +625,59 @@ impl CLIAgent {
         }
     }
 
+    /// Accent plate RGB for sidebar agent badges (UI-AGENT-BRAND-ICON-07).
+    pub fn accent_rgb(&self) -> Option<u32> {
+        match self {
+            CLIAgent::Claude => Some(0xD97757),
+            CLIAgent::Codex => Some(0x000000),
+            CLIAgent::Amp => Some(0xF34E3F),
+            CLIAgent::Droid => Some(0xF59E0B),
+            CLIAgent::OpenCode => Some(0x6E56CF),
+            CLIAgent::Copilot => Some(0x8957E5),
+            CLIAgent::Pi => Some(0x0EA5E9),
+            CLIAgent::Auggie => Some(0x16A34A),
+            CLIAgent::CursorCli => Some(0x9AA0A6),
+            CLIAgent::Goose => Some(0x9A8CFF),
+            CLIAgent::DeepSeek => Some(0x4D6BFE),
+            CLIAgent::Antigravity => Some(0x2563EB),
+            CLIAgent::Omp => Some(0xEFEDE9),
+            CLIAgent::Unknown => None,
+        }
+    }
+
+    /// Badge glyph RGB. Light-accent agents use brand/dark glyph for contrast.
+    pub fn glyph_rgb(&self) -> u32 {
+        match self {
+            CLIAgent::Omp => 0x9B4DFF,
+            CLIAgent::Pi | CLIAgent::Auggie | CLIAgent::Droid => 0x000000,
+            _ => 0xFFFFFF,
+        }
+    }
+
+    /// Bundled currentColor SVG path for accent-plate badges.
+    pub fn icon_path(&self) -> &'static str {
+        match self {
+            CLIAgent::Claude => "bundled/svg/agents/claude.svg",
+            CLIAgent::Codex => "bundled/svg/agents/codex.svg",
+            CLIAgent::Amp => "bundled/svg/agents/amp.svg",
+            CLIAgent::OpenCode => "bundled/svg/agents/opencode.svg",
+            CLIAgent::Copilot => "bundled/svg/agents/copilot.svg",
+            CLIAgent::CursorCli => "bundled/svg/agents/cursor.svg",
+            CLIAgent::Goose => "bundled/svg/agents/goose.svg",
+            CLIAgent::Droid => "bundled/svg/agents/droid.svg",
+            CLIAgent::Pi => "bundled/svg/agents/pi.svg",
+            CLIAgent::Omp => "bundled/svg/agents/omp.svg",
+            CLIAgent::DeepSeek => "bundled/svg/deepseek.svg",
+            CLIAgent::Antigravity => "bundled/svg/antigravity.svg",
+            CLIAgent::Auggie | CLIAgent::Unknown => "bundled/svg/terminal.svg",
+        }
+    }
+
+    /// Whether this agent uses a multi-color raster/brand SVG instead of accent-plate glyph.
+    pub fn uses_multicolor_agent_logo(&self) -> bool {
+        matches!(self, CLIAgent::DeepSeek | CLIAgent::Antigravity)
+    }
+
     /// Extracts the first meaningful command token from a command string.
     ///
     /// When `escape_char` is provided, uses shell parsing to skip leading
@@ -951,7 +1004,10 @@ fn cli_agent_is_on_path_with_dirs(agent: CLIAgent, search_dirs: &[PathBuf]) -> b
     match agent {
         CLIAgent::Unknown => false,
         // `agent` 太泛化,Cursor CLI 用 cursor-agent 检测
-        CLIAgent::CursorCli => is_on_path_in_dirs("cursor-agent", search_dirs),
+        CLIAgent::CursorCli => {
+            is_on_path_in_dirs("cursor-agent", search_dirs)
+                || is_on_path_in_dirs("cursor-cli", search_dirs)
+        }
         // DeepSeek 同时检查主命令和别名
         CLIAgent::DeepSeek => {
             is_on_path_in_dirs("deepseek", search_dirs)
@@ -966,7 +1022,7 @@ fn cli_agent_is_on_path(agent: CLIAgent) -> bool {
     match agent {
         CLIAgent::Unknown => false,
         // `agent` 太泛化,Cursor CLI 用 cursor-agent 检测
-        CLIAgent::CursorCli => is_on_path("cursor-agent"),
+        CLIAgent::CursorCli => is_on_path("cursor-agent") || is_on_path("cursor-cli"),
         // DeepSeek 同时检查主命令和别名
         CLIAgent::DeepSeek => is_on_path("deepseek") || is_on_path("deepseek-tui"),
         other => is_on_path(other.command_prefix()),

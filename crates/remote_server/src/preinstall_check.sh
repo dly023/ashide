@@ -20,7 +20,7 @@ set -u
 required_glibc="2.17"
 echo "required_glibc=${required_glibc}"
 
-# 1. 识别 libc family,并在 glibc 场景下识别版本(纯遥测,不影响 status)。
+# 1. 识别 libc family,并在 glibc 场景下识别版本(诊断信息,不影响 status)。
 libc_family="unknown"
 libc_version=""
 

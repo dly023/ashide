@@ -146,11 +146,21 @@ pub(crate) enum EnvironmentNavigationActivationIntent {
 ///
 /// Passive projection is used by lifecycle/configuration reconciliation and
 /// must never reconnect transport. Only an explicit user refresh owns a toast
-/// generation and may request reconnect when the runtime is unavailable.
+/// generation; unavailable runtime transport is handled by the separate reconnect action.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EnvironmentSessionRefreshIntent {
     PassiveProjection,
     UserInitiated { generation: u64 },
+}
+
+/// Environment header 与 backend 共享的会话刷新可用性。
+///
+/// 远端 discovery 是 helper-native host operation，不依赖 terminal execution
+/// carrier；但必须证明 exact Environment owner 与 helper client 都仍 Connected。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EnvironmentSessionRefreshAvailability {
+    Unavailable,
+    Ready,
 }
 
 impl EnvironmentEntryIntent {

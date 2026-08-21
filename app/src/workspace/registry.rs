@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::FairMutex;
+use serde::Serialize;
 use warpui::{
     AppContext, Entity, EntityId, ModelHandle, SingletonEntity, WeakViewHandle, WindowId,
 };
@@ -109,6 +110,16 @@ struct RetiringWorkspaceSessionOwner {
     terminal_view_id: EntityId,
     terminal_model: Arc<FairMutex<TerminalModel>>,
     terminal_manager: ModelHandle<Box<dyn TerminalManager>>,
+}
+
+/// WorkspaceRegistry 所拥有的 detached runtime lease 的只读投影。
+/// X-Ray 只能读取它，不能借诊断查询触发惰性清理或生命周期变更。
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RetiringWorkspaceSessionOwnerDiagnostics {
+    pub(crate) window_id: String,
+    pub(crate) terminal_view_id: String,
+    pub(crate) model_has_exited: Option<bool>,
+    pub(crate) runtime: crate::terminal::TerminalRuntimeDiagnostics,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -409,6 +420,27 @@ impl WorkspaceRegistry {
         is_retiring
     }
 
+    pub(crate) fn retiring_session_owner_diagnostics(
+        &self,
+        durable_identity_key: &str,
+        app: &AppContext,
+    ) -> Vec<RetiringWorkspaceSessionOwnerDiagnostics> {
+        self.retiring_session_owners
+            .get(durable_identity_key)
+            .into_iter()
+            .flatten()
+            .map(|owner| RetiringWorkspaceSessionOwnerDiagnostics {
+                window_id: format!("{:?}", owner.window_id),
+                terminal_view_id: format!("{:?}", owner.terminal_view_id),
+                model_has_exited: owner
+                    .terminal_model
+                    .try_lock()
+                    .map(|model| model.has_exited()),
+                runtime: owner.terminal_manager.as_ref(app).runtime_diagnostics(),
+            })
+            .collect()
+    }
+
     /// Returns the workspace for the given window, if it is still alive.
     pub fn get(
         &self,
@@ -441,6 +473,17 @@ impl WorkspaceRegistry {
         durable_identity_key: &str,
         app: &AppContext,
     ) -> Option<WorkspaceSessionOwner> {
+        self.other_workspace_session_owners(current_window_id, durable_identity_key, app)
+            .into_iter()
+            .next()
+    }
+
+    pub(crate) fn other_workspace_session_owners(
+        &self,
+        current_window_id: WindowId,
+        durable_identity_key: &str,
+        app: &AppContext,
+    ) -> Vec<WorkspaceSessionOwner> {
         let mut owners = self
             .all_workspaces(app)
             .into_iter()
@@ -458,7 +501,7 @@ impl WorkspaceRegistry {
                 "durable workspace session {durable_identity_key} has multiple app-wide owners: {owners:?}"
             );
         }
-        owners.into_iter().next()
+        owners
     }
 }
 

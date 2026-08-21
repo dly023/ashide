@@ -1,0 +1,114 @@
+# Environment Rail — 左栏多环境会话导航与高度布局
+#
+# 正本：Agentty ENV-SESSION-FIRST-RAIL-56 / SESSION-SIDEBAR-ROW-DENSITY-29 对齐。
+# 关联：docs/SESSION_NAVIGATOR_SPEC.yaml、docs/LOCAL_REMOTE_PARITY_SPEC.yaml
+
+id: ENVIRONMENT-RAIL
+version: 9
+
+product_entry:
+  left_rail: "Session Navigator 左栏嵌套多个 Environment section；每个 section 有单行 identity header + 可滚动会话 viewport。"
+  top_chrome: "水平 Environment Strip 多 chip 仅在非垂直 Session Navigator 时保留；垂直模式下环境连接入口是 Header Toolbar 纯图标 Environment Indicator（点击打开 provider picker），左栏承担多环境并列展示。"
+
+invariants:
+  - "Session Navigator canonical model 仍按 navigation_key 分区归属 EnvironmentTable；UI 只读 committed projection，禁止热路径重建 membership/RowId。"
+  - "当前 Environment section 嵌套 live Session Navigator；非当前 section 只展示该 navigation_key 的 cached preview rows，点击仅 SwitchEnvironment，不 Resume。"
+  - "单行会话行高 36px；无 cwd 副标题；标题 trailing fade，无 ellipsis 字符。"
+  - "会话行图标全局机制：正方形 glyph 槽 + uniform padding plate + PLATE_GLYPH_INSET_RATIO 光学内缩；SVG 保留自身比例并 Contain fit；禁止按单个 agent 特判裁切。"
+  - "Environment 激活态只改变会话数据源与交互能力，不得改变行高、行距或 viewport 内边距；live reorder drop target 必须 overlay，禁止参与正常布局。"
+  - "搜索条保持扁平图标+输入，禁止独立描边 pill 容器。"
+  - "Environment viewport 只使用自然内容高度。仅有一个展开且非空 section 时，上限是左栏可用高度；有两个及以上展开且非空 section 时，每个上限是左栏可见高度的 1/2。超过对应上限才出现该 section 的内层滚动；所有 section/header 继续由整轨外层统一自然流与全局滚动。禁止均分、剩余空间分配、active Environment 权重或 water-filling。"
+  - "0 条会话与 collapsed section 共用零 viewport 高度语义，只保留 Environment header；展开/折叠只改变该 section 的 row_count 输入。外层纵向滚动中的非零 viewport 必须使用 rail_session_layout_plan 给出的显式高度，禁止把 Shrinkable/flexible child 放入无限纵向约束。"
+  - "Environment Indicator 为纯图标工具栏按钮（kind icon + lifecycle 状态点），禁止顶栏文案/chevron；SavePosition 使用 ENVIRONMENT_PROVIDER_PICKER_POSITION_ID；点击打开 provider picker。"
+  - "非当前 Environment preview 行必须复用 live 行同一套 GROUP_ITEM_SPACING + unit_outer_pad_y，禁止两套密度。"
+  - "Environment section header 整块 identity 区是展开/折叠控制器；左侧直接从 lifecycle dot 开始，禁止 chevron 占据首列。环境切换由 preview session row 或顶部 Environment picker 承担，header 不兼任 SwitchEnvironment。"
+  - "Environment header 右侧 action rail 顺序固定为 Refresh → Connect/Update Helper → Disconnect。用户意图只有 Connect 与 Disconnect：同一 Environment 断开后再次 Connect 自然形成 reconnect，禁止在产品 action 层另建 ReconnectEnvironment。Local 的 Refresh 恒可用；runtime 只要 current Environment owner 与 helper client Connected 即可用 helper-native discovery，不依赖 terminal execution carrier；Dormant/Error=Connect 或 Update Helper + Disconnect；Connecting/Installing=Disconnect。Connect/Update Helper 是未连接状态的主恢复入口，必须常显而非仅 hover 可见；其余次要 action 可沿用 hover reveal。Refresh 必须携带该 section 的 authority_key 且永不启动 transport；Connect/Update Helper 只管理 transport且不冒充 session scan。action 的 mouse-down 与 mouse-up/click 必须完整隔离于 header collapse handler。"
+  - "Environment header 必须拆成左侧 identity cluster 与右侧 trailing/action cluster：identity 可收缩，计数与 Refresh/Connect/Disconnect 固定贴右边界且不参与环境名宽度；未来 Environment pin 只能加入同一个右侧 cluster。禁止把 action 直接顺序追加在可变宽 label 后。"
+  - "搜索/新建 control bar、Environment header、live session row 与 preview session row 的左右可见边界必须共同读取 SessionSidebarSurfaceMetrics.content_pad_left/content_pad_right；unit wrapper 只拥有纵向首尾/组间距，禁止再次叠加横向 padding。"
+  - "Environment pin 只能在有 Environment 级持久 owner 后加入同一 action rail，禁止用 session pin 冒充。"
+  - "EnvironmentTable 同时拥有 transport/helper failure 与 indexed-session discovery issue。helper protocol/version mismatch 必须分类为 Update Helper，并在首次失败时给出明确确认；取消确认只关闭 modal，不清除环境行的持续提示。Update Helper 必须用展开后的 target HOME 找到该 channel 的 daemon PID，并在校验 /proc/$pid/exe 确属 helper 目录后终止旧 daemon，再安装/连接当前 helper；禁止因为 quote 住 ~ 而静默漏清理，也禁止用过期 PID 文件误杀无关进程。普通 connect/discovery failure 在 exact Environment header 显示短标签并以 tooltip 暴露完整原因；失败不得显示成成功空列表，也不得清空已提交会话。"
+  - "remote helper 的 session discovery roots 必须由目标 host 的 passwd/login-shell 配置通过 typed helper RPC 解析；禁止先发 RunCommand、依赖 terminal SessionBootstrapped、读取 desktop HOME，或从 helper daemon HOME 静默推断。"
+  - "Refresh tooltip/issue 必须从当前 Environment authority 得出作用域：TerminalBootstrap/local 说“本机”，SavedSsh/Runtime 才说“远端”；禁止用 provider 名、当前 active Environment 或硬编码远端文案猜 backend。configured 但物理 source 从未存在的可选 provider 不产生 issue，也不得进入 observed_agents。"
+  - "Debug build 的会话 detail sidecar 与 row context menu 必须暴露同一份关系 X-Ray。X-Ray 是 canonical owner 的只读 join：Environment 只读 ParsedEnvironmentAuthority；container/durable/logical identity 只读 WorkspaceSessionSnapshot；runtime/进程只读 TerminalManager diagnostics 与 WorkspaceRegistry lease；禁止 render 层拼第二套 pane/session key、扫描进程名或修改 lifecycle。"
+  - "关系 X-Ray 必须区分 Cold、StartingHere、LiveHere、LiveElsewhere、UndoRetained、Stopping 与 Unknown。UndoRetained 表示 carrier 暂藏但未请求 shutdown；Stopping 表示 exact TerminalManager 已请求 shutdown且 lease 等待 TerminalModel exit。二者禁止继续共用面向用户的“会话正在关闭”解释。"
+
+layout:
+  session_row_height_px: 36
+  env_header_height_px: 36
+  content_pad_left_px: 4
+  content_pad_right_px: 4
+  unit_outer_pad_y_px: 4
+  search_block_height_fn: rail_search_block_height
+  multi_env_height: natural_content_single_full_multi_half_cap
+  scroll: nested_outer_and_inner
+
+ux_matrix:
+  - id: ER-01
+    scenario: "仅 Local 环境、单 section"
+    expect: "会话 viewport 占满 search 以下剩余高度"
+  - id: ER-02
+    scenario: "Local + 远程 Environment 同时展开"
+    expect: "两 section 各按自然行数取高，单个高度不超过左栏 1/2；只有超过上限的 section 内滚；轨道外层按自然总高全局滚动"
+  - id: ER-03
+    scenario: "点击非当前 Environment preview row"
+    expect: "SwitchEnvironment(authority)；不触发 Resume"
+  - id: ER-04
+    scenario: "搜索框展开"
+    expect: "搜索不改变高度公式；当前可见结果按自然高度，唯一非空 section 可使用整栏，多 section 时各以左栏 1/2 为上限；禁止 search/active single-fill 特判"
+  - id: ER-05
+    scenario: "顶部 Environment Indicator"
+    expect: "纯图标按钮（无「本地」文案）；点击打开 environment provider picker；picker 锚到 Indicator"
+  - id: ER-06
+    scenario: "非当前 Environment section 折叠"
+    expect: "点击 Environment identity 块切换折叠态；header 仍可见、不占 session viewport；不隐式切换环境"
+  - id: ER-07
+    scenario: "当前 Environment section 折叠"
+    expect: "点击 Environment identity 块切换折叠态；lifecycle dot 成为左侧首个视觉元素"
+  - id: ER-08
+    scenario: "在两个已展开 Environment 之间来回切换"
+    expect: "两侧会话行始终保持首尾 4px、相邻行 3px；新激活侧不得因 live reorder drop target 或 unit padding 变宽"
+  - id: ER-09
+    scenario: "连接第二个 Environment 后折叠任一 section，只剩一个可见 session viewport"
+    expect: "折叠 section 等价 row_count=0；若只剩一个非空 viewport，它按自然内容高度且上限恢复为左栏可用高度，不无条件扩张填满；外层无 flexible child；切换/折叠不 panic"
+  - id: ER-10
+    scenario: "runtime Environment header hover/click action rail"
+    expect: "Connected helper Ready 从左到右为 Refresh、Disconnect；Connected 但 helper 未就绪时显示 disabled Refresh、Disconnect；Dormant/Error 为常显 Connect、hover Disconnect；Connecting/Installing 仅 hover Disconnect；全部操作固定右对齐，点击 action 不改变折叠态；断连完成后 section 从左栏消失"
+  - id: ER-11
+    scenario: "Local 与非当前 runtime Environment 分别点击 header Refresh"
+    expect: "typed action 携带被点击 section 的 authority；只刷新目标 Environment；各自 spinner/失败反馈按 navigation_key 隔离；不切换 active Environment"
+  - id: ER-12
+    scenario: "比较搜索 control bar、Environment header、live/preview session row 左右边缘"
+    expect: "全部读取同一 content_pad_left/content_pad_right；session unit wrapper 横向 padding 为 0；会话整体向左收紧且右侧 action/trailing 对齐"
+  - id: ER-13
+    scenario: "在未连接 runtime header 上分别审查 Refresh 与 Connect"
+    expect: "Refresh 不出现且 action 语义永不启动 transport；仅 Dormant/Error 可显式 Connect；同一 authority 的再次 Connect 由底层复用为 reconnect；Connecting/Installing 不允许重入 connect"
+  - id: ER-14
+    scenario: "saved-SSH runtime transport 已 Connected，但尚无 terminal execution carrier 时点击 Refresh"
+    expect: "Refresh 立即走 helper-native roots + scan RPC；不发送 RunCommand、不创建隐藏/可见 terminal、不出现 No executor；完整成功后只更新 exact Environment 的 committed rows"
+  - id: ER-15
+    scenario: "点击 Environment header 的 Refresh/Connect/Update Helper/Disconnect"
+    expect: "只派发对应 authority-scoped action；outer header defer 已处理的 child 事件，折叠态、active Environment、section 顺序与 scroll anchor 均不改变"
+  - id: ER-16
+    scenario: "helper protocol/version mismatch 或 helper 无法连接"
+    expect: "mismatch 首次显示明确的 Update Helper 确认；取消后 exact Environment header 持续显示 Helper 需更新并保留 Update Helper action。其他连接失败显示连接失败与完整原因，不伪装为空会话列表"
+  - id: ER-17
+    scenario: "current remote discovery generation 失败或 provider source 暂失"
+    expect: "EnvironmentTable 保留完整 committed rows并记录 exact navigation_key issue；header 持续显示会话发现失败/来源不可用，Refresh 可重试；stale completion 不得覆盖较新状态"
+  - id: ER-18
+    scenario: "本地启用了 Droid 等可选 provider，但其 session source 从未创建；连续点击本地 Refresh"
+    expect: "每轮都完整扫描其他已存在 provider并提交本地 rows；未 provision provider 保持 unobserved，不产生 SourceMissing。若真实已观察 source 后续消失，本地 tooltip 使用“本机”，remote authority 才使用“远端”"
+  - id: ER-19
+    scenario: "0 条、1 条、2 条与大量会话的 Environment 同时展开，随后折叠其中一个"
+    expect: "0 条/折叠只保留 header；1/2 条严格按自然内容高度；多个非空 section 中的大列表封顶为左栏 1/2 并内滚；只有一个非空 section 时上限为左栏可用高度；自然总高由外层全局滚动承载"
+  - id: ER-20
+    scenario: "Debug build hover 任意 local/runtime、live/history/retained 会话行并复制关系 X-Ray"
+    expect: "sidecar 摘要与复制 JSON 来自同一 SessionNavigatorXRay；Environment、container、durable session、runtime instance/process、binding state 与 legal actions 可逐项核对；release build 不新增常驻行内 chrome"
+  - id: ER-21
+    scenario: "关闭一个可 Undo 的 Agent pane 后，从另一窗口检查同一 durable session；随后让 Undo item 过期并再次检查"
+    expect: "过期前 X-Ray=UndoRetained、runtime shutdown_requested=false；过期/永久关闭后 X-Ray=Stopping、shutdown_requested=true，TerminalModel exit 后 lease 消失并回到 Cold；全程不按命令字符串猜 PID"
+
+verification:
+  unit_tests:
+    - app/src/workspace/view/environment_rail.rs
+  static_check: script/check_environment_rail
+  gui: "ashide-run-verify — 多环境自然高度/半栏封顶双滚动 + X-Ray sidecar/copy + 顶部 indicator picker"

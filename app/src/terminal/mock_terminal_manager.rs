@@ -116,6 +116,15 @@ impl TerminalManager for MockTerminalManager {
 
     fn shutdown_pty(&mut self, _app: &mut AppContext) {}
 
+    fn runtime_diagnostics(&self) -> crate::terminal::TerminalRuntimeDiagnostics {
+        crate::terminal::TerminalRuntimeDiagnostics {
+            kind: crate::terminal::TerminalRuntimeKind::Mock,
+            runtime_ref: None,
+            process_id: None,
+            shutdown_requested: false,
+        }
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

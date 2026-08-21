@@ -3025,3 +3025,44 @@ fn test_restore_finished_removes_carrier_only_after_confirmed_source_absence() {
         .all(|session| row_id_for_session(session, &confirmed_absent.state) != target_row_id));
     validate_state(&confirmed_absent.sessions, &confirmed_absent.state).unwrap();
 }
+
+#[test]
+fn rebind_detaches_old_durable_identity_from_reused_live_container() {
+    let mut live_a = make_live_session("tab:0:leaf:0", "local", 3_000);
+    live_a.container_uuid = Some(vec![0xca; 16]);
+    live_a.cli_agent_session_id = Some("session-a".to_owned());
+    live_a.label = Some("Session A".to_owned());
+
+    let initial = reduce(
+        Vec::new(),
+        SessionNavigatorState::new(),
+        SessionNavigatorAction::Refresh {
+            new_sessions: vec![live_a.clone()],
+            pinned_identity_keys: HashSet::new(),
+        },
+        &PaneGroupInfo::new(),
+    );
+    let row_a = row_id_for_session(&live_a, &initial.state);
+
+    let mut live_b = live_a.clone();
+    live_b.cli_agent_session_id = Some("session-b".to_owned());
+    live_b.label = Some("Session B".to_owned());
+    let mut virtual_a = make_virtual_session("source-a", "local", 2_000);
+    virtual_a.cli_agent_session_id = Some("session-a".to_owned());
+    virtual_a.label = Some("Session A".to_owned());
+
+    let rebound = reduce(
+        initial.sessions,
+        initial.state,
+        SessionNavigatorAction::Refresh {
+            new_sessions: vec![live_b.clone(), virtual_a.clone()],
+            pinned_identity_keys: HashSet::new(),
+        },
+        &PaneGroupInfo::new(),
+    );
+
+    assert_eq!(rebound.sessions.len(), 2);
+    let row_b = row_id_for_session(&live_b, &rebound.state);
+    assert_ne!(row_a, row_b);
+    assert_eq!(row_id_for_session(&virtual_a, &rebound.state), row_a);
+}

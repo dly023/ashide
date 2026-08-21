@@ -16,7 +16,7 @@ use warp_core::ui::theme::AnsiColorIdentifier;
     settings_value::SettingsValue,
 )]
 #[schemars(
-    description = "Where new tabs are placed in the tab bar.",
+    description = "Where new environment tabs are placed in the environment strip.",
     rename_all = "snake_case"
 )]
 pub enum NewTabPlacement {
@@ -31,7 +31,7 @@ settings::macros::implement_setting_for_enum!(
     SupportedPlatforms::ALL,
     private: false,
     toml_path: "general.new_tab_placement",
-    description: "Where new tabs are placed in the tab bar.",
+    description: "Where new environment tabs are placed in the environment strip.",
 );
 
 #[derive(
@@ -78,7 +78,7 @@ settings::macros::implement_setting_for_enum!(
     settings_value::SettingsValue,
 )]
 #[schemars(
-    description = "When workspace decorations such as the tab bar are visible.",
+    description = "When workspace decorations such as the environment strip are visible.",
     rename_all = "snake_case"
 )]
 pub enum WorkspaceDecorationVisibility {
@@ -484,7 +484,7 @@ define_settings_group!(TabSettings, settings: [
         supported_platforms: SupportedPlatforms::ALL,
         private: false,
         toml_path: "appearance.vertical_tabs.show_title_bar_search_bar",
-        description: "Whether to show the search bar in the title bar between tabs and window controls (vertical tabs only).",
+        description: "Whether to show the search bar in the title bar (Session Navigator layout).",
     },
     use_latest_user_prompt_as_conversation_title_in_tab_names: UseLatestUserPromptAsConversationTitleInTabNames {
         type: bool,

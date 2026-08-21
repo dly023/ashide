@@ -1,6 +1,16 @@
 pub(crate) mod session_display;
 
+use super::environment_rail::{
+    build_environment_rail_sections, lifecycle_dot_color, rail_available_session_area_px,
+    rail_search_block_height, rail_session_layout_plan, rail_session_viewport_slots,
+    section_viewport_layout, split_rail_sections, EnvironmentRailIssueKind, EnvironmentRailSection,
+    EnvironmentSessionCounts, RAIL_ENV_HEADER_HEIGHT, RAIL_SESSION_ROW_HEIGHT,
+};
 use super::session_navigator::SessionNavigatorRowIdentity;
+use super::session_navigator_xray::SessionNavigatorXRay;
+use super::session_sidebar_metrics::{
+    session_sidebar_surface_metrics, session_sidebar_unit_padding,
+};
 use crate::ai::agent::conversation::ConversationStatus;
 use crate::code::editor::{add_color, remove_color};
 use crate::code::icon_from_file_path;
@@ -15,15 +25,15 @@ use crate::ui_components::icon_with_status::{
 use crate::FeatureFlag;
 use chrono::{Local, TimeZone};
 use session_display::{
-    restored_session_detail, restored_session_environment_label, restored_session_label,
-    restored_session_root_label, restored_session_search_fragments, vtab_session_row_key,
-    vtab_session_row_position_id,
+    restored_session_environment_label, restored_session_label, restored_session_root_label,
+    restored_session_search_fragments, vtab_session_row_key, vtab_session_row_position_id,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+use super::agent_icon::session_navigator_row_icon;
 use crate::app_state::{WorkspaceSessionKind, WorkspaceSessionSnapshot};
 use crate::appearance::Appearance;
 use crate::context_chips::display_chip::GitLineChanges;
@@ -46,6 +56,7 @@ use crate::ui_components::icons::Icon as UiIcon;
 use crate::util::bindings::keybinding_name_to_display_string;
 use crate::util::color::Opacity;
 use crate::workspace::action::{WorkspaceAction, WorkspaceSessionActionTarget};
+use crate::workspace::environment_backend::EnvironmentSessionRefreshAvailability;
 use crate::workspace::hoa_onboarding::HoaOnboardingStep;
 use crate::workspace::tab_settings::{
     TabSettings, VerticalTabsCompactSubtitle, VerticalTabsDisplayGranularity,
@@ -97,14 +108,16 @@ const DETAIL_SIDECAR_SECTION_PADDING: f32 = 10.;
 const DETAIL_SIDECAR_SECTION_GAP: f32 = 4.;
 const GROUP_HEADER_VERTICAL_PADDING: f32 = 4.;
 const GROUP_HORIZONTAL_PADDING: f32 = 8.;
-const GROUP_BODY_BOTTOM_PADDING: f32 = 8.;
-const GROUP_ITEM_SPACING: f32 = 4.;
+const GROUP_BODY_BOTTOM_PADDING: f32 = 4.;
+const GROUP_ITEM_SPACING: f32 = 3.;
 const GROUP_ACTION_BUTTON_ICON_SIZE: f32 = 12.;
 const GROUP_ACTION_BUTTON_PADDING: f32 = 2.;
 const GROUP_ACTION_BUTTON_GAP: f32 = 2.;
-const ROW_CORNER_RADIUS: f32 = 4.;
+const ROW_CORNER_RADIUS: f32 = 8.;
+const SESSION_ACTIVE_PILL_WIDTH: f32 = 3.;
+const SESSION_ACTIVE_PILL_HEIGHT: f32 = 18.;
 const BADGE_ICON_SIZE: f32 = 12.;
-const SESSION_TRAILING_SLOT_WIDTH: f32 = 14.;
+const SESSION_TRAILING_SLOT_WIDTH: f32 = 16.;
 const SESSION_PIN_ICON_SIZE: f32 = 13.;
 const DETAIL_SIDECAR_DEFAULT_WIDTH: f32 = 320.;
 const DETAIL_SIDECAR_MIN_WIDTH: f32 = 260.;
@@ -116,7 +129,7 @@ const TAB_COLOR_OPACITY: Opacity = 15;
 const TAB_COLOR_HOVER_OPACITY: Opacity = 50;
 
 // Circular icon constants
-const ICON_WITH_STATUS_GAP: f32 = 8.;
+const ICON_WITH_STATUS_GAP: f32 = 10.;
 pub(super) const VERTICAL_TABS_DETAIL_SIDECAR_POSITION_ID: &str = "vertical_tabs:detail_sidecar";
 const VERTICAL_TABS_STATUS_BADGE_ICON_SIZE: f32 = 9.;
 const VERTICAL_TABS_STATUS_BADGE_PADDING: f32 = 1.5;
@@ -130,20 +143,22 @@ pub(crate) const SESSION_NAVIGATOR_SEARCH_INPUT_POSITION_ID: &str =
     "workspace:session_navigator_search_input";
 
 const VERTICAL_TABS_SIZING: IconWithStatusSizing = IconWithStatusSizing {
-    icon_size: 16.,
-    padding: 4.,
+    icon_size: 15.,
+    padding: 3.5,
     badge_icon_size: VERTICAL_TABS_STATUS_BADGE_ICON_SIZE,
     badge_padding: VERTICAL_TABS_STATUS_BADGE_PADDING,
-    overall_size_override: None,
+    overall_size_override: Some(22.),
+    plate_corner_radius: Some(6.),
     badge_offset: VERTICAL_TABS_STATUS_BADGE_OFFSET,
 };
 
 const VERTICAL_TABS_AGENT_SIZING: IconWithStatusSizing = IconWithStatusSizing {
-    icon_size: 10.,
-    padding: 5.,
+    icon_size: 14.,
+    padding: 4.,
     badge_icon_size: VERTICAL_TABS_STATUS_BADGE_ICON_SIZE,
     badge_padding: VERTICAL_TABS_STATUS_BADGE_PADDING,
-    overall_size_override: Some(24.),
+    overall_size_override: Some(22.),
+    plate_corner_radius: Some(6.),
     badge_offset: VERTICAL_TABS_STATUS_BADGE_OFFSET,
 };
 
@@ -166,25 +181,19 @@ fn restored_session_icon(
     appearance: &Appearance,
 ) -> Box<dyn Element> {
     let theme = appearance.theme();
-    let main_text = theme.main_text_color(theme.background());
     let agent = session
         .cli_agent
         .as_deref()
         .map(CLIAgent::from_serialized_name)
         .filter(|agent| !matches!(agent, CLIAgent::Unknown));
+    // 单行圆角矩形唯一入口；禁止多色散装 / IconWithStatus 圆形混用。
+    session_navigator_row_icon(agent, theme)
+}
 
-    let variant = if let Some(agent) = agent {
-        IconWithStatusVariant::CLIAgent {
-            agent,
-            status: None,
-        }
-    } else {
-        IconWithStatusVariant::Neutral {
-            icon: WarpIcon::Terminal,
-            icon_color: main_text,
-        }
-    };
-    render_pane_icon_with_status(variant, theme)
+#[derive(Clone)]
+enum RestoredSessionRowActivation {
+    Resume(WorkspaceSessionActionTarget),
+    SwitchEnvironment { authority_key: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -271,6 +280,7 @@ fn render_restored_session_icon_with_status(
     appearance: &Appearance,
 ) -> Box<dyn Element> {
     let theme = appearance.theme();
+    let metrics = session_sidebar_surface_metrics();
     let icon = restored_session_icon(session, appearance);
     let Some(badge) = restored_session_icon_badge(
         is_resuming,
@@ -316,8 +326,8 @@ fn render_restored_session_icon_with_status(
 
     let mut stack = Stack::new().with_child(
         ConstrainedBox::new(icon)
-            .with_width(24.)
-            .with_height(24.)
+            .with_width(metrics.icon_size)
+            .with_height(metrics.icon_size)
             .finish(),
     );
     stack.add_positioned_child(
@@ -331,8 +341,8 @@ fn render_restored_session_icon_with_status(
     );
 
     ConstrainedBox::new(stack.finish())
-        .with_width(24.)
-        .with_height(24.)
+        .with_width(metrics.icon_size)
+        .with_height(metrics.icon_size)
         .finish()
 }
 
@@ -369,7 +379,7 @@ fn render_restored_session_trailing_slot(
 
     ConstrainedBox::new(Align::new(pin_slot).finish())
         .with_width(SESSION_TRAILING_SLOT_WIDTH)
-        .with_height(20.)
+        .with_height(22.)
         .finish()
 }
 
@@ -387,8 +397,10 @@ fn render_restored_session_row(
     drag_state: DraggableState,
     reorder_unit_id: String,
     detail_hover_state: VerticalTabsDetailHoverState,
+    activation: RestoredSessionRowActivation,
     appearance: &Appearance,
 ) -> Box<dyn Element> {
+    let metrics = session_sidebar_surface_metrics();
     let theme = appearance.theme();
     let session_target = WorkspaceSessionActionTarget::new(
         session.id.clone(),
@@ -403,10 +415,11 @@ fn render_restored_session_row(
     let session_for_render = session.clone();
     let is_pinned = session.is_pinned;
     let main_text: ColorU = theme.main_text_color(theme.background()).into();
-    let sub_text: ColorU = theme.sub_text_color(theme.background()).into();
+    let row_min_height = metrics.row_min_height;
+    let activation_for_click = activation.clone();
     let row = Hoverable::new(mouse_state, move |hover| {
         let hovered = hover.is_hovered();
-        let title_opacity = if is_selected { 100 } else { 78 };
+        let title_opacity = if is_selected { 100 } else { 92 };
         let title = if is_renaming {
             ConstrainedBox::new(
                 Container::new(ChildView::new(&alias_editor).finish())
@@ -415,16 +428,16 @@ fn render_restored_session_row(
                     .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
                     .finish(),
             )
-            .with_height(24.)
+            .with_height(row_min_height - metrics.row_pad_y * 2.)
             .finish()
         } else {
             Text::new_inline(
                 restored_session_label(&session_for_render),
                 appearance.ui_font_family(),
-                13.,
+                metrics.title_font_size,
             )
             .with_color(WarpThemeFill::Solid(coloru_with_opacity(main_text, title_opacity)).into())
-            .with_clip(ClipConfig::ellipsis())
+            .with_clip(ClipConfig::end())
             .finish()
         };
         let title = match (same_window_split_group_number, is_renaming) {
@@ -433,54 +446,69 @@ fn render_restored_session_row(
             }
             (Some(_), true) | (None, false) | (None, true) => title,
         };
-        let detail = Text::new_inline(
-            restored_session_detail(&session_for_render),
-            appearance.monospace_font_family(),
-            10.5,
-        )
-        .with_color(WarpThemeFill::Solid(coloru_with_opacity(sub_text, 82)).into())
-        .with_clip(ClipConfig::ellipsis())
-        .finish();
 
-        let text_column = Flex::column()
-            .with_spacing(2.)
-            .with_child(title)
-            .with_child(detail)
-            .finish();
+        // 始终占位，避免选中时整列图标/标题横向跳动。
+        let active_pill = ConstrainedBox::new(if is_selected {
+            Container::new(Empty::new().finish())
+                .with_background(ThemeFill::Solid(theme.accent().into()))
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(1.5)))
+                .finish()
+        } else {
+            Empty::new().finish()
+        })
+        .with_width(SESSION_ACTIVE_PILL_WIDTH)
+        .with_height(SESSION_ACTIVE_PILL_HEIGHT)
+        .finish();
 
         let trailing = render_restored_session_trailing_slot(is_pinned, appearance);
         let content = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_spacing(10.)
+            .with_spacing(metrics.icon_text_gap)
+            .with_child(active_pill)
             .with_child(render_restored_session_icon_with_status(
                 &session_for_render,
                 is_resuming,
                 activity_indicator,
                 appearance,
             ))
-            .with_child(Shrinkable::new(1., text_column).finish())
+            .with_child(Shrinkable::new(1., title).finish())
             .with_child(trailing)
             .finish();
 
         let mut container = Container::new(content)
-            .with_padding(Padding::uniform(10.).with_left(12.).with_right(10.))
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)));
+            .with_padding(
+                Padding::uniform(metrics.row_pad_y)
+                    .with_left(metrics.content_pad_left)
+                    .with_right(metrics.content_pad_right),
+            )
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)));
         if let Some(background) =
             restored_session_row_background(is_selected, is_resuming, hovered, theme)
         {
             container = container.with_background(background);
         }
-        if is_keyboard_cursor {
+        if is_keyboard_cursor && !is_selected {
             container = container.with_border(Border::all(1.).with_border_fill(theme.outline()));
         }
-        container.finish()
+        ConstrainedBox::new(container.finish())
+            .with_min_height(row_min_height)
+            .finish()
     })
     .on_click(move |ctx, _, _| {
         if !is_resuming && !is_renaming {
-            ctx.dispatch_typed_action(WorkspaceAction::ActivateRestoredWorkspaceSession {
-                target: session_target.clone(),
-            });
+            match &activation_for_click {
+                RestoredSessionRowActivation::Resume(target) => {
+                    ctx.dispatch_typed_action(WorkspaceAction::ActivateRestoredWorkspaceSession {
+                        target: target.clone(),
+                    });
+                }
+                RestoredSessionRowActivation::SwitchEnvironment { authority_key } => {
+                    ctx.dispatch_typed_action(WorkspaceAction::SwitchEnvironment {
+                        authority_key: authority_key.clone(),
+                    });
+                }
+            }
         }
     })
     .on_right_click(move |ctx, _, position| {
@@ -599,7 +627,6 @@ struct SessionNavigatorViewportUnit {
 
 #[derive(Clone)]
 enum SessionNavigatorViewportItem {
-    Header,
     Unit(SessionNavigatorViewportUnit),
     Empty { query_is_empty: bool },
 }
@@ -613,7 +640,6 @@ fn session_navigator_viewport_unit_identity(
 impl SessionNavigatorViewportItem {
     fn identity(&self) -> String {
         match self {
-            Self::Header => "session-navigator:header".to_owned(),
             Self::Unit(unit) => format!("session-navigator:unit:{}", unit.identity),
             Self::Empty { query_is_empty } => format!("session-navigator:empty:{query_is_empty}"),
         }
@@ -621,7 +647,6 @@ impl SessionNavigatorViewportItem {
 
     fn content_signature(&self) -> String {
         match self {
-            Self::Header => "header".to_owned(),
             Self::Unit(unit) => unit.content_signature.clone(),
             Self::Empty { query_is_empty } => format!("empty:{query_is_empty}"),
         }
@@ -649,8 +674,7 @@ impl SessionNavigatorViewportProjection {
             .iter()
             .filter_map(|item| match item {
                 SessionNavigatorViewportItem::Unit(unit) => Some(unit),
-                SessionNavigatorViewportItem::Header
-                | SessionNavigatorViewportItem::Empty { .. } => None,
+                SessionNavigatorViewportItem::Empty { .. } => None,
             })
             .flat_map(|unit| unit.rows.iter().map(|row| row.render_identity.clone()))
             .collect()
@@ -701,30 +725,17 @@ impl SessionNavigatorViewportProjection {
             .get(index)
             .expect("Session Navigator viewport requested an unknown item")
         {
-            SessionNavigatorViewportItem::Header => Container::new(
-                Text::new_inline(
-                    crate::t!("workspace-session-navigator-title"),
-                    appearance.ui_font_family(),
-                    11.,
-                )
-                .with_color(theme.sub_text_color(theme.background()).into())
-                .with_style(Properties::default().weight(Weight::Semibold))
-                .with_clip(ClipConfig::ellipsis())
-                .finish(),
-            )
-            .with_padding(Padding::uniform(8.).with_top(4.).with_bottom(4.))
-            .finish(),
             SessionNavigatorViewportItem::Unit(unit) => {
                 let mut column = Flex::column()
                     .with_main_axis_size(MainAxisSize::Min)
                     .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                    .with_spacing(GROUP_ITEM_SPACING)
-                    .with_child(render_session_unit_insertion_target(
-                        unit.target_index,
-                        false,
-                        theme,
-                    ));
+                    .with_spacing(GROUP_ITEM_SPACING);
                 for row in &unit.rows {
+                    let activation =
+                        RestoredSessionRowActivation::Resume(WorkspaceSessionActionTarget::new(
+                            row.session.id.clone(),
+                            row.session.environment_authority_key.clone(),
+                        ));
                     column.add_child(render_restored_session_row(
                         &row.session,
                         row.activity_indicator,
@@ -739,24 +750,34 @@ impl SessionNavigatorViewportProjection {
                         row.drag_state.clone(),
                         row.reorder_unit_id.clone(),
                         row.detail_hover_state.clone(),
+                        activation,
                         appearance,
                     ));
                 }
+                let padded = Container::new(column.finish())
+                    .with_padding(session_sidebar_unit_padding(
+                        unit.is_first_visible_unit,
+                        unit.is_last_visible_unit,
+                    ))
+                    .finish();
+                let mut stack = Stack::new().with_child(padded);
+                add_session_unit_insertion_target_overlay(
+                    &mut stack,
+                    unit.target_index,
+                    ParentAnchor::TopLeft,
+                    ChildAnchor::TopLeft,
+                    theme,
+                );
                 if unit.is_last_visible_unit {
-                    column.add_child(render_session_unit_insertion_target(
+                    add_session_unit_insertion_target_overlay(
+                        &mut stack,
                         unit.target_index + 1,
-                        false,
+                        ParentAnchor::BottomLeft,
+                        ChildAnchor::BottomLeft,
                         theme,
-                    ));
+                    );
                 }
-                let padding = if unit.is_first_visible_unit {
-                    Padding::uniform(8.).with_top(0.)
-                } else {
-                    Padding::uniform(8.).with_top(GROUP_ITEM_SPACING)
-                };
-                Container::new(column.finish())
-                    .with_padding(padding)
-                    .finish()
+                stack.finish()
             }
             SessionNavigatorViewportItem::Empty { query_is_empty } => {
                 let message = if *query_is_empty {
@@ -824,7 +845,10 @@ fn build_session_navigator_viewport_projection(
     use super::session_navigator_reducer::build_reorder_units;
 
     let query_lower = state.search_query.to_lowercase();
-    let renaming_identity = workspace.renaming_workspace_session_identity.clone();
+    let renaming_identity = workspace
+        .renaming_workspace_session
+        .as_ref()
+        .map(|rename| rename.identity.clone());
     let kind_sessions: Vec<&WorkspaceSessionSnapshot> = sessions
         .iter()
         .filter(|session| {
@@ -977,8 +1001,7 @@ fn build_session_navigator_viewport_projection(
         unit.is_last_visible_unit = index == last_visible_unit;
     }
 
-    let mut items = Vec::with_capacity(visible_units.len() + 1);
-    items.push(SessionNavigatorViewportItem::Header);
+    let mut items = Vec::with_capacity(visible_units.len());
     items.extend(
         visible_units
             .into_iter()
@@ -1007,6 +1030,25 @@ fn render_session_unit_insertion_target(
         SessionNavigatorReorderDropData { target_index },
     )
     .finish()
+}
+
+/// Session reorder 命中区只覆盖 unit 边界，不参与 Flex/List 的正常布局。
+fn add_session_unit_insertion_target_overlay(
+    stack: &mut Stack,
+    target_index: usize,
+    parent_anchor: ParentAnchor,
+    child_anchor: ChildAnchor,
+    theme: &WarpTheme,
+) {
+    stack.add_positioned_overlay_child(
+        render_session_unit_insertion_target(target_index, false, theme),
+        OffsetPositioning::offset_from_parent(
+            vec2f(0., 0.),
+            ParentOffsetBounds::ParentBySize,
+            parent_anchor,
+            child_anchor,
+        ),
+    );
 }
 
 fn terminal_title_fallback_font(agent_text: &TerminalAgentText) -> TerminalPrimaryLineFont {
@@ -1252,11 +1294,7 @@ fn render_pane_row_element(
         }
 
         container
-            .with_border(Border::all(1.).with_border_fill(if is_selected {
-                internal_colors::fg_overlay_3(theme).into()
-            } else {
-                ElementFill::None
-            }))
+            .with_border(Border::all(0.).with_border_fill(ElementFill::None))
             .finish()
     })
     .on_click(move |ctx, _, _| {
@@ -1500,8 +1538,14 @@ pub(super) struct VerticalTabsPanelState {
     detail_overlay_state: Arc<Mutex<VerticalTabsDetailOverlayState>>,
     new_tab_hover_state: MouseStateHandle,
     new_tab_button_state: MouseStateHandle,
-    refresh_sessions_button_mouse_state: MouseStateHandle,
     pub(super) search_query: String,
+    environment_rail_collapsed: RefCell<HashMap<String, bool>>,
+    /// 跨 Environment section 的外层滚动。
+    environment_rail_scroll_state: ClippedScrollStateHandle,
+    /// 非当前 Environment preview viewport 的内层滚动。
+    environment_rail_preview_scroll_states: RefCell<HashMap<String, ClippedScrollStateHandle>>,
+    environment_rail_header_mouse_states: RefCell<HashMap<String, MouseStateHandle>>,
+    environment_rail_header_action_mouse_states: RefCell<HashMap<String, MouseStateHandle>>,
 }
 
 impl Default for VerticalTabsPanelState {
@@ -1527,8 +1571,12 @@ impl Default for VerticalTabsPanelState {
             detail_overlay_state: Arc::new(Mutex::new(VerticalTabsDetailOverlayState::default())),
             new_tab_hover_state: Default::default(),
             new_tab_button_state: Default::default(),
-            refresh_sessions_button_mouse_state: Default::default(),
             search_query: String::new(),
+            environment_rail_collapsed: RefCell::default(),
+            environment_rail_scroll_state: ClippedScrollStateHandle::default(),
+            environment_rail_preview_scroll_states: RefCell::default(),
+            environment_rail_header_mouse_states: RefCell::default(),
+            environment_rail_header_action_mouse_states: RefCell::default(),
         }
     }
 }
@@ -1537,6 +1585,20 @@ impl VerticalTabsPanelState {
     #[cfg(feature = "integration_tests")]
     pub(super) fn integration_session_navigator_keyboard_cursor_is_set(&self) -> bool {
         self.session_navigator_keyboard_cursor.borrow().is_some()
+    }
+
+    pub(super) fn toggle_environment_rail_section(&self, navigation_key: &str) {
+        let mut collapsed = self.environment_rail_collapsed.borrow_mut();
+        let entry = collapsed.entry(navigation_key.to_owned()).or_insert(false);
+        *entry = !*entry;
+    }
+
+    pub(super) fn environment_rail_section_collapsed(&self, navigation_key: &str) -> bool {
+        self.environment_rail_collapsed
+            .borrow()
+            .get(navigation_key)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Reconcile the index-addressed WarpUI list only when the canonical
@@ -1551,8 +1613,12 @@ impl VerticalTabsPanelState {
         let query_changed = current_viewport.query != self.search_query;
         let keyboard_cursor_changed =
             current_viewport.keyboard_cursor != *self.session_navigator_keyboard_cursor.borrow();
-        let inline_rename_changed = current_viewport
-            .inline_rename_input_changed(workspace.renaming_workspace_session_identity.as_ref());
+        let inline_rename_changed = current_viewport.inline_rename_input_changed(
+            workspace
+                .renaming_workspace_session
+                .as_ref()
+                .map(|rename| &rename.identity),
+        );
         drop(current_viewport);
         if self
             .session_navigator_model_revision
@@ -2128,8 +2194,8 @@ impl VerticalTabsPanelState {
 const CONTROL_BAR_VERTICAL_PADDING: f32 = 4.;
 const CONTROL_BAR_SPACING: f32 = 4.;
 const SEARCH_ICON_SIZE: f32 = 12.;
-const SEARCH_BAR_HEIGHT: f32 = 24.;
-const CONTROL_BAR_BUTTON_RADIUS: Radius = Radius::Pixels(4.);
+const SEARCH_BAR_HEIGHT: f32 = 30.;
+const CONTROL_BAR_BUTTON_RADIUS: Radius = Radius::Pixels(6.);
 const SPLIT_BUTTON_HEIGHT: f32 = SEARCH_BAR_HEIGHT;
 pub(super) const VERTICAL_TABS_ADD_TAB_POSITION_ID: &str = "vertical_tabs_add_tab_button";
 
@@ -2225,6 +2291,7 @@ fn render_control_bar(
     let appearance = Appearance::as_ref(app);
     let theme = appearance.theme();
     let sub_text = theme.sub_text_color(theme.background());
+    let metrics = session_sidebar_surface_metrics();
 
     let search_icon = ConstrainedBox::new(WarpIcon::Search.to_warpui_icon(sub_text).finish())
         .with_width(SEARCH_ICON_SIZE)
@@ -2243,6 +2310,7 @@ fn render_control_bar(
     let text_input =
         SavePosition::new(text_input, SESSION_NAVIGATOR_SEARCH_INPUT_POSITION_ID).finish();
 
+    // 原版扁平搜索条：图标 + 输入，无独立描边容器（与左栏其它 chrome 一致）。
     let search_bar = Flex::row()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
@@ -2251,7 +2319,6 @@ fn render_control_bar(
         .with_child(Shrinkable::new(1., text_input).finish())
         .finish();
 
-    let refresh_sessions_button = render_refresh_sessions_button(state, workspace, appearance);
     let new_tab_button = render_new_tab_button(state, workspace, appearance, app);
 
     Container::new(
@@ -2260,14 +2327,13 @@ fn render_control_bar(
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(CONTROL_BAR_SPACING)
             .with_child(Shrinkable::new(1., search_bar).finish())
-            .with_child(refresh_sessions_button)
             .with_child(new_tab_button)
             .finish(),
     )
     .with_padding(
         Padding::uniform(CONTROL_BAR_VERTICAL_PADDING)
-            .with_left(GROUP_HORIZONTAL_PADDING)
-            .with_right(GROUP_HORIZONTAL_PADDING),
+            .with_left(metrics.content_pad_left)
+            .with_right(metrics.content_pad_right),
     )
     .finish()
 }
@@ -2323,68 +2389,6 @@ fn render_detail_kind_badge_icon(
             typed.icon().to_warpui_icon(fill).finish()
         }
     }
-}
-
-fn render_refresh_sessions_button(
-    state: &VerticalTabsPanelState,
-    workspace: &Workspace,
-    appearance: &Appearance,
-) -> Box<dyn Element> {
-    let theme = appearance.theme();
-    let sub_text = theme.sub_text_color(theme.background());
-    let is_refreshing = workspace.is_workspace_sessions_refreshing();
-    let icon_fill = if is_refreshing {
-        theme.main_text_color(theme.accent())
-    } else {
-        sub_text
-    };
-    let tooltip_text = workspace.workspace_sessions_refresh_tooltip();
-    let ui_builder = appearance.ui_builder().clone();
-
-    Hoverable::new(
-        state.refresh_sessions_button_mouse_state.clone(),
-        move |hover_state| {
-            let icon = ConstrainedBox::new(WarpIcon::Refresh.to_warpui_icon(icon_fill).finish())
-                .with_width(16.)
-                .with_height(16.)
-                .finish();
-            let background = if is_refreshing {
-                ThemeFill::Solid(theme.accent().into())
-            } else if hover_state.is_hovered() {
-                internal_colors::fg_overlay_2(theme)
-            } else {
-                ThemeFill::Solid(ColorU::transparent_black())
-            };
-
-            let button_container = Container::new(icon)
-                .with_padding(Padding::uniform(2.))
-                .with_background(background)
-                .with_corner_radius(CornerRadius::with_all(CONTROL_BAR_BUTTON_RADIUS))
-                .finish();
-
-            if hover_state.is_hovered() {
-                let tooltip = ui_builder.tool_tip(tooltip_text.clone()).build().finish();
-                let mut stack = Stack::new().with_child(button_container);
-                stack.add_positioned_overlay_child(
-                    tooltip,
-                    OffsetPositioning::offset_from_parent(
-                        vec2f(0., 4.),
-                        ParentOffsetBounds::WindowByPosition,
-                        ParentAnchor::BottomMiddle,
-                        ChildAnchor::TopMiddle,
-                    ),
-                );
-                stack.finish()
-            } else {
-                button_container
-            }
-        },
-    )
-    .on_click(|ctx, _, _| {
-        ctx.dispatch_typed_action(WorkspaceAction::RefreshWorkspaceSessions);
-    })
-    .with_cursor(Cursor::PointingHand)
-    .finish()
 }
 
 fn render_new_tab_button(
@@ -2476,6 +2480,522 @@ fn render_new_tab_button(
     .finish()
 }
 
+const ENVIRONMENT_RAIL_PANEL_HEIGHT_ESTIMATE: f32 = 720.0;
+
+fn environment_session_counts_for_rail(
+    workspace: &Workspace,
+    navigation_key: &str,
+    is_current: bool,
+) -> EnvironmentSessionCounts {
+    let sessions = if is_current {
+        workspace
+            .committed_session_navigator_model()
+            .map(|model| model.sessions.clone())
+            .unwrap_or_default()
+    } else {
+        workspace.session_navigator_preview_sessions(navigation_key)
+    };
+    let live = sessions
+        .iter()
+        .filter(|session| session.is_live_container())
+        .count();
+    EnvironmentSessionCounts {
+        live,
+        total: sessions.len(),
+    }
+}
+
+fn render_environment_rail_section_header(
+    state: &VerticalTabsPanelState,
+    workspace: &Workspace,
+    section: &EnvironmentRailSection,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    let theme = appearance.theme();
+    let metrics = session_sidebar_surface_metrics();
+    let dot = lifecycle_dot_color(section.lifecycle_state.clone());
+    let label_color = if section.is_current {
+        theme.main_text_color(theme.background())
+    } else {
+        theme.sub_text_color(theme.background())
+    };
+    let weight = if section.is_current {
+        Weight::Semibold
+    } else {
+        Weight::Normal
+    };
+    let navigation_key = section.navigation_key.clone();
+    let authority_key = section.authority_key.clone();
+    let is_refreshing = workspace.is_environment_sessions_refreshing(&authority_key);
+    let refresh_availability = section.refresh_availability;
+    let shows_refresh =
+        refresh_availability != EnvironmentSessionRefreshAvailability::Unavailable || is_refreshing;
+    let refresh_enabled =
+        refresh_availability == EnvironmentSessionRefreshAvailability::Ready && !is_refreshing;
+    let supports_disconnect = section.supports_disconnect;
+    let supports_connect = section.supports_connect;
+    let issue = section.issue.clone();
+    let refresh_tooltip = workspace.environment_sessions_refresh_tooltip(&authority_key);
+    let connect_tooltip = workspace.environment_connect_tooltip(&authority_key);
+    let ui_builder = appearance.ui_builder().clone();
+    let label = section.label.clone();
+    let trailing = section.trailing.clone();
+    let ui_font = appearance.ui_font_family();
+
+    let header_mouse = state
+        .environment_rail_header_mouse_states
+        .borrow_mut()
+        .entry(navigation_key.clone())
+        .or_default()
+        .clone();
+    let (refresh_mouse, connect_mouse, disconnect_mouse) = {
+        let mut action_mouse_states = state
+            .environment_rail_header_action_mouse_states
+            .borrow_mut();
+        let refresh = action_mouse_states
+            .entry(format!("refresh:{navigation_key}"))
+            .or_default()
+            .clone();
+        let connect = action_mouse_states
+            .entry(format!("connect:{navigation_key}"))
+            .or_default()
+            .clone();
+        let disconnect = action_mouse_states
+            .entry(format!("disconnect:{navigation_key}"))
+            .or_default()
+            .clone();
+        (refresh, connect, disconnect)
+    };
+    let collapse_key = navigation_key;
+
+    let header = Hoverable::new(header_mouse, move |hover| {
+        let render_action_button = |mouse_state: MouseStateHandle,
+                                    icon: WarpIcon,
+                                    tooltip_text: String,
+                                    active: bool,
+                                    enabled: bool,
+                                    action: WorkspaceAction| {
+            let icon_color = if active {
+                theme.main_text_color(theme.accent())
+            } else if !enabled {
+                theme.disabled_text_color(theme.background())
+            } else {
+                theme.sub_text_color(theme.background())
+            };
+            let ui_builder = ui_builder.clone();
+            let button = Hoverable::new(mouse_state, move |button_hover| {
+                let icon = ConstrainedBox::new(icon.to_warpui_icon(icon_color).finish())
+                    .with_width(11.)
+                    .with_height(11.)
+                    .finish();
+                let mut container = Container::new(icon)
+                    .with_padding(Padding::uniform(4.))
+                    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
+                if active {
+                    container = container.with_background(theme.accent());
+                } else if enabled && button_hover.is_hovered() {
+                    container = container.with_background(internal_colors::fg_overlay_2(theme));
+                }
+                let button = ConstrainedBox::new(container.finish())
+                    .with_width(20.)
+                    .with_height(20.)
+                    .finish();
+                if button_hover.is_hovered() {
+                    let tooltip = ui_builder.tool_tip(tooltip_text.clone()).build().finish();
+                    let mut stack = Stack::new().with_child(button);
+                    stack.add_positioned_overlay_child(
+                        tooltip,
+                        OffsetPositioning::offset_from_parent(
+                            vec2f(0., 4.),
+                            ParentOffsetBounds::WindowByPosition,
+                            ParentAnchor::BottomMiddle,
+                            ChildAnchor::TopMiddle,
+                        ),
+                    );
+                    stack.finish()
+                } else {
+                    button
+                }
+            });
+            let button = if enabled {
+                button.with_cursor(Cursor::PointingHand).finish()
+            } else {
+                button.finish()
+            };
+            if enabled {
+                EventHandler::new(button)
+                    .on_left_mouse_down(move |ctx, _, _| {
+                        ctx.dispatch_typed_action(action.clone());
+                        DispatchEventResult::StopPropagation
+                    })
+                    .finish()
+            } else {
+                EventHandler::new(button)
+                    .on_left_mouse_down(|_, _, _| DispatchEventResult::StopPropagation)
+                    .finish()
+            }
+        };
+
+        let identity_cluster = Flex::row()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(6.)
+            .with_child(render_restored_session_status_dot(dot, 7.))
+            .with_child(
+                Shrinkable::new(
+                    1.,
+                    Text::new_inline(label.clone(), ui_font, 12.)
+                        .with_color(label_color.into())
+                        .with_style(Properties::default().weight(weight))
+                        .with_clip(ClipConfig::end())
+                        .finish(),
+                )
+                .finish(),
+            )
+            .finish();
+
+        let mut accessory_cluster = Flex::row()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(6.);
+        if let Some(issue) = issue.as_ref() {
+            let color = match issue.kind {
+                EnvironmentRailIssueKind::HelperUpdateRequired
+                | EnvironmentRailIssueKind::DiscoverySourceMissing => theme.ui_warning_color(),
+                EnvironmentRailIssueKind::ConnectionFailed
+                | EnvironmentRailIssueKind::DiscoveryFailed => theme.ui_error_color(),
+            };
+            accessory_cluster.add_child(
+                Text::new_inline(issue.label.clone(), ui_font, 9.5)
+                    .with_color(color.into())
+                    .finish(),
+            );
+        }
+        if !trailing.is_empty() {
+            accessory_cluster.add_child(
+                Text::new_inline(trailing.clone(), ui_font, 10.5)
+                    .with_color(theme.sub_text_color(theme.background()).into())
+                    .finish(),
+            );
+        }
+        let action_count =
+            shows_refresh as usize + supports_connect as usize + supports_disconnect as usize;
+        if action_count > 0 {
+            if hover.is_hovered() || is_refreshing || supports_connect {
+                let mut actions = Flex::row()
+                    .with_main_axis_size(MainAxisSize::Min)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_spacing(2.);
+                if shows_refresh {
+                    actions.add_child(render_action_button(
+                        refresh_mouse.clone(),
+                        WarpIcon::Refresh,
+                        refresh_tooltip.clone(),
+                        is_refreshing,
+                        refresh_enabled,
+                        WorkspaceAction::RefreshEnvironmentSessions {
+                            authority_key: authority_key.clone(),
+                        },
+                    ));
+                }
+                if supports_connect {
+                    actions.add_child(render_action_button(
+                        connect_mouse.clone(),
+                        WarpIcon::Link,
+                        connect_tooltip.clone(),
+                        false,
+                        true,
+                        WorkspaceAction::ConnectEnvironment {
+                            authority_key: authority_key.clone(),
+                        },
+                    ));
+                }
+                if supports_disconnect && hover.is_hovered() {
+                    actions.add_child(render_action_button(
+                        disconnect_mouse.clone(),
+                        WarpIcon::X,
+                        "断开并从侧栏移除环境".to_owned(),
+                        false,
+                        true,
+                        WorkspaceAction::DisconnectEnvironment {
+                            authority_key: authority_key.clone(),
+                        },
+                    ));
+                } else if supports_disconnect {
+                    actions.add_child(
+                        ConstrainedBox::new(Empty::new().finish())
+                            .with_width(20.)
+                            .with_height(20.)
+                            .finish(),
+                    );
+                }
+                accessory_cluster.add_child(actions.finish());
+            } else {
+                let action_width =
+                    action_count as f32 * 20.0 + action_count.saturating_sub(1) as f32 * 2.0;
+                accessory_cluster.add_child(
+                    ConstrainedBox::new(Empty::new().finish())
+                        .with_width(action_width)
+                        .with_height(20.)
+                        .finish(),
+                );
+            }
+        }
+        let row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(6.)
+            .with_child(Shrinkable::new(1., identity_cluster).finish())
+            .with_child(accessory_cluster.finish());
+        let mut container = Container::new(row.finish())
+            .with_padding(
+                Padding::uniform(4.)
+                    .with_left(metrics.content_pad_left)
+                    .with_right(metrics.content_pad_right),
+            )
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)));
+        if hover.is_hovered() {
+            container = container.with_background(internal_colors::fg_overlay_1(theme));
+        }
+        container.finish()
+    })
+    .with_defer_events_to_children()
+    .on_click(move |ctx, _, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::ToggleEnvironmentRailSection {
+            navigation_key: collapse_key.clone(),
+        });
+    })
+    .with_cursor(Cursor::PointingHand)
+    .finish();
+
+    ConstrainedBox::new(header)
+        .with_height(RAIL_ENV_HEADER_HEIGHT)
+        .finish()
+}
+
+fn count_current_navigator_rows(state: &VerticalTabsPanelState) -> usize {
+    state
+        .session_navigator_viewport
+        .borrow()
+        .items
+        .iter()
+        .map(|item| match item {
+            SessionNavigatorViewportItem::Unit(unit) => unit.rows.len(),
+            SessionNavigatorViewportItem::Empty { .. } => 0,
+        })
+        .sum::<usize>()
+}
+
+fn environment_rail_session_is_visible(session: &WorkspaceSessionSnapshot) -> bool {
+    matches!(
+        session.kind,
+        WorkspaceSessionKind::Terminal
+            | WorkspaceSessionKind::AgentTerminal
+            | WorkspaceSessionKind::Welcome
+    )
+}
+
+fn count_environment_rail_preview_rows(workspace: &Workspace, navigation_key: &str) -> usize {
+    workspace
+        .session_navigator_preview_sessions(navigation_key)
+        .iter()
+        .filter(|session| environment_rail_session_is_visible(session))
+        .count()
+}
+
+fn render_environment_rail_preview_viewport(
+    state: &VerticalTabsPanelState,
+    workspace: &Workspace,
+    section: &EnvironmentRailSection,
+    viewport_height: f32,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    let theme = appearance.theme();
+    let sessions = workspace.session_navigator_preview_sessions(&section.navigation_key);
+    let detail_hover = state.detail_hover_state(workspace.window_id);
+    // 与 live Session Navigator unit 同一套间距，禁止 preview 更密。
+    let mut column = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_spacing(GROUP_ITEM_SPACING);
+    for session in sessions
+        .iter()
+        .filter(|session| environment_rail_session_is_visible(session))
+    {
+        let render_identity = SessionNavigatorRowIdentity {
+            row_id: session.id.clone(),
+            environment_navigation_key: section.navigation_key.clone(),
+        };
+        let row_key = render_identity.row_key();
+        let mouse_state = state
+            .session_row_mouse_states
+            .borrow_mut()
+            .entry(row_key)
+            .or_default()
+            .clone();
+        column.add_child(render_restored_session_row(
+            session,
+            None,
+            render_identity,
+            false,
+            false,
+            false,
+            None,
+            false,
+            workspace.workspace_session_title_editor.clone(),
+            mouse_state,
+            DraggableState::default(),
+            String::new(),
+            detail_hover.clone(),
+            RestoredSessionRowActivation::SwitchEnvironment {
+                authority_key: section.authority_key.clone(),
+            },
+            appearance,
+        ));
+    }
+    let padded = Container::new(column.finish())
+        .with_padding(session_sidebar_unit_padding(true, true))
+        .finish();
+    let scroll_key = format!("environment_rail_preview:{}", section.navigation_key);
+    let scroll_handle = state
+        .environment_rail_preview_scroll_states
+        .borrow_mut()
+        .entry(scroll_key)
+        .or_default()
+        .clone();
+    let scrollable = ClippedScrollable::vertical(
+        scroll_handle,
+        padded,
+        ScrollbarWidth::Custom(4.),
+        theme.nonactive_ui_detail().into(),
+        theme.active_ui_detail().into(),
+        ElementFill::None,
+    )
+    .finish();
+    ConstrainedBox::new(scrollable)
+        .with_height(viewport_height.max(RAIL_SESSION_ROW_HEIGHT))
+        .finish()
+}
+
+fn render_environment_rail_panel(
+    state: &VerticalTabsPanelState,
+    workspace: &Workspace,
+    current_sessions: Box<dyn Element>,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let appearance = Appearance::as_ref(app);
+    let theme = appearance.theme();
+    let active_key =
+        ParsedEnvironmentAuthority::parse(&workspace.current_environment_authority_key(app))
+            .navigation_key()
+            .to_owned();
+    let open = workspace.open_environment_snapshots(app);
+    let sections = build_environment_rail_sections(
+        &open,
+        &active_key,
+        |key| state.environment_rail_section_collapsed(key),
+        |authority| workspace.environment_session_refresh_availability(authority, app),
+        |authority| workspace.environment_rail_issue(authority),
+        |key, is_current| environment_session_counts_for_rail(workspace, key, is_current),
+    );
+
+    if sections.is_empty() {
+        return Empty::new().finish();
+    }
+
+    let (before, current, after) = split_rail_sections(sections);
+    let current_row_count = count_current_navigator_rows(state);
+    let preview_row_count = |key: &str| count_environment_rail_preview_rows(workspace, key);
+    let slots = rail_session_viewport_slots(
+        &before,
+        &current,
+        &after,
+        current_row_count,
+        preview_row_count,
+    );
+    let header_count = before.len() + current.is_some() as usize + after.len();
+    let panel_height = app
+        .element_position_by_id_at_last_frame(
+            workspace.window_id,
+            super::VERTICAL_TABS_PANEL_POSITION_ID,
+        )
+        .map(|rect| rect.height())
+        .unwrap_or(ENVIRONMENT_RAIL_PANEL_HEIGHT_ESTIMATE);
+    let available =
+        rail_available_session_area_px(panel_height, rail_search_block_height(), header_count);
+    let plan = rail_session_layout_plan(&slots, panel_height, available);
+    let mut viewport_heights = plan.viewport_heights_px.iter();
+
+    let mut rail = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+
+    for section in before {
+        rail.add_child(render_environment_rail_section_header(
+            state, workspace, &section, appearance,
+        ));
+        if section.collapsed {
+            continue;
+        }
+        let preview_rows = preview_row_count(&section.navigation_key);
+        let viewport_h = section_viewport_layout(&section, preview_rows, &mut viewport_heights);
+        if let Some(height) = viewport_h {
+            let viewport = render_environment_rail_preview_viewport(
+                state, workspace, &section, height, appearance,
+            );
+            rail.add_child(viewport);
+        }
+    }
+
+    if let Some(section) = current {
+        rail.add_child(render_environment_rail_section_header(
+            state, workspace, &section, appearance,
+        ));
+        if !section.collapsed {
+            let viewport_h =
+                section_viewport_layout(&section, current_row_count, &mut viewport_heights);
+            if let Some(height) = viewport_h {
+                // 当前 Environment：自然内容高度、按 section 数量封顶，再交给内层
+                // NewScrollable。外层纵向滚动给无限约束，禁止放 flexible child。
+                rail.add_child(
+                    ConstrainedBox::new(current_sessions)
+                        .with_height(height)
+                        .finish(),
+                );
+            }
+        }
+    }
+
+    for section in after {
+        rail.add_child(render_environment_rail_section_header(
+            state, workspace, &section, appearance,
+        ));
+        if section.collapsed {
+            continue;
+        }
+        let preview_rows = preview_row_count(&section.navigation_key);
+        let viewport_h = section_viewport_layout(&section, preview_rows, &mut viewport_heights);
+        if let Some(height) = viewport_h {
+            let viewport = render_environment_rail_preview_viewport(
+                state, workspace, &section, height, appearance,
+            );
+            rail.add_child(viewport);
+        }
+    }
+
+    // 跨 Environment 外层滚动：多 section 内容超出左栏可视区时可滚动。
+    ClippedScrollable::vertical(
+        state.environment_rail_scroll_state.clone(),
+        rail.finish(),
+        ScrollbarWidth::Custom(4.),
+        theme.nonactive_ui_detail().into(),
+        theme.active_ui_detail().into(),
+        ElementFill::None,
+    )
+    .finish()
+}
+
 fn render_vertical_tabs_panel(
     state: &VerticalTabsPanelState,
     workspace: &Workspace,
@@ -2500,6 +3020,8 @@ fn render_vertical_tabs_panel(
     .with_vertical_scrollbar(ScrollableAppearance::new(ScrollbarWidth::Custom(4.), true))
     .finish();
 
+    let rail_panel = render_environment_rail_panel(state, workspace, scrollable_groups, app);
+
     let panel_content = Flex::column()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
@@ -2509,16 +3031,14 @@ fn render_vertical_tabs_panel(
             &workspace.vertical_tabs_search_input,
             app,
         ))
-        .with_child(Shrinkable::new(1., scrollable_groups).finish())
+        .with_child(Shrinkable::new(1., rail_panel).finish())
         .finish();
 
     let drag_side = match side {
         super::PanelPosition::Left => DragBarSide::Right,
         super::PanelPosition::Right => DragBarSide::Left,
     };
-    let inner = Container::new(panel_content)
-        .with_background(internal_colors::fg_overlay_1(theme))
-        .finish();
+    let inner = Container::new(panel_content).finish();
 
     Resizable::new(state.resizable_state.clone(), inner)
         .with_dragbar_side(drag_side)
@@ -3318,15 +3838,34 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
         content_col.finish()
     };
 
+    let active_pill = ConstrainedBox::new(if props.is_selected {
+        Container::new(Empty::new().finish())
+            .with_background(ThemeFill::Solid(theme.accent().into()))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(1.5)))
+            .finish()
+    } else {
+        Empty::new().finish()
+    })
+    .with_width(SESSION_ACTIVE_PILL_WIDTH)
+    .with_height(SESSION_ACTIVE_PILL_HEIGHT)
+    .finish();
+
     let content = Flex::row()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(icon_alignment)
         .with_spacing(ICON_WITH_STATUS_GAP)
+        .with_child(active_pill)
         .with_child(icon)
         .with_child(Shrinkable::new(1., text_content).finish())
         .finish();
 
-    render_pane_row_element(props, Padding::uniform(8.), true, content, theme)
+    render_pane_row_element(
+        props,
+        Padding::uniform(6.).with_left(6.).with_right(8.),
+        true,
+        content,
+        theme,
+    )
 }
 
 enum TypedPane<'a> {
@@ -4554,7 +5093,7 @@ fn render_summary_pane_kind_icon_circle(
     .with_uniform_padding(padding)
     .with_background(background)
     .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
-        (icon_size + padding * 2.) / 2.,
+        session_sidebar_surface_metrics().icon_radius,
     )))
     .finish()
 }
@@ -4980,9 +5519,9 @@ fn render_vtab_diff_stats_content(
 
 fn render_badge_container(content: Box<dyn Element>, background: ThemeFill) -> Box<dyn Element> {
     Container::new(content)
-        .with_padding(Padding::uniform(1.).with_left(4.).with_right(4.))
+        .with_padding(Padding::uniform(1.5).with_left(5.).with_right(5.))
         .with_background(background)
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(3.)))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.5)))
         .finish()
 }
 
@@ -5825,6 +6364,7 @@ fn render_session_preview_action(
 
 fn render_workspace_session_detail_sidecar_contents(
     session: &WorkspaceSessionSnapshot,
+    xray: Option<&SessionNavigatorXRay>,
     appearance: &Appearance,
 ) -> Box<dyn Element> {
     let theme = appearance.theme();
@@ -5929,6 +6469,31 @@ fn render_workspace_session_detail_sidecar_contents(
     }
     section.add_child(facts.finish());
 
+    if let Some(xray) = xray {
+        let mut xray_section = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Start)
+            .with_spacing(3.)
+            .with_child(
+                Text::new_inline(
+                    format!("关系 X-Ray · {}", xray.presence().label()),
+                    appearance.ui_font_family(),
+                    11.,
+                )
+                .with_color(text_colors.disabled.into())
+                .with_style(Properties::default().weight(Weight::Semibold))
+                .finish(),
+            );
+        for fact in xray.compact_facts() {
+            xray_section = xray_section.with_child(
+                Text::new_inline(fact, appearance.monospace_font_family(), 10.)
+                    .with_color(text_colors.sub.into())
+                    .with_clip(ClipConfig::ellipsis())
+                    .finish(),
+            );
+        }
+        section.add_child(xray_section.finish());
+    }
+
     let delete_label = if is_live {
         crate::t!("workspace-session-preview-exit-delete")
     } else {
@@ -5965,10 +6530,21 @@ fn render_workspace_session_detail_sidecar_contents(
         .with_child(render_session_preview_action(
             delete_label,
             Some(WorkspaceAction::RequestDeleteWorkspaceSession {
-                target: session_target,
+                target: session_target.clone(),
             }),
             appearance,
         ));
+    let secondary_actions = if xray.is_some() {
+        secondary_actions.with_child(render_session_preview_action(
+            "复制 X-Ray".to_owned(),
+            Some(WorkspaceAction::CopyWorkspaceSessionXRay {
+                target: session_target.clone(),
+            }),
+            appearance,
+        ))
+    } else {
+        secondary_actions
+    };
     action_rows = action_rows.with_child(secondary_actions.finish());
     section.add_child(action_rows.finish());
 
@@ -6039,10 +6615,11 @@ fn render_workspace_session_detail_sidecar(
         environment_navigation_key: environment_navigation_key.to_owned(),
     };
 
+    let xray = cfg!(debug_assertions).then(|| workspace.session_navigator_xray(&session, app));
     let scrollable = ConstrainedBox::new(
         ClippedScrollable::vertical(
             state.detail_scroll_state.clone(),
-            render_workspace_session_detail_sidecar_contents(&session, appearance),
+            render_workspace_session_detail_sidecar_contents(&session, xray.as_ref(), appearance),
             ScrollbarWidth::Auto,
             theme.nonactive_ui_detail().into(),
             theme.active_ui_detail().into(),

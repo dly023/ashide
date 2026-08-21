@@ -7,7 +7,7 @@ use warpui::{
     assets::asset_cache::AssetSource,
     elements::{
         CacheOption, ChildAnchor, ConstrainedBox, Container, CornerRadius, Element,
-        Fill as ElementFill, Image, OffsetPositioning, ParentAnchor, ParentElement,
+        Fill as ElementFill, Icon, Image, OffsetPositioning, ParentAnchor, ParentElement,
         ParentOffsetBounds, Radius, Stack,
     },
 };
@@ -16,7 +16,7 @@ use crate::ai::agent::conversation::ConversationStatus;
 use crate::terminal::CLIAgent;
 use crate::themes::theme::Fill as ThemeFill;
 
-/// Sizing configuration for the icon circle and its status badge.
+/// Sizing configuration for the icon plate and its status badge.
 pub(crate) struct IconWithStatusSizing {
     pub(crate) icon_size: f32,
     pub(crate) padding: f32,
@@ -25,9 +25,24 @@ pub(crate) struct IconWithStatusSizing {
     /// The overall constrained size for the stack.
     /// When set, overrides the default `icon_size + padding * 2`.
     pub(crate) overall_size_override: Option<f32>,
-    /// Offset of the status badge from the bottom-right corner of the circle.
+    /// Accent-plate corner radius. When unset, icons render as circles.
+    pub(crate) plate_corner_radius: Option<f32>,
+    /// Offset of the status badge from the bottom-right corner of the plate.
     /// Positive x pushes right, positive y pushes down.
     pub(crate) badge_offset: (f32, f32),
+}
+
+fn plate_corner_radius(sizing: &IconWithStatusSizing) -> f32 {
+    sizing.plate_corner_radius.unwrap_or((sizing.icon_size + sizing.padding * 2.) / 2.)
+}
+
+fn rgb_u32_to_color_u(rgb: u32) -> ColorU {
+    ColorU::new(
+        ((rgb >> 16) & 0xFF) as u8,
+        ((rgb >> 8) & 0xFF) as u8,
+        (rgb & 0xFF) as u8,
+        255,
+    )
 }
 
 const DEEPSEEK_LOGO_PATH: &str = "bundled/svg/deepseek.svg";
@@ -97,7 +112,7 @@ pub(crate) fn render_icon_with_status(
                 .with_uniform_padding(sizing.padding)
                 .with_background(internal_colors::fg_overlay_2(theme))
                 .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
-                    (sizing.icon_size + sizing.padding * 2.) / 2.,
+                    plate_corner_radius(sizing),
                 )))
                 .finish()
         }
@@ -110,7 +125,7 @@ pub(crate) fn render_icon_with_status(
                 .with_uniform_padding(sizing.padding)
                 .with_background(internal_colors::fg_overlay_2(theme))
                 .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
-                    (sizing.icon_size + sizing.padding * 2.) / 2.,
+                    plate_corner_radius(sizing),
                 )))
                 .finish()
         }
@@ -127,15 +142,15 @@ pub(crate) fn render_icon_with_status(
             .with_width(sizing.icon_size)
             .with_height(sizing.icon_size)
             .finish();
-            let circle = Container::new(inner)
+            let plate = Container::new(inner)
                 .with_uniform_padding(sizing.padding)
                 .with_background(theme.background())
                 .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
-                    (sizing.icon_size + sizing.padding * 2.) / 2.,
+                    plate_corner_radius(sizing),
                 )))
                 .finish();
             render_with_optional_status_badge(
-                circle,
+                plate,
                 status.as_ref(),
                 sizing,
                 theme,
@@ -143,31 +158,44 @@ pub(crate) fn render_icon_with_status(
             )
         }
         IconWithStatusVariant::CLIAgent { agent, status } => {
-            let brand_color = agent
-                .brand_color()
-                .unwrap_or(ColorU::new(100, 100, 100, 255));
-            let icon_color = agent.brand_icon_color();
-            let icon_element =
-                render_cli_agent_logo(agent, WarpThemeFill::Solid(icon_color), sub_text);
-            let inner = ConstrainedBox::new(icon_element)
-                .with_width(sizing.icon_size)
-                .with_height(sizing.icon_size)
-                .finish();
-            let background: ElementFill =
-                if matches!(agent, CLIAgent::DeepSeek | CLIAgent::Antigravity) {
-                    theme.background().into()
+            let glyph_size = sizing.icon_size * (9. / 16.);
+            let (icon_element, background): (Box<dyn Element>, ElementFill) =
+                if agent.uses_multicolor_agent_logo() {
+                    (
+                        render_cli_agent_logo(agent, sub_text, sub_text),
+                        theme.background().into(),
+                    )
+                } else if let Some(accent_rgb) = agent.accent_rgb() {
+                    let glyph = rgb_u32_to_color_u(agent.glyph_rgb());
+                    (
+                        Icon::new(agent.icon_path(), glyph).finish(),
+                        ThemeFill::Solid(rgb_u32_to_color_u(accent_rgb)).into(),
+                    )
                 } else {
-                    ThemeFill::Solid(brand_color).into()
+                    let icon_color = agent.brand_icon_color();
+                    (
+                        render_cli_agent_logo(agent, WarpThemeFill::Solid(icon_color), sub_text),
+                        ThemeFill::Solid(
+                            agent
+                                .brand_color()
+                                .unwrap_or(ColorU::new(100, 100, 100, 255)),
+                        )
+                        .into(),
+                    )
                 };
-            let circle = Container::new(inner)
+            let inner = ConstrainedBox::new(icon_element)
+                .with_width(glyph_size)
+                .with_height(glyph_size)
+                .finish();
+            let plate = Container::new(inner)
                 .with_uniform_padding(sizing.padding)
                 .with_background(background)
                 .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
-                    (sizing.icon_size + sizing.padding * 2.) / 2.,
+                    plate_corner_radius(sizing),
                 )))
                 .finish();
             render_with_optional_status_badge(
-                circle,
+                plate,
                 status.as_ref(),
                 sizing,
                 theme,

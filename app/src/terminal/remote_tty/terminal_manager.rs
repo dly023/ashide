@@ -35,6 +35,9 @@ pub struct TerminalManager {
     _event_loop: ModelHandle<EventLoop>,
 
     view: ViewHandle<TerminalView>,
+    runtime_kind: crate::terminal::TerminalRuntimeKind,
+    runtime_ref: Option<String>,
+    shutdown_requested: bool,
 }
 
 impl TerminalManager {
@@ -87,6 +90,15 @@ impl TerminalManager {
         environment_runtime_pty: Option<EnvironmentRuntimePtyConfig>,
         ctx: &mut AppContext,
     ) -> ModelHandle<Box<dyn crate::terminal::TerminalManager>> {
+        let runtime_kind = if environment_runtime_pty.is_some() {
+            crate::terminal::TerminalRuntimeKind::RemoteEnvironmentPty
+        } else {
+            crate::terminal::TerminalRuntimeKind::RemoteProxy
+        };
+        let runtime_ref = environment_runtime_pty
+            .as_ref()
+            .map(|config| config.session_id.as_u64().to_string());
+
         // Create all the necessary channels we need for communication.
         let (wakeups_tx, wakeups_rx) = async_channel::unbounded();
         let (events_tx, events_rx) = async_channel::unbounded();
@@ -187,6 +199,9 @@ impl TerminalManager {
             view,
             _pty_controller: pty_controller,
             _event_loop: event_loop,
+            runtime_kind,
+            runtime_ref,
+            shutdown_requested: false,
         };
 
         ctx.add_model(|_ctx| {
@@ -236,9 +251,18 @@ impl super::super::TerminalManager for TerminalManager {
     }
 
     fn shutdown_pty(&mut self, app: &mut AppContext) {
+        self.shutdown_requested = true;
         self._pty_controller.update(app, |controller, ctx| {
             controller.shutdown_pty(ctx);
         });
+    }
+
+    fn runtime_diagnostics(&self) -> crate::terminal::TerminalRuntimeDiagnostics {
+        remote_terminal_runtime_diagnostics(
+            self.runtime_kind,
+            self.runtime_ref.clone(),
+            self.shutdown_requested,
+        )
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -247,6 +271,46 @@ impl super::super::TerminalManager for TerminalManager {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+fn remote_terminal_runtime_diagnostics(
+    kind: crate::terminal::TerminalRuntimeKind,
+    runtime_ref: Option<String>,
+    shutdown_requested: bool,
+) -> crate::terminal::TerminalRuntimeDiagnostics {
+    crate::terminal::TerminalRuntimeDiagnostics {
+        kind,
+        runtime_ref,
+        process_id: None,
+        shutdown_requested,
+    }
+}
+
+#[cfg(test)]
+mod runtime_diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn remote_terminal_runtime_diagnostics_exposes_session_ref_and_shutdown() {
+        let live = remote_terminal_runtime_diagnostics(
+            crate::terminal::TerminalRuntimeKind::RemoteEnvironmentPty,
+            Some("9001".to_owned()),
+            false,
+        );
+        assert_eq!(
+            live.kind,
+            crate::terminal::TerminalRuntimeKind::RemoteEnvironmentPty
+        );
+        assert_eq!(live.runtime_ref.as_deref(), Some("9001"));
+        assert!(!live.shutdown_requested);
+
+        let stopping = remote_terminal_runtime_diagnostics(
+            crate::terminal::TerminalRuntimeKind::RemoteEnvironmentPty,
+            Some("9001".to_owned()),
+            true,
+        );
+        assert!(stopping.shutdown_requested);
     }
 }
 
